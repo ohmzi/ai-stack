@@ -126,49 +126,30 @@ class Pipe:
             "dec":  {"class_type": "VAEDecode", "inputs": {"samples": ["samp", 0], "vae": ["vae", 0]}},
             "save": {"class_type": "SaveWEBM", "inputs": {"images": ["dec", 0], "filename_prefix": "owui_anim", "codec": "vp9", "fps": 24.0, "crf": 28.0}},
         }
-        # Retries ONCE on GPU OOM: OpenWebUI can invoke the 20GB chat LLM (e.g. to generate the
-        # chat title on a brand-new chat) AFTER our job has started, stealing the VRAM out from
-        # under the sampler. Freeing again and resubmitting wins the second time.
-        err = None
-        for attempt in (1, 2):
+        try:
+            pid = requests.post(f"{self.comfy}/prompt", json={"prompt": wf}, timeout=30).json()["prompt_id"]
+        except Exception as e:
+            return f"⚠️ Animate backend error: {e}"
+        for _ in range(600):
             try:
-                pid = requests.post(f"{self.comfy}/prompt", json={"prompt": wf}, timeout=30).json()["prompt_id"]
-            except Exception as e:
-                return f"⚠️ Animate backend error: {e}"
-            err = None
-            for _ in range(600):
-                try:
-                    h = requests.get(f"{self.comfy}/history/{pid}", timeout=15).json()
-                except Exception:
-                    time.sleep(2); continue
-                if pid not in h:
-                    time.sleep(2); continue
-                st = h[pid].get("status", {})
-                if st.get("status_str") == "error":
-                    d = next((m[1] for m in st.get("messages", []) if m[0] == "execution_error"), {})
-                    err = (f"{d.get('exception_type', 'Error')} in {d.get('node_type', '?')} — "
-                           f"{str(d.get('exception_message', ''))[:200]}")
-                    break
+                h = requests.get(f"{self.comfy}/history/{pid}", timeout=15).json()
+            except Exception:
+                time.sleep(2); continue
+            if pid in h:
                 items = h[pid].get("outputs", {}).get("save", {}).get("images", [])
                 if not items:
+                    st = h[pid].get("status", {})
+                    if st.get("status_str") == "error":
+                        return "⚠️ Animation failed (the character image may not be full-body, or VRAM ran out). Try a clear full-body character."
                     return "Animation finished but produced no output."
                 it = items[0]
                 data = requests.get(f"{self.comfy}/view",
                     params={"filename": it["filename"], "subfolder": it.get("subfolder", ""), "type": "output"}, timeout=120).content
                 b64 = base64.b64encode(data).decode()
-                # `video` is NOT a markdown block-level tag, so the opening <video> tag MUST sit
-                # alone on its line (CommonMark "type-7" HTML block) so marked keeps the whole
-                # element in ONE html token; OpenWebUI reads src from the text between the tags.
-                return (f'<video controls loop autoplay muted playsinline style="max-width:100%;border-radius:8px">\n'
-                        f'data:video/webm;base64,{b64}\n</video>\n\n*🎭 {label} animation*')
-            if err is None:
-                return "⏳ Timed out waiting for the animation."
-            if attempt == 1 and "OutOfMemory" in err:
-                self._free_vram()
-                continue
-            break
-        return (f"⚠️ Animation failed: {err}\n\n"
-                f"(If this isn't a memory error, the character image may not be full-body — try a clear full-body character.)")
+                return (f'<video controls loop autoplay muted playsinline style="max-width:100%;border-radius:8px">'
+                        f'<source src="data:video/webm;base64,{b64}" type="video/webm"></video>\n\n*🎭 {label} animation*')
+            time.sleep(2)
+        return "⏳ Timed out waiting for the animation."
 
     async def pipe(self, body: dict):
         text, img = self._parse(body.get("messages", []))

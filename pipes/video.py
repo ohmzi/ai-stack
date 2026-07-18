@@ -1,13 +1,13 @@
 """
 title: Video
 author: local
-version: 0.1.0
+version: 0.2.0
 required_open_webui_version: 0.5.0
-description: Text-to-video with Wan 2.1 14B via local ComfyUI. Type a description, get a short clip. Slow (~7-15 min/clip). Async so the UI stays responsive; auto-frees GPU VRAM.
+description: Text-to-video with Wan 2.2 TI2V 5B via local ComfyUI. Type a description, get a short clip (~90s, 480p). Async so the UI stays responsive; auto-frees GPU VRAM.
 """
 import asyncio, requests, time, base64, random
 
-WIDTH, HEIGHT, LENGTH, STEPS, FPS = 832, 480, 49, 20, 16  # 480p, ~3s @16fps
+WIDTH, HEIGHT, LENGTH, STEPS, FPS = 832, 480, 49, 20, 24  # 480p, ~2s @24fps (bump WIDTH/HEIGHT to 1280x704 for 720p)
 
 
 class Pipe:
@@ -27,17 +27,20 @@ class Pipe:
 
     def _generate(self, prompt: str):
         self._free_vram()
+        neg = ("色调艳丽，过曝，静态，细节模糊不清，字幕，风格，作品，画作，画面，静止，整体发灰，最差质量，低质量，"
+               "JPEG压缩残留，丑陋的，残缺的，多余的手指，画得不好的手部，画得不好的脸部，畸形的，毁容的，"
+               "形态畸形的肢体，手指融合，静止不动的画面，杂乱的背景，三条腿，背景人很多，倒着走")
         wf = {
-          "1": {"class_type": "UNETLoader", "inputs": {"unet_name": "wan2.1_t2v_14B_fp8_e4m3fn.safetensors", "weight_dtype": "default"}},
-          "2": {"class_type": "CLIPLoader", "inputs": {"clip_name": "umt5_xxl_fp8_e4m3fn_scaled.safetensors", "type": "wan"}},
-          "3": {"class_type": "VAELoader", "inputs": {"vae_name": "wan_2.1_vae.safetensors"}},
+          "1": {"class_type": "UNETLoader", "inputs": {"unet_name": "wan2.2_ti2v_5B_fp16.safetensors", "weight_dtype": "default"}},
+          "2": {"class_type": "CLIPLoader", "inputs": {"clip_name": "umt5_xxl_fp8_e4m3fn_scaled.safetensors", "type": "wan", "device": "default"}},
+          "3": {"class_type": "VAELoader", "inputs": {"vae_name": "wan2.2_vae.safetensors"}},
           "4": {"class_type": "CLIPTextEncode", "inputs": {"text": prompt, "clip": ["2", 0]}},
-          "5": {"class_type": "CLIPTextEncode", "inputs": {"text": "blurry, low quality, distorted, watermark, text, static, jpeg artifacts", "clip": ["2", 0]}},
-          "6": {"class_type": "WanImageToVideo", "inputs": {"positive": ["4", 0], "negative": ["5", 0], "vae": ["3", 0], "width": WIDTH, "height": HEIGHT, "length": LENGTH, "batch_size": 1}},
+          "5": {"class_type": "CLIPTextEncode", "inputs": {"text": neg, "clip": ["2", 0]}},
+          "6": {"class_type": "Wan22ImageToVideoLatent", "inputs": {"vae": ["3", 0], "width": WIDTH, "height": HEIGHT, "length": LENGTH, "batch_size": 1}},
           "7": {"class_type": "ModelSamplingSD3", "inputs": {"model": ["1", 0], "shift": 8.0}},
-          "8": {"class_type": "KSampler", "inputs": {"seed": random.randint(0, 2**31), "steps": STEPS, "cfg": 6.0,
+          "8": {"class_type": "KSampler", "inputs": {"seed": random.randint(0, 2**31), "steps": STEPS, "cfg": 5.0,
                     "sampler_name": "uni_pc", "scheduler": "simple", "denoise": 1.0,
-                    "model": ["7", 0], "positive": ["6", 0], "negative": ["6", 1], "latent_image": ["6", 2]}},
+                    "model": ["7", 0], "positive": ["4", 0], "negative": ["5", 0], "latent_image": ["6", 0]}},
           "9": {"class_type": "VAEDecode", "inputs": {"samples": ["8", 0], "vae": ["3", 0]}},
           "10": {"class_type": "SaveWEBM", "inputs": {"images": ["9", 0], "filename_prefix": "owui_vid", "codec": "vp9", "fps": float(FPS), "crf": 32.0}},
         }
