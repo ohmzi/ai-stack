@@ -19,11 +19,30 @@ class Pipe:
         return [{"id": "wan", "name": "Video"}]
 
     def _free_vram(self):
+        """Unload Ollama models and BLOCK until the GPU is actually released (unload is async)."""
         try:
             for m in requests.get(f"{self.ollama}/api/ps", timeout=10).json().get("models", []):
                 requests.post(f"{self.ollama}/api/generate", json={"model": m["name"], "keep_alive": 0}, timeout=20)
         except Exception:
             pass
+        for _ in range(30):  # wait up to ~30s until nothing is loaded
+            try:
+                if not requests.get(f"{self.ollama}/api/ps", timeout=10).json().get("models", []):
+                    break
+            except Exception:
+                break
+            time.sleep(1)
+        time.sleep(2)  # grace for the CUDA allocator to hand memory back
+
+    @staticmethod
+    def _job_error(entry):
+        """Human-readable error if the ComfyUI job failed, else None."""
+        st = entry.get("status", {})
+        if st.get("status_str") != "error":
+            return None
+        d = next((m[1] for m in st.get("messages", []) if m[0] == "execution_error"), {})
+        return (f"{d.get('exception_type', 'Error')} in {d.get('node_type', '?')} — "
+                f"{str(d.get('exception_message', ''))[:200]}")
 
     def _generate(self, prompt: str):
         self._free_vram()
@@ -44,17 +63,27 @@ class Pipe:
           "9": {"class_type": "VAEDecode", "inputs": {"samples": ["8", 0], "vae": ["3", 0]}},
           "10": {"class_type": "SaveWEBM", "inputs": {"images": ["9", 0], "filename_prefix": "owui_vid", "codec": "vp9", "fps": float(FPS), "crf": 32.0}},
         }
-        try:
-            pid = requests.post(f"{self.comfy}/prompt", json={"prompt": wf}, timeout=30).json()["prompt_id"]
-        except Exception as e:
-            return f"⚠️ Video backend unreachable: {e}"
-        # video gen is slow: poll up to ~40 min
-        for _ in range(800):
+        # Retries ONCE on GPU OOM: OpenWebUI can invoke the 20GB chat LLM (e.g. to generate the
+        # chat title on a brand-new chat) AFTER our job has started, stealing the VRAM out from
+        # under the sampler. Freeing again and resubmitting wins the second time.
+        err = None
+        for attempt in (1, 2):
             try:
-                h = requests.get(f"{self.comfy}/history/{pid}", timeout=15).json()
-            except Exception:
-                time.sleep(3); continue
-            if pid in h:
+                pid = requests.post(f"{self.comfy}/prompt", json={"prompt": wf}, timeout=30).json()["prompt_id"]
+            except Exception as e:
+                return f"⚠️ Video backend unreachable: {e}"
+            err = None
+            # video gen is slow: poll up to ~40 min
+            for _ in range(800):
+                try:
+                    h = requests.get(f"{self.comfy}/history/{pid}", timeout=15).json()
+                except Exception:
+                    time.sleep(3); continue
+                if pid not in h:
+                    time.sleep(3); continue
+                err = self._job_error(h[pid])
+                if err:
+                    break
                 out = h[pid].get("outputs", {}).get("10", {})
                 vids = out.get("images", []) or out.get("gifs", [])
                 if not vids:
@@ -64,11 +93,20 @@ class Pipe:
                     params={"filename": v["filename"], "subfolder": v.get("subfolder", ""), "type": "output"},
                     timeout=60).content
                 b64 = base64.b64encode(data).decode()
-                return (f'<video controls loop muted playsinline style="max-width:100%;border-radius:8px">'
-                        f'<source src="data:video/webm;base64,{b64}" type="video/webm"></video>\n\n'
+                # `video` is NOT a markdown block-level tag, so the opening <video> tag MUST sit
+                # alone on its line (CommonMark "type-7" HTML block) for marked to keep the whole
+                # element in ONE html token. OpenWebUI then extracts the src from the text between
+                # the tags (/<video[^>]*>([\s\S]*?)<\/video>/). Put base64 on its own line too.
+                return (f'<video controls loop muted playsinline style="max-width:100%;border-radius:8px">\n'
+                        f'data:video/webm;base64,{b64}\n</video>\n\n'
                         f'*🎬 {prompt[:80]}*')
-            time.sleep(3)
-        return "⏳ Timed out waiting for the video (over 40 min)."
+            if err is None:
+                return "⏳ Timed out waiting for the video (over 40 min)."
+            if attempt == 1 and "OutOfMemory" in err:
+                self._free_vram()
+                continue
+            break
+        return f"⚠️ Video generation failed: {err}"
 
     def _text(self, messages):
         for m in reversed(messages):

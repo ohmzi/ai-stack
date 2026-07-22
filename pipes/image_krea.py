@@ -1,9 +1,9 @@
 """
 title: Krea 2 Image
 author: local
-version: 1.0.0
+version: 1.2.0
 required_open_webui_version: 0.5.0
-description: Photoreal images with Krea 2 Turbo via local ComfyUI. Optional trained LoRA, a local prompt-enhancer (Gemma), an optional extra refinement pass, and gentle img2img edits (attach an image + describe a small change → it stays ~90% the same). Non-blocking (async); auto-frees GPU VRAM.
+description: Photoreal images with Krea 2 Turbo via local ComfyUI. Optional trained LoRA, a local prompt-enhancer (Gemma), an optional extra refinement pass, and instruction edits via Qwen-Image-Edit (vague follow-ups are rewritten by Gemma into explicit instructions the editor actually follows). Non-blocking (async); auto-frees GPU VRAM.
 """
 import asyncio, requests, time, base64, random, re
 from pydantic import BaseModel, Field
@@ -34,6 +34,17 @@ class Pipe:
             default="best",
             description="Instruction-edit quality: 'best' (~2 min, full model, most realistic/blended), "
                         "'balanced' (~40 s, 8-step), or 'fast' (~30 s, 4-step, can look a bit CGI).",
+        )
+        EDIT_REWRITE: bool = Field(
+            default=True,
+            description="Use the local Gemma model to rewrite vague edit requests ('make him a bit older') "
+                        "into explicit instructions the editor follows much better, plus a negative prompt.",
+        )
+        VERIFY: bool = Field(
+            default=True,
+            description="After generating, check the image against your request with the local vision model "
+                        "and auto-retry once with corrections if it doesn't match (adds ~30-60 s, more when "
+                        "a retry triggers).",
         )
         EDIT_DENOISE: float = Field(
             default=0.30,
@@ -167,8 +178,15 @@ class Pipe:
         sys = (
             "You are a prompt engineer for the Krea 2 photorealistic image model. Rewrite the user's idea "
             "as ONE vivid, richly detailed image prompt: subject, setting, lighting, mood, composition, "
-            "style, and camera/lens where useful. Keep it under 70 words. Do not add people or text that "
-            "were not implied. Output ONLY the prompt text — no preamble, no quotes, no lists."
+            "style, and camera/lens where useful. The user's explicit specifications are HARD requirements: "
+            "every person, count, age, gender, ethnicity, object and relationship they name MUST be kept "
+            "exactly — none added, dropped, or aged up or down. Describe EACH named person as their own "
+            "clause with concrete age cues (e.g. '10 year old son' becomes 'their 10-year-old son, a "
+            "school-age boy a head shorter than the adults'; '20 year old daughter' becomes 'their "
+            "20-year-old daughter, a young adult woman'), repeating the ethnicity for each person, and "
+            "state the total number of people ('exactly four people'). When several people are specified "
+            "keep every face in sharp focus — no shallow depth of field. Keep it under 100 words. "
+            "Output ONLY the prompt text — no preamble, no quotes, no lists."
         )
         try:
             r = requests.post(
@@ -260,6 +278,116 @@ class Pipe:
         t = re.sub(r"^\s*(in|on|for)\s+(this|the)\s+(image|picture|photo|pic)[,:]?\s*", "", t, flags=re.I)
         return t.strip() or (text or "").strip()
 
+    def _edit_boost(self, text):
+        """'you barely changed it / still looks young' retry phrasing → push the sampler harder."""
+        return bool(re.search(
+            r"\b(still|barely|hardly|try again|not enough|no change|"
+            r"didn'?t (?:change|work|do|listen)|doesn'?t (?:look|seem)|"
+            r"(?:way|much) (?:more|older|younger|bigger|smaller))\b", (text or "").lower()))
+
+    _EDIT_REWRITE_SYS = (
+        "You rewrite photo-editing requests into instructions for the Qwen-Image-Edit model, which sees "
+        "the photo alongside your instruction. You are given the conversation so far; rewrite ONLY the "
+        "last user request. Rules: ONE imperative instruction under 80 words. Use absolute, concrete "
+        "visual terms for the target state, never relative wording — e.g. \"make the son a bit older, "
+        "like 18\" becomes \"Change the boy into an 18-year-old young man: adult height and build, mature "
+        "facial features, light stubble, defined jawline.\" Name the subject as it appears in the photo "
+        "(\"the boy\", \"the young woman on the right\"), never \"it\" or \"him\". The editor is "
+        "conservative and under-applies changes, so state the change emphatically. When transforming a "
+        "person, RESTATE the traits that must survive the change — ethnicity and skin tone (take them "
+        "from the conversation, e.g. Pakistani/South Asian), hair colour, family resemblance, clothing — "
+        "the editor drifts to a generic different-looking person if you don't. For age changes name the "
+        "life stage and bracket it: \"a 10-year-old school-age girl — clearly older than a toddler, "
+        "clearly younger than a teenager\". End the instruction with what must stay unchanged (identity, "
+        "clothing, background, lighting) unless the user asked to change those too. Then output a second "
+        "line: \"AVOID: \" plus 3-8 comma-separated visual traits the RESULT must not contain — for age "
+        "changes bracket BOTH sides (e.g. for 10 years old: toddler, preschooler, teenager, adult woman) "
+        "and add ethnicity-drift terms when ethnicity must be kept (e.g. East Asian features). Output "
+        "EXACTLY two lines:\nEDIT: <instruction>\nAVOID: <traits>"
+    )
+
+    def _edit_context(self, msgs, limit=8):
+        """Compact 'user:/assistant:' transcript (media stripped) so the rewriter can resolve
+        references like 'the son' from earlier turns."""
+        lines = []
+        for m in (msgs or [])[-limit:]:
+            role, c = m.get("role"), m.get("content", "")
+            if role not in ("user", "assistant"):
+                continue
+            if isinstance(c, list):
+                t = " ".join(p.get("text", "") for p in c if isinstance(p, dict) and p.get("type") == "text")
+                if any(isinstance(p, dict) and p.get("type") == "image_url" for p in c):
+                    t = (t + " [attached image]").strip()
+            else:
+                t = str(c or "")
+            t = re.sub(r"!\[[^\]]*\]\(data:image/[^)]+\)", "[generated image]", t)
+            t = re.sub(r"data:image/[^;]+;base64,[A-Za-z0-9+/=]+", "[image]", t)
+            t = t.strip()
+            if t:
+                lines.append(f"{role}: {t[:300]}")
+        return "\n".join(lines)
+
+    def _comfy_free(self):
+        """Ask ComfyUI to unload its models so the 22GB vision model can load for the QA check."""
+        try:
+            requests.post(f"{self.comfy}/free", json={"unload_models": True, "free_memory": True}, timeout=30)
+        except Exception:
+            pass
+        time.sleep(2)
+
+    _VERIFY_SYS = (
+        "You are a strict image QA checker. You get a user's request and the generated photo. Check ONLY "
+        "hard requirements: person count, each person's apparent age bracket, gender, ethnicity, named "
+        "objects/actions/setting. Ignore style, lighting and quality. Reply with EXACTLY two lines:\n"
+        "OK: yes or no\n"
+        "FIX: if no — ONE concrete imperative sentence stating what to correct, naming each subject "
+        "precisely by appearance and position in the photo (e.g. 'Remove the boy in the blue shirt, "
+        "second from the right'); if yes — the word none"
+    )
+
+    def _verify_image(self, request_text, img_b64):
+        """(ok, fix) — Gemma-vision compares the produced image to what was asked. Fails open."""
+        try:
+            r = requests.post(
+                f"{self.ollama}/api/generate",
+                json={"model": self.enhancer_model, "system": self._VERIFY_SYS,
+                      "prompt": f"Request: {request_text}\nDoes the photo satisfy every hard requirement?",
+                      "images": [img_b64], "stream": False, "think": False, "keep_alive": 0,
+                      "options": {"temperature": 0.1, "num_predict": 150}},
+                timeout=300,
+            )
+            out = (r.json().get("response") or "").strip()
+            ok = not re.search(r"^\s*OK:\s*no\b", out, re.I | re.M)
+            m = re.search(r"^\s*FIX:\s*(.+)$", out, re.I | re.M)
+            fix = (m.group(1).strip() if m else "")
+            return ok, ("" if fix.lower().startswith("none") else fix)
+        except Exception:
+            return True, ""
+
+    def _enhance_edit(self, instruction, msgs):
+        """(explicit_instruction, negative) via the local LLM. Vague relative asks ('a bit older')
+        under-move the identity-preserving editor; explicit absolute target states move it properly.
+        Falls back to the original instruction and no negative."""
+        ctx = self._edit_context(msgs)
+        prompt = (f"Conversation:\n{ctx}\n\nRewrite the last user request."
+                  if ctx else f"Request: {instruction}\n\nRewrite this request.")
+        try:
+            r = requests.post(
+                f"{self.ollama}/api/generate",
+                json={"model": self.enhancer_model, "system": self._EDIT_REWRITE_SYS, "prompt": prompt,
+                      "stream": False, "think": False, "keep_alive": 0,
+                      "options": {"temperature": 0.4, "num_predict": 220}},
+                timeout=180,
+            )
+            out = (r.json().get("response") or "").strip()
+            edit = re.search(r"^\s*EDIT:\s*(.+)$", out, re.I | re.M)
+            avoid = re.search(r"^\s*AVOID:\s*(.+)$", out, re.I | re.M)
+            if edit:
+                return edit.group(1).strip(), (avoid.group(1).strip() if avoid else "")
+        except Exception:
+            pass
+        return instruction, ""
+
     # Edit quality presets. 'best' drops the speed LoRA and runs the full model → most realistic /
     # best-blended result (new elements match the scene's lighting & grain); slower.
     EDIT_QUALITY = {
@@ -268,10 +396,15 @@ class Pipe:
         "fast":     {"lightning": True,  "steps": 4,  "cfg": 1.0},
     }
 
-    def _build_edit_wf(self, instruction: str, ref_name: str, seed: int, quality: str):
+    def _build_edit_wf(self, instruction: str, ref_name: str, seed: int, quality: str,
+                       negative: str = "", boost: bool = False):
         """Qwen-Image-Edit 2509: follow a text INSTRUCTION on the attached image, changing only what's
-        asked and keeping the rest identical. A true instruction editor (img2img cannot do this)."""
-        q = self.EDIT_QUALITY.get(quality, self.EDIT_QUALITY["best"])
+        asked and keeping the rest identical. A true instruction editor (img2img cannot do this).
+        negative: traits that must NOT appear (only effective when cfg > 1, i.e. 'best').
+        boost: raise cfg/steps when the user says the last edit under-delivered."""
+        q = dict(self.EDIT_QUALITY.get(quality, self.EDIT_QUALITY["best"]))
+        if boost and q["cfg"] > 1.0:
+            q["cfg"], q["steps"] = 6.0, q["steps"] + 4
         wf = {
             "u":    {"class_type": "UnetLoaderGGUF", "inputs": {"unet_name": self.edit_unet}},
             "msaf": {"class_type": "ModelSamplingAuraFlow", "inputs": {"model": ["u", 0], "shift": 3.0}},
@@ -281,7 +414,7 @@ class Pipe:
             "ld":   {"class_type": "LoadImage", "inputs": {"image": ref_name}},
             "sc":   {"class_type": "FluxKontextImageScale", "inputs": {"image": ["ld", 0]}},
             "pos":  {"class_type": "TextEncodeQwenImageEditPlus", "inputs": {"clip": ["clip", 0], "vae": ["v", 0], "image1": ["sc", 0], "prompt": instruction}},
-            "neg":  {"class_type": "TextEncodeQwenImageEditPlus", "inputs": {"clip": ["clip", 0], "vae": ["v", 0], "image1": ["sc", 0], "prompt": ""}},
+            "neg":  {"class_type": "TextEncodeQwenImageEditPlus", "inputs": {"clip": ["clip", 0], "vae": ["v", 0], "image1": ["sc", 0], "prompt": negative}},
             "enc":  {"class_type": "VAEEncode", "inputs": {"pixels": ["sc", 0], "vae": ["v", 0]}},
             "k":    {"class_type": "KSampler", "inputs": {"seed": seed, "steps": q["steps"], "cfg": q["cfg"], "sampler_name": "euler",
                         "scheduler": "simple", "denoise": 1.0, "model": ["cfgn", 0], "positive": ["pos", 0],
@@ -294,19 +427,24 @@ class Pipe:
             wf["msaf"]["inputs"]["model"] = ["lora", 0]
         return wf
 
-    def _generate(self, text: str, ref_b64):
+    def _generate(self, text: str, ref_b64, msgs=None):
         v = self.valves
         editing = ref_b64 is not None
-        self._free_vram()
 
+        # LLM prompt work happens BEFORE _free_vram so Gemma isn't unloaded and reloaded.
         if editing:
             # Attached image → instruction edit with Qwen-Image-Edit (changes only what you asked).
+            instruction = self._edit_instruction(text) if text else "improve the overall quality, keep everything else the same"
+            negative = ""
+            if v.EDIT_REWRITE and text:
+                instruction, negative = self._enhance_edit(instruction, msgs)
+            self._free_vram()
             try:
                 ref_name = self._upload(ref_b64)
             except Exception as e:
                 return f"⚠️ Could not upload the image to edit: {e}"
-            instruction = self._edit_instruction(text) if text else "improve the overall quality, keep everything else the same"
-            wf = self._build_edit_wf(instruction, ref_name, random.randint(0, 2**31), v.EDIT_QUALITY)
+            wf = self._build_edit_wf(instruction, ref_name, random.randint(0, 2**31), v.EDIT_QUALITY,
+                                     negative=negative, boost=self._edit_boost(text))
             cap = instruction[:60]
         else:
             # No image → fresh text-to-image with Krea 2 Turbo (+ enhancer / optional LoRA).
@@ -315,31 +453,87 @@ class Pipe:
                 prompt = self._enhance(prompt)
             if v.LORA_FILE.strip() and v.TRIGGER.strip():
                 prompt = f"{v.TRIGGER.strip()}, {prompt}"
+            self._free_vram()
             wf = self._build_wf(prompt, None, random.randint(0, 2**31))
             cap = (text or prompt)[:60]
 
-        try:
-            pid = requests.post(f"{self.comfy}/prompt", json={"prompt": wf}, timeout=30).json()["prompt_id"]
-        except Exception as e:
-            return f"⚠️ Image backend unreachable: {e}"
-        for _ in range(900):
+        data, err = self._run_wf(wf)
+        if err:
+            return err
+        # Vision QA: does the result actually match what was asked? Up to two correction rounds
+        # (models drop hard constraints — person counts, ages — surprisingly often, and a single
+        # correction can itself overshoot, e.g. removing two kids instead of one).
+        if v.VERIFY and text:
+            check = instruction if editing else text  # the goal the result is judged against
+            cur = instruction if editing else None    # accumulates corrections for edit retries
+            for _round in (1, 2):
+                self._comfy_free()
+                ok, fix = self._verify_image(check, base64.b64encode(data).decode())
+                if ok or not fix:
+                    break
+                if editing:
+                    cur = f"{cur} IMPORTANT correction: {fix}"
+                    wf = self._build_edit_wf(cur, ref_name, random.randint(0, 2**31),
+                                             v.EDIT_QUALITY, negative=negative, boost=True)
+                else:
+                    # A fresh re-roll at cfg 1 usually repeats the mistake (e.g. an extra child) —
+                    # instead FIX the produced image with the instruction editor, which is precisely
+                    # good at "remove the extra X / add the missing Y" and keeps the scene.
+                    try:
+                        fix_ref = self._upload(base64.b64encode(data).decode())
+                    except Exception:
+                        break
+                    wf = self._build_edit_wf(f"{fix} Keep everyone else and the scene exactly the same.",
+                                             fix_ref, random.randint(0, 2**31), v.EDIT_QUALITY)
+                self._free_vram()
+                data2, err2 = self._run_wf(wf)
+                if data2 is None:
+                    break
+                data = data2
+        return f"![{cap}](data:image/png;base64,{base64.b64encode(data).decode()})"
+
+    def _run_wf(self, wf):
+        """Submit + poll one workflow. Returns (png_bytes, None) or (None, user_facing_error).
+        Retries ONCE on GPU OOM: OpenWebUI can invoke the 20GB chat LLM (e.g. to generate the
+        chat title on a brand-new chat) AFTER our job has started, stealing the VRAM out from
+        under the sampler. Freeing again and resubmitting wins the second time."""
+        err = None
+        for attempt in (1, 2):
             try:
-                h = requests.get(f"{self.comfy}/history/{pid}", timeout=15).json()
-            except Exception:
-                time.sleep(1); continue
-            if pid in h:
+                pid = requests.post(f"{self.comfy}/prompt", json={"prompt": wf}, timeout=30).json()["prompt_id"]
+            except Exception as e:
+                return None, f"⚠️ Image backend unreachable: {e}"
+            err = None
+            for _ in range(900):
+                try:
+                    h = requests.get(f"{self.comfy}/history/{pid}", timeout=15).json()
+                except Exception:
+                    time.sleep(1); continue
+                if pid not in h:
+                    time.sleep(1); continue
+                st = h[pid].get("status", {})
+                if st.get("status_str") == "error":
+                    d = next((m[1] for m in st.get("messages", []) if m[0] == "execution_error"), {})
+                    err = (f"{d.get('exception_type', 'Error')} in {d.get('node_type', '?')} — "
+                           f"{str(d.get('exception_message', ''))[:200]}")
+                    break
                 imgs = h[pid].get("outputs", {}).get("s", {}).get("images", [])
                 if not imgs:
-                    return "Job finished but no image was produced."
+                    return None, "Job finished but no image was produced."
                 im = imgs[0]
                 data = requests.get(
                     f"{self.comfy}/view",
                     params={"filename": im["filename"], "subfolder": im.get("subfolder", ""), "type": "output"},
                     timeout=60,
                 ).content
-                return f"![{cap}](data:image/png;base64,{base64.b64encode(data).decode()})"
-            time.sleep(1)
-        return "⏳ Timed out waiting for the image."
+                return data, None
+            if err is None:
+                return None, "⏳ Timed out waiting for the image."
+            if attempt == 1 and "OutOfMemory" in err:
+                self._free_vram()
+                continue
+            break
+        return None, f"⚠️ Image generation failed: {err}"
 
     async def pipe(self, body: dict):
         msgs = body.get("messages", [])
@@ -353,7 +547,7 @@ class Pipe:
         # follow-up is an edit — robust to phrasing like "have them use chopsticks".)
         if text and not ref and not self._is_image_request(text):
             ref = self._find_recent_image(msgs) or self._recent.get(cid)
-        result = await asyncio.to_thread(self._generate, text, ref)
+        result = await asyncio.to_thread(self._generate, text, ref, msgs)
         b64 = self._extract_b64(result)
         if b64:  # remember it so the next "make it bigger" can edit it
             self._recent[cid] = b64
