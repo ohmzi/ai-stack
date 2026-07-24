@@ -43,12 +43,8 @@ class Pipe:
         VERIFY: bool = Field(
             default=True,
             description="After generating, check the image against your request with the local vision model "
-                        "and auto-retry once with corrections if it doesn't match (adds ~30-60 s, more when "
+                        "and run up to two correction rounds if it doesn't match (adds ~30-60 s, more when "
                         "a retry triggers).",
-        )
-        EDIT_DENOISE: float = Field(
-            default=0.30,
-            description="(legacy, unused — edits now use Qwen-Image-Edit, not img2img).",
         )
         WIDTH: int = Field(default=1024, description="Default image width for text-to-image.")
         HEIGHT: int = Field(default=1024, description="Default image height for text-to-image.")
@@ -57,7 +53,11 @@ class Pipe:
         self.valves = self.Valves()
         self.comfy = "http://localhost:8188"
         self.ollama = "http://localhost:11434"
-        self.enhancer_model = "gemma4:31b"
+        # Model split mirrors the Assistant pipe: dolphin (text-only) for prompt expansion / edit
+        # rewrite, gemma4 (vision) only for the image QA check — so a pure text task no longer
+        # evicts a resident dolphin to load the 19.9 GB vision model.
+        self.text_model = "dolphin-venice:24b"
+        self.vision_model = "gemma4:31b"
         self._recent = {}  # chat_id -> last produced image b64 (for follow-up edits without re-upload)
         # Krea 2 (text-to-image) model files
         self.unet = "krea2/krea2_turbo_fp8_scaled.safetensors"
@@ -134,12 +134,23 @@ class Pipe:
             return True
         return False
 
-    def _is_edit_request(self, t):
-        t = t.lower()
-        return bool(re.search(
-            r"\b(edit|change|replace|remove|delete|erase|swap|add|put|turn|make|give|"
-            r"recolou?r|colou?r|adjust|retouch|modify|update|fix|crop|rotate|blur|bigger|smaller|"
-            r"larger|zoom|brighter|darker|more|less|get rid of|without|instead of|into a|to a)\b", t))
+    # Small-talk / question guards so a 'thanks!' or 'what's in this?' after an image doesn't get
+    # silently turned into a ~2-minute Qwen-Image-Edit job (this pipe has no chat/vision path).
+    _SMALLTALK = re.compile(
+        r"^(nice|cool|thanks|thank|great|awesome|perfect|love|lovely|beautiful|amazing|good|ok|okay|"
+        r"k|lol+|haha+|wow|hmm+|nvm|never\s?mind|yes|yeah|yep|yup|no|nope|nah|sure|cheers|wonderful|"
+        r"gorgeous|stunning|fantastic|excellent|brilliant)\b", re.I)
+    _QUESTION = re.compile(
+        r"^(what'?s?|why|how|who|whom|whose|where|when|which|is|are|am|was|were|do|does|did|can|could|"
+        r"would|should|will|have|has|had|may|might|tell\s+me|explain|describe|list|suggest|recommend|"
+        r"caption|analy[sz]e|identify|read|translate|compare|define|summari[sz]e|write|compose|draft)\b", re.I)
+
+    def _is_smalltalk(self, t):
+        return bool(self._SMALLTALK.match((t or "").strip()))
+
+    def _is_question(self, t):
+        t = (t or "").strip()
+        return t.endswith("?") or bool(self._QUESTION.match(t))
 
     def _upload(self, img_b64):
         raw = base64.b64decode(img_b64)
@@ -176,27 +187,32 @@ class Pipe:
     def _enhance(self, prompt: str) -> str:
         """Expand a short idea into a vivid image prompt using the local LLM. Falls back to the original."""
         sys = (
-            "You are a prompt engineer for the Krea 2 photorealistic image model. Rewrite the user's idea "
+            "You are a prompt engineer for the Krea 2 image model. Rewrite the user's idea "
             "as ONE vivid, richly detailed image prompt: subject, setting, lighting, mood, composition, "
             "style, and camera/lens where useful. The user's explicit specifications are HARD requirements: "
-            "every person, count, age, gender, ethnicity, object and relationship they name MUST be kept "
-            "exactly — none added, dropped, or aged up or down. Describe EACH named person as their own "
-            "clause with concrete age cues (e.g. '10 year old son' becomes 'their 10-year-old son, a "
-            "school-age boy a head shorter than the adults'; '20 year old daughter' becomes 'their "
-            "20-year-old daughter, a young adult woman'), repeating the ethnicity for each person, and "
-            "state the total number of people ('exactly four people'). When several people are specified "
-            "keep every face in sharp focus — no shallow depth of field. Keep it under 100 words. "
-            "Output ONLY the prompt text — no preamble, no quotes, no lists."
+            "every person, count, age, gender, ethnicity, object, relationship AND art style they name "
+            "MUST be kept exactly — none added, dropped, or aged up or down. If the user names an art "
+            "style or medium ('animated picture', 'cartoon', 'anime', 'watercolor', 'oil painting', "
+            "'pixel art' …), OPEN the prompt by stating that style emphatically (e.g. 'A vibrant 3D "
+            "animated cartoon-style illustration, stylized characters with expressive faces, NOT "
+            "photorealistic') and use that style's vocabulary throughout — no camera or lens language. "
+            "Only when no style is named, write it photorealistic with camera/lens detail. Describe EACH "
+            "named person as their own clause with concrete age cues (e.g. '10 year old son' becomes "
+            "'their 10-year-old son, a school-age boy a head shorter than the adults'; '20 year old "
+            "daughter' becomes 'their 20-year-old daughter, a young adult woman'), repeating the "
+            "ethnicity for each person, and state the total number of people ('exactly four people'). "
+            "When several people are specified keep every face in sharp focus — no shallow depth of "
+            "field. Keep it under 100 words. Output ONLY the prompt text — no preamble, no quotes, no lists."
         )
         try:
             r = requests.post(
                 f"{self.ollama}/api/generate",
                 json={
-                    "model": self.enhancer_model,
+                    "model": self.text_model,  # dolphin (text-only) — no vision model needed to expand a prompt
                     "system": sys,
                     "prompt": prompt,
                     "stream": False,
-                    "think": False,  # gemma4 is a thinking model; disable so it answers directly
+                    "think": False,  # answer directly, no reasoning preamble
                     "keep_alive": 0,  # unload right after so VRAM frees for the image model
                     "options": {"temperature": 0.7, "num_predict": 220},
                 },
@@ -208,7 +224,9 @@ class Pipe:
             return prompt
 
     # ---------- workflow ----------
-    def _build_wf(self, prompt: str, ref_name, seed: int):
+    def _build_wf(self, prompt: str, seed: int):
+        # Text-to-image only. (Instruction edits go through _build_edit_wf with Qwen-Image-Edit;
+        # the old Krea img2img reference path was retired, so there is no ref_name branch here.)
         v = self.valves
         wf = {
             "u": {"class_type": "UNETLoader", "inputs": {"unet_name": self.unet, "weight_dtype": "default"}},
@@ -237,21 +255,11 @@ class Pipe:
             model_ref = ["lora", 0]
         wf["k"]["inputs"]["model"] = model_ref
 
-        # Latent source: img2img (gentle edit) when a reference is attached, else a blank canvas
-        if ref_name:
-            wf["ld"] = {"class_type": "LoadImage", "inputs": {"image": ref_name}}
-            wf["sc"] = {
-                "class_type": "ImageScaleToTotalPixels",
-                "inputs": {"image": ["ld", 0], "upscale_method": "lanczos", "megapixels": 1.0, "resolution_steps": 1},
-            }
-            wf["enc"] = {"class_type": "VAEEncode", "inputs": {"pixels": ["sc", 0], "vae": ["v", 0]}}
-            wf["k"]["inputs"]["latent_image"] = ["enc", 0]
-            wf["k"]["inputs"]["denoise"] = v.EDIT_DENOISE
-        else:
-            wf["lat"] = {"class_type": "EmptySD3LatentImage", "inputs": {"width": v.WIDTH, "height": v.HEIGHT, "batch_size": 1}}
+        # Blank-canvas latent (text-to-image).
+        wf["lat"] = {"class_type": "EmptySD3LatentImage", "inputs": {"width": v.WIDTH, "height": v.HEIGHT, "batch_size": 1}}
 
-        # Optional extra refinement pass (2x hi-res fix). Skipped in edit mode to keep edits gentle.
-        if v.EXTRA_PASS and not ref_name:
+        # Optional extra refinement pass (2x hi-res fix).
+        if v.EXTRA_PASS:
             wf["up"] = {
                 "class_type": "ImageScaleToTotalPixels",
                 "inputs": {"image": ["d", 0], "upscale_method": "lanczos", "megapixels": 2.0, "resolution_steps": 1},
@@ -336,13 +344,18 @@ class Pipe:
         time.sleep(2)
 
     _VERIFY_SYS = (
-        "You are a strict image QA checker. You get a user's request and the generated photo. Check ONLY "
+        "You are a strict image QA checker. You get a user's request and the generated image. Check ONLY "
         "hard requirements: person count, each person's apparent age bracket, gender, ethnicity, named "
-        "objects/actions/setting. Ignore style, lighting and quality. Reply with EXACTLY two lines:\n"
+        "objects/actions/setting — including the key object a named activity implies ('playing basketball' "
+        "requires a visible basketball, 'having dinner' requires food on the table) — and, ONLY when the "
+        "request names an art style or medium ('animated picture', 'cartoon', 'anime', 'watercolor' …), "
+        "that the image is rendered in that style (a photorealistic photo when an animated/cartoon style "
+        "was asked for is a FAIL). When no style is named, ignore style, lighting and quality. Reply with "
+        "EXACTLY two lines:\n"
         "OK: yes or no\n"
         "FIX: if no — ONE concrete imperative sentence stating what to correct, naming each subject "
-        "precisely by appearance and position in the photo (e.g. 'Remove the boy in the blue shirt, "
-        "second from the right'); if yes — the word none"
+        "precisely by appearance and position in the image (e.g. 'Remove the boy in the blue shirt, "
+        "second from the right'; 'Redraw the whole scene as a 3D animated cartoon'); if yes — the word none"
     )
 
     def _verify_image(self, request_text, img_b64):
@@ -350,8 +363,8 @@ class Pipe:
         try:
             r = requests.post(
                 f"{self.ollama}/api/generate",
-                json={"model": self.enhancer_model, "system": self._VERIFY_SYS,
-                      "prompt": f"Request: {request_text}\nDoes the photo satisfy every hard requirement?",
+                json={"model": self.vision_model, "system": self._VERIFY_SYS,
+                      "prompt": f"Request: {request_text}\nDoes the image satisfy every hard requirement?",
                       "images": [img_b64], "stream": False, "think": False, "keep_alive": 0,
                       "options": {"temperature": 0.1, "num_predict": 150}},
                 timeout=300,
@@ -374,7 +387,7 @@ class Pipe:
         try:
             r = requests.post(
                 f"{self.ollama}/api/generate",
-                json={"model": self.enhancer_model, "system": self._EDIT_REWRITE_SYS, "prompt": prompt,
+                json={"model": self.text_model, "system": self._EDIT_REWRITE_SYS, "prompt": prompt,
                       "stream": False, "think": False, "keep_alive": 0,
                       "options": {"temperature": 0.4, "num_predict": 220}},
                 timeout=180,
@@ -454,7 +467,7 @@ class Pipe:
             if v.LORA_FILE.strip() and v.TRIGGER.strip():
                 prompt = f"{v.TRIGGER.strip()}, {prompt}"
             self._free_vram()
-            wf = self._build_wf(prompt, None, random.randint(0, 2**31))
+            wf = self._build_wf(prompt, random.randint(0, 2**31))
             cap = (text or prompt)[:60]
 
         data, err = self._run_wf(wf)
@@ -471,10 +484,13 @@ class Pipe:
                 ok, fix = self._verify_image(check, base64.b64encode(data).decode())
                 if ok or not fix:
                     break
+                # Correction rebuilds force 'best' quality (cfg≥4, ~24 steps) + boost regardless of the
+                # EDIT_QUALITY valve — at 'balanced'/'fast' (cfg 1) the boost is skipped and the
+                # negative/AVOID conditioning is mathematically inert, so a retry would re-fail identically.
                 if editing:
                     cur = f"{cur} IMPORTANT correction: {fix}"
                     wf = self._build_edit_wf(cur, ref_name, random.randint(0, 2**31),
-                                             v.EDIT_QUALITY, negative=negative, boost=True)
+                                             "best", negative=negative, boost=True)
                 else:
                     # A fresh re-roll at cfg 1 usually repeats the mistake (e.g. an extra child) —
                     # instead FIX the produced image with the instruction editor, which is precisely
@@ -484,7 +500,7 @@ class Pipe:
                     except Exception:
                         break
                     wf = self._build_edit_wf(f"{fix} Keep everyone else and the scene exactly the same.",
-                                             fix_ref, random.randint(0, 2**31), v.EDIT_QUALITY)
+                                             fix_ref, random.randint(0, 2**31), "best", boost=True)
                 self._free_vram()
                 data2, err2 = self._run_wf(wf)
                 if data2 is None:
@@ -546,6 +562,13 @@ class Pipe:
         # request still starts a new image. (This model always outputs an image, so any non-generate
         # follow-up is an edit — robust to phrasing like "have them use chopsticks".)
         if text and not ref and not self._is_image_request(text):
+            # A 'thanks!'/'perfect' or a question is NOT an edit — acknowledge/redirect in one line
+            # instead of running a Qwen edit on the last image.
+            if self._is_smalltalk(text):
+                return "🙂 Glad you like it! Tell me any change and I'll edit it, or describe a new image."
+            if self._is_question(text):
+                return ("I'm the image generator/editor — tell me a change to make (e.g. 'make the sky "
+                        "sunset orange') or describe a new image. To chat about a picture, ask the main Assistant.")
             ref = self._find_recent_image(msgs) or self._recent.get(cid)
         result = await asyncio.to_thread(self._generate, text, ref, msgs)
         b64 = self._extract_b64(result)
