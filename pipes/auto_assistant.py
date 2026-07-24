@@ -674,10 +674,22 @@ class Pipe:
                     time.sleep(2); continue
             if err is None:
                 return None, f"⏳ Timed out waiting for the {kind.lower()}.", {}
-            if attempt == 1 and "OutOfMemory" in err:
+            if attempt == 1 and ("OutOfMemory" in err or "out of memory" in err.lower()):
+                # ComfyUI-side OOM: unload BOTH the ollama models AND ComfyUI's own models before the
+                # single retry (the original only freed ollama, so a ComfyUI residual/allocator issue
+                # re-failed identically).
                 self._free_vram()
+                self._comfy_free()
                 continue
             break
+        # A phantom OOM with the card actually near-empty means ComfyUI wedged its CUDA allocator
+        # (seen after long uptime / a prior OOM) — no amount of freeing recovers it, only a restart.
+        if err and "OutOfMemory" in err:
+            free = self._vram_free_gib()
+            if free is not None and free > 8:
+                return None, (f"⚠️ {kind} failed: ComfyUI reported out-of-memory but {free:.0f} GB was "
+                              f"free — its GPU allocator is wedged (common after long uptime). Fix: "
+                              f"`docker restart comfyui`, then try again."), {}
         return None, f"⚠️ {kind} generation failed: {err}", {}
 
     def _enhance(self, prompt):
