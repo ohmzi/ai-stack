@@ -184,10 +184,46 @@ class Pipe:
             break
         return f"⚠️ Image generation failed: {err}"
 
-    async def pipe(self, body: dict):
+    # ---------- native OpenWebUI status line (progress + timing) ----------
+    async def _status(self, emitter, description, done=False):
+        if emitter:
+            try:
+                await emitter({"type": "status", "data": {"description": description, "done": done}})
+            except Exception:
+                pass
+
+    @staticmethod
+    def _fmt_dur(secs):
+        s = int(round(secs))
+        return f"{s}s" if s < 60 else f"{s // 60}m {s % 60:02d}s"
+
+    async def _tracked(self, emitter, label, coro):
+        start = time.monotonic()
+        await self._status(emitter, f"{label}…")
+        task = asyncio.ensure_future(coro)
+        while True:
+            try:
+                res = await asyncio.wait_for(asyncio.shield(task), timeout=2.0)
+                return res, time.monotonic() - start
+            except asyncio.TimeoutError:
+                await self._status(emitter, f"{label}… {self._fmt_dur(time.monotonic() - start)}")
+
+    async def _finish(self, emitter, result, verb, elapsed, detail):
+        if isinstance(result, str) and result.startswith("!["):
+            await self._status(emitter, f"{verb} in {self._fmt_dur(elapsed)} · {detail}", done=True)
+        else:
+            await self._status(emitter, "", done=True)
+        return result
+
+    async def pipe(self, body: dict, __event_emitter__=None):
+        emitter = __event_emitter__
         text, ref = self._parse(body.get("messages", []))
         if not text and not ref:
             return "Type what you'd like me to create (and optionally attach a reference image)."
         if not text:
             text = "photorealistic, highly detailed, sharp focus, natural lighting"
-        return await asyncio.to_thread(self._generate, text, ref)
+        editing = ref is not None
+        label = "Editing image" if editing else "Generating image"
+        result, el = await self._tracked(emitter, label, asyncio.to_thread(self._generate, text, ref))
+        detail = "Lustify SDXL img2img · 30 steps" if editing else "Lustify SDXL · 1024×1024 · 30 steps"
+        return await self._finish(emitter, result, "Edited" if editing else "Generated", el, detail)
