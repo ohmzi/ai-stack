@@ -36,7 +36,8 @@ class Pipe:
     def __init__(self):
         self.comfy = "http://localhost:8188"
         self.ollama = "http://localhost:11434"
-        self.chat_model = "gemma4:31b"
+        self.chat_model = "dolphin-venice:24b"
+        self.vision_model = "gemma4:31b"  # dolphin is text-only; gemma handles image QA + vision chat
         self.task_model = "gemma3:1b"  # tiny helper for prompt merging (never hogs VRAM)
         self._recent = {}        # chat_id -> last produced image b64 (for follow-up edits without re-upload)
         self._recent_video = {}  # chat_id -> (prompt, seed) of the last produced video (for follow-up changes)
@@ -413,7 +414,7 @@ class Pipe:
         """(ok, fix) — Gemma-vision compares the produced image to what was asked. Fails open."""
         try:
             r = requests.post(f"{self.ollama}/api/generate",
-                json={"model": self.chat_model, "system": self._VERIFY_SYS,
+                json={"model": self.vision_model, "system": self._VERIFY_SYS,
                       "prompt": f"Request: {request_text}\nDoes the image satisfy every hard requirement?",
                       "images": [img_b64], "stream": False, "think": False, "keep_alive": 0,
                       "options": {"temperature": 0.1, "num_predict": 150}}, timeout=300)
@@ -1031,10 +1032,12 @@ class Pipe:
             "NEVER output JSON, tool calls, function calls, or an \"action\"/\"dalle\"/\"text2im\" object. "
             "If the user asks to create or edit a picture, just acknowledge briefly in words.")}
         messages = [guard] + [m for m in messages if m.get("role") != "system"]
+        # dolphin (chat_model) is text-only; fall back to the vision model when images are attached
+        model = self.vision_model if any(m.get("images") for m in messages) else self.chat_model
         try:
             async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=900)) as s:
                 async with s.post(f"{self.ollama}/api/chat",
-                                  json={"model": self.chat_model, "messages": messages, "stream": True}) as r:
+                                  json={"model": model, "messages": messages, "stream": True}) as r:
                     async for line in r.content:
                         line = line.strip()
                         if not line:
