@@ -1364,7 +1364,48 @@ class Pipe:
             self._cache_video(cid, joined, seed, opts)
         return result
 
-    async def pipe(self, body: dict, __metadata__=None):
+    # ---------- native OpenWebUI status line (progress + timing for media) ----------
+    async def _status(self, emitter, description, done=False):
+        """Emit a native OpenWebUI status event (the grey status strip under the message)."""
+        if emitter:
+            try:
+                await emitter({"type": "status", "data": {"description": description, "done": done}})
+            except Exception:
+                pass
+
+    @staticmethod
+    def _fmt_dur(secs):
+        s = int(round(secs))
+        return f"{s}s" if s < 60 else f"{s // 60}m {s % 60:02d}s"
+
+    @staticmethod
+    def _is_media(result):
+        return isinstance(result, str) and (result.startswith("![") or result.lstrip().startswith("<video"))
+
+    async def _tracked(self, emitter, label, coro):
+        """Await a generation coroutine while emitting a live elapsed-time status, native-style.
+        Returns (result, elapsed_seconds). The heavy work runs in a worker thread, so the 2 s
+        ticker keeps updating without blocking it."""
+        start = time.monotonic()
+        await self._status(emitter, f"{label}…")
+        task = asyncio.ensure_future(coro)
+        while True:
+            try:
+                res = await asyncio.wait_for(asyncio.shield(task), timeout=2.0)
+                return res, time.monotonic() - start
+            except asyncio.TimeoutError:
+                await self._status(emitter, f"{label}… {self._fmt_dur(time.monotonic() - start)}")
+
+    async def _finish(self, emitter, result, verb, elapsed, detail):
+        """Collapse the live status to a final 'Generated in 4m 12s · …' line (or clear it on error)."""
+        if self._is_media(result):
+            await self._status(emitter, f"{verb} in {self._fmt_dur(elapsed)} · {detail}", done=True)
+        else:
+            await self._status(emitter, "", done=True)  # error text is already in the message body
+        return result
+
+    async def pipe(self, body: dict, __metadata__=None, __event_emitter__=None):
+        emitter = __event_emitter__
         msgs = body.get("messages", [])
         text, ref = self._last_user(msgs)
         cid = self._chat_id(body, __metadata__)
@@ -1388,7 +1429,10 @@ class Pipe:
                 and (self._is_video_request(text) or self._wants_new_video(text))):
             opts = self._video_opts(text)
             motion = self._strip_video_directives(self._clean_prompt(text))
-            return await self._gen_i2v_and_cache(cid, anim_img, motion, opts)
+            result, el = await self._tracked(emitter, "Animating image",
+                                             self._gen_i2v_and_cache(cid, anim_img, motion, opts))
+            return await self._finish(emitter, result, "Animated", el,
+                                      f"Wan 2.2 I2V · {opts['w']}×{opts['h']}")
         # Fresh video: explicit ("create a video of …") or video-flavored wording with no video yet.
         if text and not ref and not style_edit and (self._wants_new_video(text)
                                  or (self._is_video_request(text) and kind != "video")):
@@ -1398,13 +1442,23 @@ class Pipe:
             # A multi-shot sequence needs cross-shot consistency (best-quality A14B chain), so it
             # overrides 'fast' rather than being silently dropped to a single 5B clip.
             if n >= 2:
-                return await self._gen_multishot_and_cache(cid, cleaned, n, opts)
-            return await self._gen_video_and_cache(cid, cleaned, enhance=VID_ENHANCE, opts=opts)
+                result, el = await self._tracked(emitter, f"Generating {n}-shot video",
+                                                 self._gen_multishot_and_cache(cid, cleaned, n, opts))
+                return await self._finish(emitter, result, "Generated", el,
+                                          f"{n}-shot · Wan 2.2 A14B · {opts['w']}×{opts['h']}")
+            result, el = await self._tracked(emitter, "Generating video",
+                                             self._gen_video_and_cache(cid, cleaned, enhance=VID_ENHANCE, opts=opts))
+            model = "Wan 2.2 5B" if opts.get("fast") else "Wan 2.2 A14B"
+            return await self._finish(emitter, result, "Generated", el,
+                                      f"{model} · {opts['w']}×{opts['h']} · {opts['length']}f")
         # Fresh image generation ("create/draw a …") → a brand-new image, even mid-conversation.
         # (unless it's a restyle of the image on the table — "make this picture realistic" — which
         # must fall through to the EDIT path below, not t2i a mangled prompt from scratch)
         if text and not ref and not style_edit and self._is_image_request(text):
-            return await self._gen_and_cache(cid, self._clean_prompt(text), None)
+            result, el = await self._tracked(emitter, "Generating image",
+                                             self._gen_and_cache(cid, self._clean_prompt(text), None))
+            return await self._finish(emitter, result, "Generated", el,
+                                      f"Krea 2 · {IMG_T2I_W}×{IMG_T2I_H} · 8 steps")
         # Follow-up about the most recent VIDEO → regenerate it with the change folded into the
         # original prompt, SAME seed (keeps the scene recognizably similar). Multi-shot histories
         # (shots joined with ' || ') are re-planned with the change applied.
@@ -1416,26 +1470,35 @@ class Pipe:
             is_multishot = " || " in (prev_prompt or "")
             # A pure duration change ('make it longer') → re-render the SAME prompt+seed at the new
             # length; merging would perturb the scene for no reason.
+            vdetail = f"Wan 2.2 A14B · {opts['w']}×{opts['h']} · {opts['length']}f"
             if self._is_length_only(text):
                 if is_multishot:
                     n = min(V_SHOT_MAX, max(2, prev_prompt.count(" || ") + 1))
                     base = prev_prompt.replace(" || ", ", then ")
-                    return await self._gen_multishot_and_cache(cid, base, n, opts, seed=prev_seed)
-                return await self._gen_video_and_cache(cid, prev_prompt or self._clean_prompt(text),
-                                                       prev_seed, opts=opts)
+                    coro = self._gen_multishot_and_cache(cid, base, n, opts, seed=prev_seed)
+                else:
+                    coro = self._gen_video_and_cache(cid, prev_prompt or self._clean_prompt(text),
+                                                     prev_seed, opts=opts)
+                result, el = await self._tracked(emitter, "Re-rendering video", coro)
+                return await self._finish(emitter, result, "Re-rendered", el, vdetail)
             if is_multishot:
                 base = prev_prompt.replace(" || ", ", then ")
                 merged = await asyncio.to_thread(self._merge_video_prompt, base, text)
                 n = min(V_SHOT_MAX, max(2, prev_prompt.count(" || ") + 1))
-                return await self._gen_multishot_and_cache(cid, merged, n, opts, seed=prev_seed)
-            merged = (await asyncio.to_thread(self._merge_video_prompt, prev_prompt, text)
-                      if prev_prompt else self._clean_prompt(text))
-            return await self._gen_video_and_cache(cid, merged, prev_seed, opts=opts)
+                coro = self._gen_multishot_and_cache(cid, merged, n, opts, seed=prev_seed)
+            else:
+                merged = (await asyncio.to_thread(self._merge_video_prompt, prev_prompt, text)
+                          if prev_prompt else self._clean_prompt(text))
+                coro = self._gen_video_and_cache(cid, merged, prev_seed, opts=opts)
+            result, el = await self._tracked(emitter, "Updating video", coro)
+            return await self._finish(emitter, result, "Updated", el, vdetail)
         # Editing an image: an attached one, OR the most recent image in this chat — no re-upload
         # needed. Any non-question/non-smalltalk message here is treated as an edit instruction.
         img = ref or (media if kind == "image" else None)
         if text and img and self._wants_edit(text):
-            return await self._gen_and_cache(cid, self._edit_instruction(text), img, msgs)
+            result, el = await self._tracked(emitter, "Editing image",
+                                             self._gen_and_cache(cid, self._edit_instruction(text), img, msgs))
+            return await self._finish(emitter, result, "Edited", el, "Qwen-Image-Edit")
         # Chat. If the conversation revolves around an image the pipe GENERATED and this turn is a
         # question about it, attach the pixels to the last user message so the vision model (gemma4)
         # actually sees it — otherwise text-only dolphin answers blind (the image was scrubbed).

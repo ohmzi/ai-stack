@@ -551,7 +551,40 @@ class Pipe:
             break
         return None, f"⚠️ Image generation failed: {err}"
 
-    async def pipe(self, body: dict):
+    # ---------- native OpenWebUI status line (progress + timing) ----------
+    async def _status(self, emitter, description, done=False):
+        if emitter:
+            try:
+                await emitter({"type": "status", "data": {"description": description, "done": done}})
+            except Exception:
+                pass
+
+    @staticmethod
+    def _fmt_dur(secs):
+        s = int(round(secs))
+        return f"{s}s" if s < 60 else f"{s // 60}m {s % 60:02d}s"
+
+    async def _tracked(self, emitter, label, coro):
+        """Await the generation while emitting a live elapsed-time status. Returns (result, secs)."""
+        start = time.monotonic()
+        await self._status(emitter, f"{label}…")
+        task = asyncio.ensure_future(coro)
+        while True:
+            try:
+                res = await asyncio.wait_for(asyncio.shield(task), timeout=2.0)
+                return res, time.monotonic() - start
+            except asyncio.TimeoutError:
+                await self._status(emitter, f"{label}… {self._fmt_dur(time.monotonic() - start)}")
+
+    async def _finish(self, emitter, result, verb, elapsed, detail):
+        if isinstance(result, str) and result.startswith("!["):
+            await self._status(emitter, f"{verb} in {self._fmt_dur(elapsed)} · {detail}", done=True)
+        else:
+            await self._status(emitter, "", done=True)
+        return result
+
+    async def pipe(self, body: dict, __event_emitter__=None):
+        emitter = __event_emitter__
         msgs = body.get("messages", [])
         text, ref = self._parse(msgs)
         if not text and not ref:
@@ -570,10 +603,16 @@ class Pipe:
                 return ("I'm the image generator/editor — tell me a change to make (e.g. 'make the sky "
                         "sunset orange') or describe a new image. To chat about a picture, ask the main Assistant.")
             ref = self._find_recent_image(msgs) or self._recent.get(cid)
-        result = await asyncio.to_thread(self._generate, text, ref, msgs)
+        editing = ref is not None
+        label = "Editing image" if editing else "Generating image"
+        result, el = await self._tracked(emitter, label,
+                                         asyncio.to_thread(self._generate, text, ref, msgs))
         b64 = self._extract_b64(result)
-        if b64:  # remember it so the next "make it bigger" can edit it
+        if b64:  # remember it so the next "make it bigger" can edit it (LRU)
+            self._recent.pop(cid, None)
             self._recent[cid] = b64
-            if len(self._recent) > 30:
+            while len(self._recent) > 30:
                 self._recent.pop(next(iter(self._recent)))
-        return result
+        v = self.valves
+        detail = "Qwen-Image-Edit" if editing else f"Krea 2 · {v.WIDTH}×{v.HEIGHT}"
+        return await self._finish(emitter, result, "Edited" if editing else "Generated", el, detail)
