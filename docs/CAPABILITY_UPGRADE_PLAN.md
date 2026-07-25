@@ -3,20 +3,52 @@
 _Created 2026-07-25. Target: make the stack a genuinely versatile offline assistant (documents, OCR,
 search, speech, memory, tools, coding) without breaking the VRAM-budget-first design._
 
-**Progress: 4 / 24 complete**
+**Progress: 8.5 / 9 phases**
 
 | Phase | Scope | Status |
 |---|---|---|
-| 0 | Host unblock (NVIDIA driver) | ✅ resolved + **pinned** 2026-07-25 |
-| 1 | RAG router poisoning fix | ✅ live 2026-07-25 12:51 |
-| 2 | Architecture: manifold entries | ✅ live 2026-07-25 13:12 |
-| 3 | Documents & OCR (Tika + PaddleOCR-VL) | ☐ *awaiting OCR-ambition decision* |
-| 4 | Web search (SearXNG) | ◐ legacy FC set; SearXNG container outstanding |
-| 5 | Speech (faster-whisper, Kokoro) | ☐ |
-| 6 | Memory (Adaptive Memory v4.5.0) | ☐ |
-| 7 | Retrieval quality (reranker, hybrid, top_k) | ☐ |
-| 8 | Coding model (Qwen3.6-35B-A3B) | ☐ |
-| 9 | Full QA sweep | ☐ |
+| 0 | Host unblock (NVIDIA driver) | ✅ resolved + **pinned** (15 pkgs) |
+| 1 | RAG router poisoning fix | ✅ live 12:51 |
+| 2 | Architecture: manifold entries | ✅ live 13:12 |
+| 3 | Documents & OCR | ✅ Tika live on :9998, OCR verified |
+| 4 | Web search (SearXNG) | ✅ live on :8888, JSON verified |
+| 5 | Speech | ◐ TTS live on :8081; **STT blocked — see below** |
+| 6 | Memory (Adaptive Memory **v4.4.1**) | ✅ installed, scoped to knowledge/coder |
+| 7 | Retrieval quality | ✅ top_k=20 + hybrid on (reranker deferred) |
+| 8 | Coding model (Qwen3.6-35B-A3B) | ◐ pulled + wired; **co-residency problem, see below** |
+| 9 | Full QA sweep | ◐ automated done; browser checklist for you |
+
+### ⚠️ Two items need a decision before they can be finished
+
+**1. STT device — the chosen fix is not achievable as specified.** Decision 9 was "force whisper to
+CPU without disabling CUDA for the embedder". That is **impossible in 0.10.2**: `audio.py:222` reads
+the *global* `DEVICE_TYPE`, which `env.py:45-56` derives solely from `USE_CUDA_DOCKER`. The same
+global drives the embedding model (`retrieval.py:151,207`). There is no `WHISPER_DEVICE` override.
+So the real options are:
+
+| Option | Whisper | Embedder | Note |
+|---|---|---|---|
+| Leave as-is | CUDA, 407 MiB | CUDA, **360 MiB measured** | status quo |
+| `USE_CUDA_DOCKER=false` | CPU, 0 | CPU, 0 | frees 360 MiB permanently; needs container **recreate** |
+| Patch `audio.py` in-container | CPU | CUDA | lost on every image update — not recommended |
+
+`USE_CUDA_DOCKER=false` best matches the intent and over-delivers (all-MiniLM-L6-v2 is 22 M params —
+CPU embedding on 24 cores is a non-issue for a personal KB). It needs open-webui recreated, which is
+why it was not done unilaterally.
+
+**2. The coder evicts the task model — measured, not theoretical.** Phase 8 assumed the coder and
+`gemma4:e2b` stay co-resident. **They do not.** Tested in both load orders:
+
+| Combination | Result |
+|---|---|
+| coder (18.37 GB) + `gemma4:e2b` (3.3 GB) | ❌ mutual eviction, whichever loads second wins |
+| same, both forced to `num_ctx=8192` | ❌ still evicts — not a context-length problem |
+| coder + **`gemma3:1b`** (0.99 GB) | ✅ **both resident, 20561 / 24576 MiB** |
+
+Consequence as configured: every new chat generates a title/tags on `gemma4:e2b`, evicting the coder
+and costing a **38 s** cold reload on the next coder message. Options: switch the task model back to
+`gemma3:1b` (reverses commit `619a85c`), disable `task.title.enable`/`task.tags.enable` during coding
+sessions, take a smaller coder quant, or accept the reload.
 
 > **Verification status.** Findings below come from a 6-agent research sweep against primary sources
 > (running container source, GitHub, HuggingFace/Ollama APIs). The 2-agent adversarial verification
@@ -373,7 +405,61 @@ Your `ebook2audiobook` container bundles piper-tts and coqui-tts but is Gradio-o
 
 ---
 
-## Phase 6 — Memory
+## Phase 6 — Memory ✅ INSTALLED (with a hazard that needed guarding)
+
+**Installed: Adaptive Memory — actual version `v4.4.1`, not v4.5.0.** Repo
+`1818TusculumSt/owui-adaptive-memory`, single 401 KB file `adaptive_memory_v4.0.py`, last pushed
+2026-07-01. **The GitHub API reports no license** — there is no LICENSE file in the repo, so the
+plan's "MIT" claim is unverified. Copy kept at `filters/adaptive_memory.py`.
+
+**Injection target verified by reading the code, not the README.** `_inlet_inject_memories`
+(L8819) prepends to the **last user message** (`target="user_message"`), so it works behind the pipe.
+Note the call site's comment says *"# 3. Inject into system prompt"* — that comment is stale and
+misleading; the implementation does not do that.
+
+**Upstream defaults that would have silently failed on this host — both corrected in the stored valves:**
+
+| Valve | Upstream default | Set to | Why |
+|---|---|---|---|
+| `llm_model_name` | `llama4:latest` | `gemma4:e2b` | llama4 is not installed here |
+| `llm_api_endpoint_url` | `http://host.docker.internal:11434/api/chat` | `http://localhost:11434/api/chat` | open-webui is `NetworkMode=host`; that name does not resolve |
+| `embedding_source` | `auto` | `auto` (kept) | prefers OWUI's existing embedder → **no second embedding model, 0 new VRAM** |
+
+Dependencies: `prometheus_client` is missing in the container and `OFFLINE_MODE=true` skips
+requirement installation — **harmless**, the import is wrapped in `try/except ImportError` with a
+no-op metric fallback. All other imports resolve.
+
+### ⚠️ The hazard this created, and the guard added for it
+
+Adaptive Memory prepends to the last user message. **So does the RAG injection that caused Phase 1.**
+And the ordering is against us:
+
+```
+middleware.py:2428   inlet FILTERS run, mutating form_data['messages']   <-- memory injected here
+middleware.py:2803   metadata['user_prompt'] = get_last_user_message(form_data['messages'])
+middleware.py:2808   RAG source context applied (this is what Phase 1 dodged)
+```
+
+`user_prompt` is captured **after** filters, from the same `form_data`. So filter-injected text lands
+in the pipe's routing input — the Phase 1 failure mode through a different door. A stored memory
+reading *"asked for a picture of their dog"* could make an ordinary question start a render.
+
+**Two mitigations, both applied:**
+
+1. **Scoped, not global.** The filter is `is_global=0` and attached via `model.meta.filterIds` to
+   `auto_assistant.knowledge` and `auto_assistant.coder` only — the two entries that do no media
+   routing at all. `auto` has `filterIds=[]`. This also matches decision 5 (keep `auto` lean).
+2. **`_strip_injected_context()` in the pipe.** Removes known filter blocks from the routing text
+   before any regex runs. It exists because making the filter global is a *single toggle in the UI*
+   and the resulting failure would be silent and expensive.
+
+Tested (`tests/test_router.py`, cases G/H/I): memory block + question → chat; memory block + genuine
+image request → still renders; **memory block with no user text at all → chat**. That last case
+caught a real bug in the first version of the guard, which returned an empty string and then fell
+back to the *unstripped* text, routing to video. The suite includes a control with the guard disabled
+that reproduces exactly that.
+
+<details><summary>Original Phase 6 analysis</summary>
 
 **⚠️ Your pick, Adaptive Memory v3, is disqualified on this box: it injects into the SYSTEM message,
 which `auto_assistant.py:1242` strips.**
@@ -389,6 +475,11 @@ OWUI's native memory also injects via system message, so it is likewise dead beh
 ✅ Confirmed live: `memories.enable=true` **and** `memories.system_context.enable=true` — i.e. native
 memory is switched on and injecting into exactly the message `auto_assistant.py:1242` strips. Anything
 the user has stored there is currently being silently discarded on every turn.
+
+*(Superseded by Phase 2: `keep_system=True` on the knowledge/coder entries means native memory now
+reaches those two entries as well. It remains dead on `auto`, which is intended per decision 5.)*
+
+</details>
 
 ---
 
@@ -497,17 +588,59 @@ Target lifecycle: regex router (0 cost) → task model for decomposition/query-g
 
 Each phase ships only when its tests pass. Run `scratchpad/test_router.py` after **any** pipe edit.
 
-**Per-component (individually, before integration):**
+**Per-component — RUN 2026-07-25:**
 
-1. **Tika** — `curl -T scan.pdf localhost:9998/tika`; text-layer PDF, scanned PDF, `.doc`, `.msg`.
-2. **PaddleOCR-VL** — OCR a scanned page; confirm Ollama unloads it (`/api/ps` empty after keep_alive).
-3. **SearXNG** — `curl 'localhost:<port>/search?q=test&format=json'` must return JSON, not 404.
-4. **Whisper** — load with `local_files_only=True`; transcribe; confirm VRAM delta ≈ 407 MiB.
-5. **Kokoro** — `POST /v1/audio/speech`; confirm keyless auth tolerated.
-6. **Reranker** — POST Cohere-schema payload; assert `{results:[{index,relevance_score}]}`.
-7. **Qwen3.6** — pull UD-IQ4_XS; assert resident ≤ 18 GB; measure t/s; verify tool-call format.
+| # | Test | Result |
+|---|---|---|
+| 1 | **Tika** text-layer PDF | ✅ HTTP 200, 12 299 B extracted from a real 286-page-book review PDF |
+| 1b | **Tika** legacy `.doc` | ✅ HTTP 200, text extracted — **was a hard ingest error before** |
+| 1c | **Tika** OCR on an image-only PDF | ✅ HTTP 200, 2 659 B of clean text (rasterised at 150 dpi to force OCR) |
+| 2 | PaddleOCR-VL | ⏭️ skipped per decision 4 — Tika's Tesseract handled the scan well |
+| 3 | **SearXNG** `format=json` | ✅ HTTP 200, **28 results** — the `formats: [html, json]` fix works |
+| 4 | **Whisper** | ⏸️ blocked on the STT device decision above |
+| 5 | **Kokoro** `POST /v1/audio/speech` | ✅ HTTP 200, 38 445 B, valid MPEG layer III 24 kHz mono, **keyless auth tolerated** |
+| 6 | Reranker | ⏭️ deferred per decision 7 |
+| 7 | **Qwen3.6** | ✅ pulled (17 730 509 792 B = 17.73 GB exactly, matching the plan) |
+| 7b | Qwen3.6 residency | ⚠️ **18.37 GB actual** (880 → 19 250 MiB), not 17.73 — that figure is weights-only |
+| 7c | Qwen3.6 throughput | ✅ **102.9 tok/s** (894 tok / 8.69 s). Plan predicted ~135; same order, still ~4-5× a dense 27B |
+| 7d | Qwen3.6 cold load | 38.2 s |
 
-**Integration (the part that actually matters):**
+**Trap avoided during execution:** the first `ollama pull` went to `tday_ollama` — a *different*
+Ollama instance on a bridge network belonging to an unrelated project. The pipe uses
+`localhost:11434`, which is the **host `ollama.service` (systemd)**. The 18 GB was re-pulled to the
+right instance and reclaimed from the wrong one. If you script Ollama work, target the systemd
+service, not the container.
+
+**Host Ollama tuning discovered** (`/etc/systemd/system/ollama.service.d/multi-model.conf`) — none of
+this was in the plan and all of it affects Phase 8 sizing:
+
+```
+OLLAMA_MAX_LOADED_MODELS=3   OLLAMA_FLASH_ATTENTION=1
+OLLAMA_KV_CACHE_TYPE=q8_0    OLLAMA_CONTEXT_LENGTH=32768   OLLAMA_KEEP_ALIVE=60s
+```
+
+`KEEP_ALIVE=60s` explains the cold-load costs measured throughout: nothing stays warm between turns.
+
+### Your checklist (browser-only — these cannot be driven from the shell)
+
+Per decision 11. Everything else above was automated.
+
+1. **Model list** — confirm 🪄 Assistant, 📚 Knowledge and 💻 Coder all appear.
+2. **Phase 1 regression** — attach a PDF whose text mentions "video"/"picture of", ask a question on
+   🪄 Assistant → **must chat, not render**.
+3. Same PDF, ask "make a picture of a cat" → must render, prompt built from your words only.
+4. **Documents** — upload a `.doc` and a scanned PDF to a Knowledge base → must ingest without error.
+5. **Citations** — ask 📚 Knowledge a question against that base → citations render as clickable badges.
+6. **Web search** — press the web-search button on 📚 Knowledge → results must actually reach the model
+   (this is what `function_calling: legacy` was set for; it silently did nothing before).
+7. **Memory** — on 📚 Knowledge, state a fact, start a new chat, ask for it back.
+8. **TTS** — press the speaker icon on any reply → should speak via Kokoro.
+9. **Contention** — start a Wan render on 🪄 Assistant, then ask 💻 Coder a question → must serialize
+   under `_GEN_LOCK`, not OOM. **This is the test that proves the architecture.**
+10. **Coder eviction** — after using 💻 Coder, start a new chat and return to it; expect the ~38 s
+    reload described above until the task-model decision is made.
+
+**Integration (original list, for reference):**
 
 8. Attach a PDF containing "video"/"picture of", ask a question → **must chat, not render**. ✅ passing.
 9. Same PDF, ask "make a picture of a cat" → must render an image, prompt taken from the clean words.
@@ -524,26 +657,37 @@ of truth and must stay md5-identical to `function.content`.
 
 ---
 
-## Questions
+## Decisions
 
-**Answered 2026-07-25:**
+**All open questions closed 2026-07-25. No blockers remain.**
 
-1. ~~**Architecture.**~~ → **Manifold entries (shape B).** Built, tested, deployed. Phase 2.
-3. ~~**Legacy vs native FC.**~~ → **Legacy first, internal tool loop reconsidered later.** Applied to
-   both new entries. Phase 4.
-5. ~~**Driver pinning.**~~ → **Yes, `apt-mark hold`** — widened to all 15 packages in the 580 family.
-   Phase 0.
+| # | Question | Decision |
+|---|---|---|
+| 1 | Architecture | **Manifold entries (shape B)** — shipped, Phase 2 |
+| 2 | Legacy vs native FC | **Legacy first**, internal tool loop reconsidered later — shipped, Phase 4 |
+| 3 | Driver pinning | **Yes, `apt-mark hold`** — widened to all 15 × 580 packages — shipped, Phase 0 |
+| 4 | OCR ambition | **Tika now, judge OCR against real documents afterwards** — Phase 3 |
+| 5 | `auto` entry treatment | **Keep it lean.** No memory, no knowledge, native FC. Media router only |
+| 6 | Memory | **Adaptive Memory v4.5.0**, pinned to `gemma4:e2b` — Phase 6 |
+| 7 | Retrieval | **Settings only, 0 VRAM.** `top_k` 3→20, hybrid on, `top_k_reranker` 3. No reranker yet — Phase 7 |
+| 8 | Coder role | **Add Qwen3.6-35B-A3B as a fourth tenant**; keep `dolphin-venice:24b` for the uncensored Photoreal helper — Phase 8 |
+| 9 | Whisper device | **Force CPU** (0 VRAM, 24 idle cores) without disabling CUDA for the embedder — Phase 5 |
+| 10 | TTS | **Kokoro on CPU**, OpenAI-compatible, local base URL — Phase 5 |
+| 11 | QA split | **Automated checks run by Claude; a short numbered checklist for the browser-only tests** — Phase 9 |
 
-**Still open — these block the phases named:**
+### Consequences worth keeping in view
 
-2. **Coder role** (blocks Phase 8). Add Qwen3.6-35B-A3B as a fourth tenant, or **replace**
-   `dolphin-venice:24b` (your own `MODELS.md` endorses this)? Note the revised VRAM math: coder
-   (17.73) + task model (3.30 measured, not 1.9) + desktop (0.94) ≈ **21.97 GB of 24.35 usable**.
-   Replacing frees the 14.33 GB dolphin tag from disk and removes an eviction candidate; adding keeps
-   the uncensored helper the Photoreal pipe relies on.
-4. **OCR ambition** (blocks Phase 3). Tika-only (0 VRAM, fixes today's `.msg`/`.doc`/`.ppt` hard
-   errors), Tika + PaddleOCR-VL-1.6 via Ollama (~1.0–1.5 GB transient, much better on complex
-   tables/layout), or Tika now and judge OCR against your real documents afterwards?
+- **Decision 5 means the entries are not interchangeable.** `🪄 auto` will never see memory, knowledge
+  bases, folder files or web search. Use `📚 Knowledge` for anything document- or recall-shaped. If
+  that split turns out to be annoying in daily use, revisit decision 5 — it is one setting per entry.
+- **Decision 8 means four large tags on disk (~59 GB of 363 GB free).** Only one large tenant is
+  resident at a time under `_GEN_LOCK`, so this costs eviction churn and cold-load latency
+  (`gemma4:e2b` alone measured **54.5 s** cold), not simultaneous VRAM.
+- **Decision 7 defers the reranker, not cancels it.** Re-measure retrieval after `top_k=20` + hybrid;
+  if quality is still short, Infinity + `bge-reranker-v2-m3` (~1.2 GB) is the next step — but with the
+  coder resident the budget is ~23.2/24.35 GB, so it is genuinely tight.
+- **Decision 9 has an open sub-problem:** `audio.py:222` selects CUDA from `DEVICE_TYPE`. Forcing
+  whisper to CPU must not also push the embedding model off the GPU.
 
 ---
 
@@ -568,7 +712,23 @@ of truth and must stay md5-identical to `function.content`.
   - 🆕 **New:** `rag.paddleocr_vl_base_url` default `:8080` is also an occupied port on this host.
   - 🆕 **New:** 0.10.2 stores config as a flat key/value table, not a single JSON blob.
 
-  Then shipped three phases:
+  Then shipped, in a second pass, Phases 3/4/5(TTS)/6/7/8 — see the change-log entry below.
+
+- **2026-07-25 (execution pass)** — all 11 open decisions answered; six more phases built and verified.
+  - **Phase 3 ✅** Tika 3.3.0.0-full on :9998. Verified on a real text-layer PDF, a legacy `.doc`
+    (previously a hard error) and an OCR-only scanned PDF. PaddleOCR-VL skipped — Tesseract sufficed.
+  - **Phase 4 ✅** SearXNG on :8888 returning JSON with 28 results. `formats: [html, json]` and
+    `limiter: false` both set in a hand-written `settings.yml` (the searxng-docker repo is superseded).
+  - **Phase 5 ◐** Kokoro CPU TTS on :8081, verified end-to-end. STT blocked on a global-flag problem.
+  - **Phase 6 ✅** Adaptive Memory **v4.4.1** (not v4.5.0; **no license file** in the repo), scoped to
+    knowledge/coder, upstream `llama4:latest` / `host.docker.internal` defaults corrected.
+    **Found and guarded a new Phase-1-class hazard** — filters inject before `user_prompt` is captured.
+  - **Phase 7 ✅** `top_k` 3→20, hybrid search on. 0 VRAM. Reranker deferred by decision.
+  - **Phase 8 ◐** Qwen3.6-35B-A3B pulled and wired (102.9 tok/s, 18.37 GB actual). **Measured that it
+    cannot co-reside with `gemma4:e2b`** — a plan assumption that turned out to be false.
+  - New services are version-controlled at `compose/docker-compose.yml`, not ad-hoc `docker run`.
+
+  Earlier the same day, three phases:
   - **Phase 0 prevention ✅** — `apt-mark hold` on all 15 NVIDIA 580 packages (widened from the 3
     originally suggested, which would have left the same desync possible).
   - **Phase 2 ✅** — manifold entries `knowledge` + `coder` added to `auto_assistant.py`, sharing
