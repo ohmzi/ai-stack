@@ -83,6 +83,35 @@ class Pipe:
         leaf = mid.rsplit(".", 1)[-1].strip().lower()
         return leaf if leaf in ("auto", "knowledge", "coder") else "auto"
 
+    # Blocks that inlet FILTERS prepend to the last user message. Marker text only — each block is
+    # "<header line(s)>\n\n<the user's actual words>".
+    _INJECTED_MARKERS = ("User Memories (",)
+
+    def _strip_injected_context(self, text):
+        """Remove filter-injected blocks from the text used for ROUTING.
+
+        `metadata['user_prompt']` is captured at middleware.py:2803, but inlet filters run earlier at
+        :2428 on the same form_data. So a filter that prepends to the last user message — Adaptive
+        Memory does exactly that — lands its block inside the routing text. That is the Phase 1
+        failure mode through a different door: a stored memory mentioning "a picture of my dog" could
+        make an ordinary question start a render.
+
+        Adaptive Memory is currently scoped to the knowledge/coder entries, which do no media routing
+        at all, so this cannot fire today. It exists because flipping that filter to "global" is a
+        single toggle in the UI, and the failure would be silent and expensive.
+        """
+        if not isinstance(text, str):
+            return text
+        for marker in self._INJECTED_MARKERS:
+            idx = text.find(marker)
+            if idx == -1:
+                continue
+            sep = text.find("\n\n", idx + len(marker))
+            # Block is followed by a blank line then the real message; if there is no separator the
+            # whole string was injected context, leaving only whatever preceded it (normally "").
+            text = text[sep + 2:] if sep != -1 else text[:idx]
+        return text
+
     # ---------- content parsing ----------
     def _last_user(self, messages):
         """(text, reference_image_b64_or_None) from the last user message."""
@@ -1500,7 +1529,12 @@ class Pipe:
         # Chat is unaffected: it uses `msgs`/`omsgs` below, which still carry the full RAG context.
         routed = (__metadata__ or {}).get("user_prompt")
         if isinstance(routed, str) and routed.strip():
-            text = routed.strip()
+            # ...but user_prompt is captured AFTER inlet filters run, so strip their blocks too.
+            # The emptiness check is on the RAW value: an absent user_prompt must fall back to
+            # _last_user (direct-API calls), whereas a prompt that was ENTIRELY injected context
+            # must stay empty and route to chat — falling back there would hand the router the very
+            # block we just removed.
+            text = self._strip_injected_context(routed).strip()
         # Manifold dispatch. knowledge/coder are chat-only: returning here means NOT ONE media regex
         # runs, so a document that merely mentions "video" cannot start a render on those entries
         # regardless of what the router would have decided. Belt and braces on top of the
