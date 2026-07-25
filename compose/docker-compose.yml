@@ -1,0 +1,30 @@
+# Support services for the Open WebUI stack.
+#
+# open-webui itself runs with NetworkMode=host, so it reaches these at localhost:<port>.
+# That is why every service here publishes to a HOST port and why the OWUI config must use
+# http://localhost:<port> — the shipped defaults (http://tika:9998, http://docling:5001) are
+# Docker-DNS names that cannot resolve from a host-networked container.
+#
+# PORT CHOICES ARE DELIBERATE. On this host :8000 is tunarr and :8080 is already taken by another
+# python service. OWUI's own defaults collide with both:
+#   rag.mineru_api_url        defaults to http://localhost:8000  -> tunarr
+#   rag.paddleocr_vl_base_url defaults to http://localhost:8080  -> occupied
+# Verified free when this file was written: 9998, 5001, 8081, 8888.
+#
+#   docker compose -f compose/docker-compose.yml up -d
+
+services:
+  # Document extraction. 0 VRAM. Bundles Tesseract (eng/fra/deu/ita/spa/jpn), which is what fixes
+  # the .msg / .doc / legacy .ppt hard ingest errors.
+  tika:
+    image: apache/tika:3.3.0.0-full
+    container_name: tika
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:9998:9998"
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:9998/tika"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
