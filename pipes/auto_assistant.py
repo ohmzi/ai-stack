@@ -50,10 +50,10 @@ class Pipe:
         self.ollama = "http://localhost:11434"
         self.chat_model = "dolphin-venice:24b"   # text chat + all prompt-rewrite/merge/plan helpers
         self.vision_model = "gemma4:31b"         # dolphin is text-only; gemma does image QA + vision chat
-        # Coder entry's tenant. Phase 8 of CAPABILITY_UPGRADE_PLAN.md swaps this for
-        # hf.co/unsloth/Qwen3.6-35B-A3B-GGUF:UD-IQ4_XS (17.73 GB); until that tag is pulled it points
-        # at a model already on disk so the entry is usable rather than a guaranteed Ollama 404.
-        self.coder_model = "dolphin-venice:24b"
+        # Coder entry's tenant (Phase 8). MoE, ~3 B active of 35 B — roughly 135 t/s on this 3090 vs
+        # ~20-25 t/s for a dense 27B at the same residency. Do NOT use `ollama run qwen3.6:35b`: that
+        # tag resolves to a 23.94 GB layer against ~24.35 GB usable and will OOM or silently spill.
+        self.coder_model = "hf.co/unsloth/Qwen3.6-35B-A3B-GGUF:UD-IQ4_XS"
         # (OpenWebUI's own title/tag/query task model is gemma4:e2b, configured at the server level —
         # this pipe does not call it directly, so no task_model attribute is kept here.)
         self._recent = {}        # chat_id -> last produced image b64 (for follow-up edits without re-upload)
