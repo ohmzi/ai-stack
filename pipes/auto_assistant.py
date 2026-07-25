@@ -50,13 +50,38 @@ class Pipe:
         self.ollama = "http://localhost:11434"
         self.chat_model = "dolphin-venice:24b"   # text chat + all prompt-rewrite/merge/plan helpers
         self.vision_model = "gemma4:31b"         # dolphin is text-only; gemma does image QA + vision chat
-        # (OpenWebUI's own title/tag/query task model is gemma3:1b, configured at the server level —
+        # Coder entry's tenant. Phase 8 of CAPABILITY_UPGRADE_PLAN.md swaps this for
+        # hf.co/unsloth/Qwen3.6-35B-A3B-GGUF:UD-IQ4_XS (17.73 GB); until that tag is pulled it points
+        # at a model already on disk so the entry is usable rather than a guaranteed Ollama 404.
+        self.coder_model = "dolphin-venice:24b"
+        # (OpenWebUI's own title/tag/query task model is gemma4:e2b, configured at the server level —
         # this pipe does not call it directly, so no task_model attribute is kept here.)
         self._recent = {}        # chat_id -> last produced image b64 (for follow-up edits without re-upload)
         self._recent_video = {}  # chat_id -> (prompt, seed) of the last produced video (for follow-up changes)
 
+    # Manifold entries. These MUST live in this one Function file: each OpenWebUI Function loads into
+    # its own module namespace, so a second file would get its own _GEN_LOCK and nothing would
+    # serialize GPU work between them (see CAPABILITY_UPGRADE_PLAN.md Phase 2, shape C).
+    #   auto      — full router: chat + image + video (unchanged behaviour)
+    #   knowledge — chat only. No media routing at all, and system messages are preserved so
+    #               memory/RAG-system-context injection survives.
+    #   coder     — chat only against a large coding tenant, serialized under _GEN_LOCK.
     def pipes(self):
-        return [{"id": "auto", "name": "🪄 Assistant (auto chat + image + video)"}]
+        return [
+            {"id": "auto", "name": "🪄 Assistant (auto chat + image + video)"},
+            {"id": "knowledge", "name": "📚 Knowledge (documents + memory, no media)"},
+            {"id": "coder", "name": "💻 Coder"},
+        ]
+
+    def _entry(self, body):
+        """Which manifold entry was selected. OpenWebUI sends '<function_id>.<pipe_id>'; anything
+        unrecognised (or a direct API call with a bare model name) falls back to the historical
+        'auto' behaviour so nothing regresses."""
+        mid = (body or {}).get("model") or ""
+        if not isinstance(mid, str):
+            return "auto"
+        leaf = mid.rsplit(".", 1)[-1].strip().lower()
+        return leaf if leaf in ("auto", "knowledge", "coder") else "auto"
 
     # ---------- content parsing ----------
     def _last_user(self, messages):
@@ -1232,20 +1257,35 @@ class Pipe:
                 f'style="max-width:100%;border-radius:8px">\n'
                 f'data:video/webm;base64,{b64}\n</video>\n\n*🎬 {prompt[:80]}*')
 
-    async def _achat_stream(self, messages):
+    async def _achat_stream(self, messages, guard_text=None, keep_system=False, force_model=None):
+        """Streamed Ollama chat.
+
+        Defaults reproduce the original 'auto' behaviour exactly: the anti-dalle guard replaces every
+        system message. The knowledge/coder entries override that — see _entry_chat_stream. The guard
+        is deliberately NOT shared: telling a coding model to "NEVER output JSON" would break it.
+        """
         # Guard: keep Gemma from inventing "dalle"/tool-call JSON — image work is routed automatically.
-        guard = {"role": "system", "content": (
+        guard = {"role": "system", "content": guard_text if guard_text is not None else (
             "You are a friendly, concise assistant in a chat app. Image generation and editing are "
             "handled automatically by the app, not by you. Always reply in plain, natural language. "
             "NEVER output JSON, tool calls, function calls, or an \"action\"/\"dalle\"/\"text2im\" object. "
             "If the user asks to create or edit a picture, just acknowledge briefly in words.")}
-        messages = [guard] + [m for m in messages if m.get("role") != "system"]
+        if keep_system:
+            # Preserve OpenWebUI's own system messages (native memory, Adaptive Memory, RAG system
+            # context). The historical unconditional strip below is what silently discarded them.
+            messages = [guard] + list(messages)
+        else:
+            messages = [guard] + [m for m in messages if m.get("role") != "system"]
         # Route on the CURRENT turn only: gemma4 (vision) when the LATEST user turn carries an image,
         # else dolphin. Scanning the whole history pinned every later text turn to gemma4 forever
         # after a single image appeared, forcing a needless dolphin<->gemma4 eviction each turn.
         last_user_has_img = next(
             (bool(m.get("images")) for m in reversed(messages) if m.get("role") == "user"), False)
-        if last_user_has_img:
+        if force_model:
+            model = force_model
+            if not last_user_has_img:
+                messages = [{k: v for k, v in m.items() if k != "images"} for m in messages]
+        elif last_user_has_img:
             model = self.vision_model
         else:
             model = self.chat_model
@@ -1279,6 +1319,48 @@ class Pipe:
                             yield tok
         except Exception as e:
             yield f"⚠️ Chat backend error: {e}"
+
+    # Per-entry chat guards. Both keep_system=True so OpenWebUI's memory/RAG system context reaches
+    # the model instead of being stripped the way the 'auto' guard strips it.
+    _KNOWLEDGE_GUARD = (
+        "You are a careful research assistant working from the user's own documents and notes. "
+        "Answer from the provided context when it is present, and say plainly when it is not there "
+        "rather than guessing. Preserve any [id] inline citations exactly as given. "
+        "This entry does not generate images or video; if asked, say so in one line.")
+
+    _CODER_GUARD = (
+        "You are an expert programming assistant. Prefer complete, runnable code over fragments, "
+        "state the language and any assumptions, and point out real bugs or edge cases you notice. "
+        "Use fenced code blocks. This entry does not generate images or video.")
+
+    async def _entry_chat_stream(self, entry, messages):
+        """Chat path for the non-'auto' manifold entries. No media routing reaches here at all.
+
+        The coder entry loads a large tenant (Phase 8: ~17.7 GB), so it is serialized under the same
+        _GEN_LOCK the render pipelines use — that is the whole reason these entries live in this file.
+        The lock is acquired on a worker thread (never on the event loop) and released when the
+        stream finishes or the client disconnects, matching the _gen_* pattern above.
+
+        Ollama evicts among its OWN models by itself; the lock exists to stop a coder load landing in
+        the middle of a ComfyUI render, which Ollama cannot see.
+        """
+        if entry == "coder":
+            guard, model = self._CODER_GUARD, self.coder_model
+        else:
+            guard, model = self._KNOWLEDGE_GUARD, None
+
+        inner = self._achat_stream(messages, guard_text=guard, keep_system=True, force_model=model)
+        if entry != "coder":
+            async for tok in inner:
+                yield tok
+            return
+
+        await asyncio.to_thread(_GEN_LOCK.acquire)
+        try:
+            async for tok in inner:
+                yield tok
+        finally:
+            _GEN_LOCK.release()
 
     async def _gen_and_cache(self, cid, prompt, ref, msgs=None):
         def run():
@@ -1408,6 +1490,24 @@ class Pipe:
         emitter = __event_emitter__
         msgs = body.get("messages", [])
         text, ref = self._last_user(msgs)
+        # OpenWebUI PREPENDS retrieved file/knowledge context to the LAST USER message (RAG_SYSTEM_CONTEXT
+        # defaults false), so `text` can be a multi-kB document blob. Every routing predicate below reads
+        # `text`, and _is_image_request/_is_video_request fire on a bare "picture of"/"draw"/"video"
+        # anywhere in it — while the _QUESTION/_SMALLTALK guards use anchored .match() and can never fire
+        # because the blob starts with "### Task:". Net effect: attaching a PDF that merely mentions those
+        # words launches a multi-minute Krea/Wan render built from the document text. Middleware stashes the
+        # user's verbatim words BEFORE that injection (middleware.py:2803), so route on those instead.
+        # Chat is unaffected: it uses `msgs`/`omsgs` below, which still carry the full RAG context.
+        routed = (__metadata__ or {}).get("user_prompt")
+        if isinstance(routed, str) and routed.strip():
+            text = routed.strip()
+        # Manifold dispatch. knowledge/coder are chat-only: returning here means NOT ONE media regex
+        # runs, so a document that merely mentions "video" cannot start a render on those entries
+        # regardless of what the router would have decided. Belt and braces on top of the
+        # user_prompt fix above, which protects the 'auto' entry.
+        entry = self._entry(body)
+        if entry != "auto":
+            return self._entry_chat_stream(entry, self._ollama_messages(msgs))
         cid = self._chat_id(body, __metadata__)
         # What media does this conversation currently revolve around?
         kind, media = self._recent_media(msgs)
