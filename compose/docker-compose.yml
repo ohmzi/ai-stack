@@ -55,3 +55,24 @@ services:
       options:
         max-size: "1m"
         max-file: "1"
+
+  # Text-to-speech, OpenAI-compatible (POST /v1/audio/speech). CPU build deliberately: this card is
+  # already contended by ComfyUI renders and the coder tenant, and Kokoro is fast enough on CPU.
+  # OWUI is then configured with audio.tts.engine='openai' pointed at this base URL.
+  #
+  # Note the existing ebook2audiobook container bundles piper-tts/coqui-tts but is Gradio-only —
+  # POST /v1/audio/speech returns 404 there, so it cannot serve OWUI without a shim.
+  kokoro:
+    image: ghcr.io/remsky/kokoro-fastapi-cpu:v0.6.0
+    container_name: kokoro
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:8081:8880"
+    environment:
+      - USE_GPU=false
+      - DEVICE=cpu
+    logging:
+      driver: json-file
+      options:
+        max-size: "1m"
+        max-file: "1"
