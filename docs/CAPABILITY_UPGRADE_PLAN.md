@@ -45,10 +45,21 @@ why it was not done unilaterally.
 | same, both forced to `num_ctx=8192` | ❌ still evicts — not a context-length problem |
 | coder + **`gemma3:1b`** (0.99 GB) | ✅ **both resident, 20561 / 24576 MiB** |
 
-Consequence as configured: every new chat generates a title/tags on `gemma4:e2b`, evicting the coder
-and costing a **38 s** cold reload on the next coder message. Options: switch the task model back to
-`gemma3:1b` (reverses commit `619a85c`), disable `task.title.enable`/`task.tags.enable` during coding
-sessions, take a smaller coder quant, or accept the reload.
+Consequence as configured: every new chat generates a title/tags on `gemma4:e2b`, evicting the coder.
+
+**⚠️ Severity revised down after measuring the reload properly.** The 38 s figure is *cold from disk*.
+This box has **94 GB RAM with ~75 GB in page cache**, so the 18 GB GGUF stays cached and a re-load
+costs **6.1 s**, not 38 s — measured back to back:
+
+| Reload | Time |
+|---|---|
+| Cold, first ever load from NVMe | 38.2 s |
+| **Warm page cache (the normal case)** | **6.1 s** |
+
+So in real use the eviction costs ~6 s on the first coder message after a new chat. Annoying, not
+broken. This moves from "must fix" to "fix if it bothers you". Options if it does: switch the task
+model back to `gemma3:1b` (co-resides — reverses commit `619a85c`), disable
+`task.title.enable`/`task.tags.enable`, or take a smaller coder quant.
 
 > **Verification status.** Findings below come from a 6-agent research sweep against primary sources
 > (running container source, GitHub, HuggingFace/Ollama APIs). The 2-agent adversarial verification
@@ -621,24 +632,77 @@ OLLAMA_KV_CACHE_TYPE=q8_0    OLLAMA_CONTEXT_LENGTH=32768   OLLAMA_KEEP_ALIVE=60s
 
 `KEEP_ALIVE=60s` explains the cold-load costs measured throughout: nothing stays warm between turns.
 
-### Your checklist (browser-only — these cannot be driven from the shell)
+### Live orchestration QA — RUN 2026-07-25, `tests/qa_live.py`, **12/12 PASS**
 
-Per decision 11. Everything else above was automated.
+Real `Pipe`, real Ollama inference, model recorded at the aiohttp transport layer (so it is the
+payload actually sent, not what the code claims), answers graded by `gemma4:31b` as judge.
 
-1. **Model list** — confirm 🪄 Assistant, 📚 Knowledge and 💻 Coder all appear.
-2. **Phase 1 regression** — attach a PDF whose text mentions "video"/"picture of", ask a question on
-   🪄 Assistant → **must chat, not render**.
-3. Same PDF, ask "make a picture of a cat" → must render, prompt built from your words only.
-4. **Documents** — upload a `.doc` and a scanned PDF to a Knowledge base → must ingest without error.
-5. **Citations** — ask 📚 Knowledge a question against that base → citations render as clickable badges.
-6. **Web search** — press the web-search button on 📚 Knowledge → results must actually reach the model
-   (this is what `function_calling: legacy` was set for; it silently did nothing before).
-7. **Memory** — on 📚 Knowledge, state a fact, start a new chat, ask for it back.
-8. **TTS** — press the speaker icon on any reply → should speak via Kokoro.
-9. **Contention** — start a Wan render on 🪄 Assistant, then ask 💻 Coder a question → must serialize
-   under `_GEN_LOCK`, not OOM. **This is the test that proves the architecture.**
-10. **Coder eviction** — after using 💻 Coder, start a new chat and return to it; expect the ~38 s
-    reload described above until the task-model decision is made.
+| Case | Entry | Model actually reached | Answer | Proves |
+|---|---|---|---|---|
+| A1 | knowledge | `dolphin-venice:24b` ✅ | ✅ "Canberra" | entry → correct model |
+| A2 | knowledge | `dolphin-venice:24b` ✅ | ✅ 80 km/h | multi-step reasoning intact |
+| A3 | knowledge | `dolphin-venice:24b` ✅ | ✅ "Persimmon / matte green" | **`keep_system=True` works end-to-end** |
+| C1 | coder | `Qwen3.6-35B-A3B` ✅ | ✅ correct iterative `fib` | coder entry → coder model |
+| C2 | coder | `Qwen3.6-35B-A3B` ✅ | ✅ names the mutable-default bug | real code reasoning |
+| C3 | coder | `Qwen3.6-35B-A3B` ✅ | ✅ used the `zz_` prefix | system-message conventions honoured |
+
+A3 and C3 are the important ones. Their facts (*"bicycle named Persimmon"*, *"prefix helpers with
+`zz_`"*) exist nowhere in training data, so a correct answer is proof the system message survived to
+the model — the exact thing the old unconditional strip destroyed. Both showed
+`roles=['system','system','user']` on the wire: the pipe's own guard **plus** the caller's system
+message.
+
+*Minor observation, not a defect:* C3 answered in JavaScript for a prompt that never named a
+language. The criterion was the prefix, so it passed. Specify the language when it matters.
+
+### Your checklist (browser-only — these genuinely cannot be driven from a shell)
+
+Everything shell-drivable is now automated and passing. The OWUI **HTTP API requires your browser
+session** (`auth.enable_api_keys=false`, and extracting the session-signing secret to mint a token was
+correctly refused), so these need you. Exact prompts and exact pass criteria:
+
+**Setup (30 s)**
+1. Open OWUI. In the model picker, confirm **three** entries exist: 🪄 Assistant, 📚 Knowledge, 💻 Coder.
+
+**The Phase 1 regression — the bug that started all this (2 min)**
+2. Select **🪄 Assistant**. Attach any PDF whose text contains the words "video" or "picture of"
+   (`~/Downloads/ojsadmin,+Men+in+Charge.pdf` works). Send: `summarise this document for me`
+   → **PASS = it writes a summary. FAIL = it starts rendering an image or video.**
+3. Same chat, same PDF attached, send: `make a picture of a cat`
+   → **PASS = renders a cat** (not something built from the document's words).
+
+**Documents / Tika (3 min)**
+4. Workspace → Knowledge → create a base. Upload a `.doc`, a `.msg`, and a scanned/photographed PDF.
+   → **PASS = all three ingest with no error.** `.doc`/`.msg` used to hard-fail.
+5. Attach that base to **📚 Knowledge**, ask a question answerable only from it.
+   → **PASS = correct answer AND citation badges appear.**
+
+**Web search — this silently did nothing before (1 min)**
+6. On **📚 Knowledge**, toggle the web-search button, ask: `what is the latest stable Linux kernel version?`
+   → **PASS = it searches and the answer reflects results.** FAIL = it answers from memory or ignores it.
+
+**Memory (2 min, needs two chats)**
+7. On **📚 Knowledge**: `Remember that my project deadline is 14 August and my editor is Helix.`
+8. Start a **new chat**, still 📚 Knowledge: `what is my project deadline and which editor do I use?`
+   → **PASS = recalls both.** (Adaptive Memory is scoped to Knowledge/Coder — it will *not* work on
+   🪄 Assistant, by design.)
+
+**Speech (1 min)**
+9. Press the 🔊 speaker icon on any reply → **PASS = audible speech** (Kokoro).
+10. Press the 🎤 mic, say a sentence → **PASS = transcribed.** *Currently runs whisper on GPU; see the
+    STT decision still outstanding.*
+
+**The architecture test — the one that actually matters (5 min)**
+11. On **🪄 Assistant**: `make a video of a dog running through a field`. While it is rendering,
+    open a second chat on **💻 Coder** and ask: `write a python decorator that retries on exception`.
+    → **PASS = the coder answer waits, then arrives. FAIL = CUDA OOM, or either job dies.**
+    This is what `_GEN_LOCK` exists for and nothing else has exercised it.
+
+**Task model (30 s)**
+12. Start any new chat and let it auto-title. Then run `ollama ps` in a terminal.
+    → **PASS = `gemma4:e2b` appears**, not the 14 GB or 18 GB model.
+13. After using 💻 Coder, start a new chat, then go back and ask Coder something.
+    → Expect a **~6 s** pause (not 38 s) on the first message — the eviction described above.
 
 **Integration (original list, for reference):**
 
