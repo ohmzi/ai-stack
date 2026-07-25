@@ -200,6 +200,38 @@ async def grade_vqa(session, image_b64, spec, vision_model):
 
 # ------------------------------------------------------------------------------------- case runner
 IMG_RE = re.compile(r'data:image/\w+;base64,([A-Za-z0-9+/=]+)')
+VID_RE = re.compile(r'data:video/\w+;base64,([A-Za-z0-9+/=]+)')
+
+
+def video_mid_frame(b64):
+    """Decode a representative frame from a base64 webm so video can be VQA-graded like an image.
+
+    The host has no ffmpeg; the open-webui container does, and the pipe itself already depends on
+    that same binary for _concat_webms. Reusing it avoids adding a host dependency just for tests.
+    Returns base64 PNG, or None if extraction fails (graded as 'frame extraction failed', never as a
+    model quality problem).
+    """
+    import base64
+    try:
+        with tempfile.TemporaryDirectory() as td:
+            vp = os.path.join(td, "clip.webm")
+            fp = os.path.join(td, "frame.png")
+            with open(vp, "wb") as f:
+                f.write(base64.b64decode(b64))
+            if subprocess.run(["docker", "cp", vp, "open-webui:/tmp/_eval_clip.webm"],
+                              capture_output=True, timeout=120).returncode:
+                return None
+            # Seek ~1s in: the first frames of a diffusion clip are often the least settled.
+            if subprocess.run(["docker", "exec", "open-webui", "ffmpeg", "-y", "-ss", "1",
+                               "-i", "/tmp/_eval_clip.webm", "-frames:v", "1",
+                               "/tmp/_eval_frame.png"], capture_output=True, timeout=120).returncode:
+                return None
+            if subprocess.run(["docker", "cp", "open-webui:/tmp/_eval_frame.png", fp],
+                              capture_output=True, timeout=120).returncode:
+                return None
+            return base64.b64encode(open(fp, "rb").read()).decode()
+    except Exception:
+        return None
 
 
 async def run_case(mod, case, models):
@@ -257,11 +289,20 @@ async def run_case(mod, case, models):
         got_route = next((k for k, v in models.items() if v == used), used or "?")
     traj_ok = got_route == want
 
+    # For VQA grading, a video is reduced to a representative frame so both media types grade the
+    # same way. Images are used directly.
     m = IMG_RE.search(media)
+    frame = m.group(1) if m else None
+    if frame is None and case["grade"].get("type") == "vqa":
+        v = VID_RE.search(media)
+        if v:
+            frame = video_mid_frame(v.group(1))
+            if frame is None:
+                media_err = "video generated, but frame extraction failed"
     return {"id": case["id"], "cat": case["cat"], "tier": case["tier"], "entry": entry,
             "want_route": want, "got_route": got_route, "traj_ok": traj_ok,
             "media_err": media_err,
-            "answer": answer[:6000], "image_b64": m.group(1) if m else None,
+            "answer": answer[:6000], "image_b64": frame,
             "elapsed": round(elapsed, 1), "grade": case["grade"], "why": case.get("why", "")}
 
 
@@ -279,12 +320,15 @@ async def main(a):
     models = suite["models"]
     judge_model = a.judge or models["vision"]
 
-    cases = [c for c in suite["cases"] if c["tier"] in TIERS[a.tier]]
+    # An explicit --only/--cat selection overrides the tier filter: asking for a case by name and
+    # silently getting nothing because it lives in a higher tier is a trap.
     if a.only:
         want = {x.strip() for x in a.only.split(",")}
-        cases = [c for c in cases if c["id"] in want]
-    if a.cat:
-        cases = [c for c in cases if c["cat"] == a.cat]
+        cases = [c for c in suite["cases"] if c["id"] in want]
+    elif a.cat:
+        cases = [c for c in suite["cases"] if c["cat"] == a.cat]
+    else:
+        cases = [c for c in suite["cases"] if c["tier"] in TIERS[a.tier]]
     if not cases:
         print("no cases matched")
         return 1

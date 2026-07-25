@@ -81,11 +81,31 @@ self-preference, format, and calibration drift. Mitigations applied:
 ### 1.4 Repeatability
 
 - Cases are versioned data (`cases.json` carries a `version`), so a changed expectation is a diff.
-- Temperature 0 for classifier and judge. The routing classifier was verified deterministic
+- Temperature 0 for the routing classifier and the judge. The classifier was verified deterministic
   (8/8 identical verdicts on the same input).
 - `--save-baseline` / `--compare` turn the suite into a regression detector: it reports
   `PASS -> FAIL` as a regression and `FAIL -> PASS` as an improvement, per axis, per case.
 - Results are timestamped and never overwritten.
+
+> **How repeatable is it, honestly?** The two axes differ, and it matters:
+>
+> | Axis / grader | Stability | Why |
+> |---|---|---|
+> | **Trajectory** | deterministic | regex tiers, plus a temperature-0 classifier |
+> | `regex`, `execute` | deterministic *given the same answer* | no model in the grading loop |
+> | `vqa` | near-deterministic | temperature-0 vision model, but generation is seeded per render |
+> | `judge` | **can flip between runs** | the *answering* model is not temperature-0 |
+>
+> Observed directly: across two consecutive full runs, **R05 flipped FAIL → PASS**. Not the judge and
+> not the harness — the coder's answer changed. One run discussed coffee *and* the Java language
+> (failing a criterion that forbids the latter); the next discussed only coffee. The pipe does not
+> pin temperature for chat, so open-ended answers vary between runs.
+>
+> Practical consequence: **treat a single `judge` flip as noise; treat a `regex`/`execute` flip as a
+> real regression.** This is a further argument for the grader hierarchy in §1.2 — the objective
+> graders are not merely more accurate, they are more *stable*, which is what a regression detector
+> actually needs. If a judge case matters enough to gate on, run it a few times and take the
+> majority, or rewrite the criterion so a deterministic grader can express it.
 
 ---
 
@@ -141,19 +161,27 @@ so. But a model that *always* says "not in the document" would pass G01 while be
 
 ## 3. Results — 2026-07-25 baseline
 
-Standard tier, 28 cases. **Trajectory 27/28. Outcome 16/20 graded.**
+Full tier, 32 cases. **Trajectory 31/32. Outcome 23/24 graded.** Wall clock ~15 min.
+(Saved as `tests/eval/baseline.json`; the one outcome failure is RE02.)
 
-| Category | Result |
-|---|---|
-| routing | 3/3 |
-| routing-trap | 4/5 |
-| factual | 3/3 |
-| reasoning | 2/3 |
-| critical-thinking | **4/4** |
-| coding | 3/4 |
-| grounding | 2/2 |
-| memory-context | 2/2 |
-| output-hygiene | 2/2 |
+| Category | Result | Note |
+|---|---|---|
+| routing | 3/3 | |
+| routing-trap | 4/5 | R05, documented known-fail |
+| factual | 3/3 | |
+| reasoning | 2/3 | RE02 — see below |
+| critical-thinking | **4/4** | strongest dimension |
+| coding | **4/4** | execution-graded |
+| grounding | 2/2 | incl. positive control |
+| memory-context | 2/2 | |
+| output-hygiene | 2/2 | |
+| media-generation | 3/3 | VQA 4/4, 3/3, 2/2 |
+| media-editing | 1/1 | two-turn edit, VQA 2/2 |
+
+**Media is solid.** V01 (red bicycle / blue door) scored 4/4 on prompt adherence, V02 (rubber duck on
+books) 3/3, and V04 (red balloon in blue sky) 2/2 from an extracted video frame. **V03 is the
+notable one** — a two-turn edit where the pipe located the previously generated mug and recoloured
+it, scoring 2/2. That exercises the conversation-state path, not just generation.
 
 ### Genuine findings
 
@@ -168,16 +196,20 @@ response. RE03 (the widget problem) passes, so this is a specific weakness rathe
 reasoning failure. **Real limitation of `dolphin-venice:24b`, not a stack bug.**
 
 **R05 — one routing miss, deterministic and benign.** *"My java tastes burnt this morning, any idea
-why?"* routes to the coder. Verified deterministic across 8 runs: `gemma3:1b` reads the trailing
-*"any idea why?"* as a debugging request; without that clause it correctly says CHAT. The answer is
-still about coffee, so the cost is a larger model load, not a wrong answer. Kept as a documented
-known-fail so any behaviour change is visible.
+why?"* routes to the coder. The *routing* is deterministic across 8 runs: `gemma3:1b` reads the
+trailing *"any idea why?"* as a debugging request; without that clause it correctly says CHAT. The
+answer is still about coffee, so the cost is a larger model load, not a wrong answer. Kept as a
+documented known-fail so any behaviour change is visible.
+
+Its *outcome* verdict, by contrast, flipped between two consecutive runs — the coder mentioned the
+Java language alongside the coffee answer in one run and not the other. See the repeatability box in
+§1.4: the routing decision is stable, the free-text answer is not.
 
 **CO04 — lowercasing tie-break.** The coder occasionally mishandles case-folding in word counts.
 
-### Two bugs the suite found in itself
+### Three bugs the suite found in itself
 
-Worth recording, because both would have produced **false accusations against the models**:
+Worth recording, because all three would have produced **false accusations against the models**:
 
 1. **Media routing looked like a routing failure.** ComfyUI's GPU allocator was wedged, so R03/R04
    returned the pipe's `⚠️ Image failed…` message. The runner scored that as "chatted instead of
@@ -190,6 +222,15 @@ Worth recording, because both would have produced **false accusations against th
    indistinguishable from the model emitting broken code. CO01 and CO04 were both blamed for this.
    Fixed by escaping via `json.dumps`. Only quote-free cases (CO02, CO03) had passed, which is
    exactly the fingerprint of a harness bug rather than a model one.
+3. **Video could not be graded at all.** The VQA grader matched only `data:image/…`, so V04 reported
+   *"no image was produced"* — after 192 seconds of successful generation. Fixed by extracting a
+   representative frame (seeking ~1s in, since the opening frames of a diffusion clip are the least
+   settled) using the **ffmpeg inside the open-webui container**; the host has none, and the pipe
+   already depends on that same binary for `_concat_webms`. V04 then scored 2/2.
+
+A usability trap was fixed alongside: `--only V04` silently matched nothing, because case selection
+was applied *after* the tier filter and V04 lives in `full`. An explicit `--only`/`--cat` now
+overrides the tier.
 
 **And one bad golden answer.** CO04 originally expected `top_k_words('the The the', 1)` to be
 `[('the', 2)]`. It is `[('the', 3)]` — three words case-fold to "the". The model was right and the
@@ -238,8 +279,9 @@ Fields: `tier` (smoke|standard|full), `cat`, `entry` (auto|knowledge|coder), `ro
 2. **Prefer `execute` or `regex` over `judge`.** If an answer can be checked deterministically, check
    it deterministically.
 3. **Pair every negative case with a positive control**, as G01/G02 do.
-4. **When a case fails, check the harness before blaming the model.** Two of the first four failures
-   here were the suite's fault.
+4. **When a case fails, check the harness before blaming the model.** Three of the first five
+   failures here were the suite's fault, and a fourth was a wrong golden answer. The models were
+   responsible for exactly one of them.
 5. **Keep known-fails in the suite** with a `known_issue` note rather than deleting them. A suite
    that only contains passing tests measures nothing.
 
