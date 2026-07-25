@@ -28,3 +28,30 @@ services:
       timeout: 5s
       retries: 3
       start_period: 20s
+
+  # Web search. 0 VRAM.
+  # settings.yml MUST enable the json format — upstream ships [html] only and webapp.py returns 404
+  # for format=json otherwise. That is the single most common SearXNG-with-OWUI failure.
+  searxng:
+    image: searxng/searxng:latest
+    container_name: searxng
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:8888:8080"
+    volumes:
+      - ./searxng:/etc/searxng:rw
+    environment:
+      - SEARXNG_BASE_URL=http://localhost:8888/
+      - UWSGI_WORKERS=4
+      - UWSGI_THREADS=4
+    cap_drop:
+      - ALL
+    cap_add:
+      - CHOWN
+      - SETGID
+      - SETUID
+    logging:
+      driver: json-file
+      options:
+        max-size: "1m"
+        max-file: "1"

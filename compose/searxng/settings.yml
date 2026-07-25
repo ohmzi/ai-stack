@@ -1,0 +1,56 @@
+# SearXNG settings for server-to-server use by Open WebUI.
+#
+# Three things break virtually every guide; all three are handled here:
+#
+#  1. search.formats MUST include `json`. Upstream default is [html] only, and webapp.py returns
+#     404 for format=json otherwise. This is the #1 cause of "web search does nothing".
+#  2. server.limiter MUST be false. The deprecated searxng-docker template set it true, which is
+#     why so many setups get 403/429 on server-to-server queries.
+#  3. The searxng-docker repo itself is superseded — it now contains only a LICENSE and a README
+#     saying so. This file is hand-written per docs.searxng.org instead.
+#
+# Note: OWUI 0.10.2 no longer needs the legacy `<query>` placeholder in the query URL; searxng.py
+# actively strips any query string from it.
+
+use_default_settings: true
+
+general:
+  debug: false
+  instance_name: "searxng"
+  # No public instance — donation/contact links are noise here.
+  donation_url: false
+  contact_url: false
+
+server:
+  # Generated per-install. Not a secret that protects anything reachable off-host (the port is
+  # bound to 127.0.0.1), but SearXNG refuses to start without one.
+  secret_key: "715c345044f1c6a31d5041f5266c8278d470ba1a678390c04e00de66f55517a5"
+  limiter: false
+  image_proxy: false
+  method: "GET"
+
+search:
+  safe_search: 0
+  autocomplete: ""
+  default_lang: "en"
+  # THE important line — without json here, OWUI gets a 404 and web search silently does nothing.
+  formats:
+    - html
+    - json
+
+ui:
+  static_use_hash: true
+
+# Keep the engine set small and reliable for programmatic use. Engines that rate-limit aggressively
+# or need API keys are left disabled by default via use_default_settings.
+engines:
+  - name: wikipedia
+    disabled: false
+  - name: duckduckgo
+    disabled: false
+  - name: bing
+    disabled: false
+  - name: brave
+    disabled: false
+  - name: startpage
+    disabled: false
