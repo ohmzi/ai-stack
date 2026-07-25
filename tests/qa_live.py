@@ -64,6 +64,19 @@ CASES = [
      "Says the bicycle is named Persimmon AND that it is (matte) green. Both required. Saying it "
      "does not know, or inventing a different name/colour, is WRONG."),
 
+    # The 🪄 auto entry must pick the model itself — no manual entry switching.
+    ("B1", "auto",
+     [{"role": "user", "content": "What is the tallest mountain in Africa? One sentence."}],
+     "dolphin-venice:24b",
+     "States Mount Kilimanjaro. Anything else is WRONG."),
+
+    ("B2", "auto",
+     [{"role": "user", "content": "Write a Python function that reverses a string without using "
+                                  "slicing. Code only."}],
+     "hf.co/unsloth/Qwen3.6-35B-A3B-GGUF:UD-IQ4_XS",
+     "Contains a Python function that reverses a string and does NOT use [::-1] slicing. "
+     "A loop, reversed(), or recursion are all acceptable."),
+
     ("C1", "coder",
      [{"role": "user", "content": "Write a Python function fib(n) returning the nth Fibonacci number "
                                   "iteratively, with fib(0)=0. Code only."}],

@@ -43,6 +43,17 @@ VID_ENHANCE = True  # expand terse video ideas ("guy shooting hoops") into detai
 VID_VERIFY = True   # vision-check a mid frame of the clip against the request; one corrected retry
 VID_VERIFY_MODE = "anchors"  # multi-shot QA scope: "anchors" = shot 1 + last shot only | "all" = every shot
 
+# --- automatic coder routing on the 'auto' entry -------------------------------------------------
+# Lets 🪄 Assistant hand a coding question to the big coder tenant without the user switching entries.
+# Media routing always wins first; this only ever affects turns that were already going to be chat.
+AUTO_ROUTE_CODER = True
+# Classifier for prompts the regexes can't call confidently. gemma3:1b is 0.99 GB and is PROVEN to
+# stay co-resident with the 18.37 GB coder (measured 20561/24576 MiB), so a classify->answer turn
+# costs ONE model load. Do NOT use gemma4:e2b here: at ~3.3 GB it evicts the coder, so every routed
+# turn would pay two loads instead of none.
+ROUTE_CLASSIFIER_MODEL = "gemma3:1b"
+ROUTE_CLASSIFIER_TIMEOUT = 12       # seconds; on any failure we fall back to normal chat
+
 
 class Pipe:
     def __init__(self):
@@ -111,6 +122,102 @@ class Pipe:
             # whole string was injected context, leaving only whatever preceded it (normally "").
             text = text[sep + 2:] if sep != -1 else text[:idx]
         return text
+
+    # ---------- coder intent (auto entry) ----------
+    # Three tiers so the common cases cost nothing:
+    #   STRONG  -> certainly code, route immediately, no LLM call
+    #   HINT    -> could go either way ("what does this python error mean" vs "my python died")
+    #              -> ask the 1 B classifier
+    #   neither -> normal chat, no LLM call
+    # Everything here runs on the CLEAN prompt (post user_prompt + _strip_injected_context), never on
+    # RAG or filter-injected text — that distinction is what Phase 1 was about.
+
+    # Literal code on screen, or an explicit build/fix instruction aimed at a code noun.
+    _CODE_STRONG = re.compile(
+        r"```|~~~"                                                    # fenced block
+        r"|^\s*(?:def|class|import|from|package|func|fn|const|let|var|public|private)\s+\w"
+        r"|#include\s*<|</?[a-z]+>|\bSELECT\b[\s\S]{0,80}\bFROM\b"
+        r"|\b(?:traceback|stack\s?trace|segmentation fault|core dumped)\b"
+        r"|\b(?:[A-Za-z]*(?:Error|Exception))\b\s*:"                  # TypeError:, NullPointerException:
+        r"|\b(?:write|create|generate|implement|refactor|rewrite|debug|fix|optimi[sz]e|profile|"
+        r"unit[\s-]?test|benchmark)\b[^.?!]{0,60}\b(?:function|method|class|script|program|query|"
+        r"regex|regexp|api|endpoint|component|module|algorithm|snippet|code|test|parser|decorator|"
+        r"middleware|migration|schema|dockerfile|makefile|cli)\b",
+        re.I | re.M)
+
+    # Vocabulary that *suggests* programming but is regularly used about non-code things.
+    _CODE_HINT = re.compile(
+        r"\b(python|javascript|typescript|node|react|vue|svelte|rust|golang|\bgo\b|java|kotlin|swift|"
+        r"c\+\+|c#|php|ruby|perl|scala|haskell|elixir|bash|zsh|shell|powershell|sql|postgres|mysql|"
+        r"sqlite|mongo|redis|regex|docker|kubernetes|k8s|terraform|ansible|nginx|git|github|gitlab|"
+        r"json|yaml|xml|csv|api|rest|graphql|npm|yarn|pnpm|pip|poetry|cargo|gradle|maven|webpack|"
+        r"vite|compile|compiler|runtime|stacktrace|async|await|thread|mutex|pointer|dataframe|numpy|"
+        r"pandas|pytorch|tensorflow|linter|lint|refactor|codebase|repository|repo|commit|merge|"
+        r"pull request|branch|deploy|ci/cd|pipeline|latency|throughput|algorithm|recursion|"
+        r"big[- ]o|complexity|syntax|variable|array|dictionary|hashmap|struct|interface|inheritance)\b",
+        re.I)
+
+    _CLASSIFY_PROMPT = (
+        "Classify the user's message. Answer with ONE word, nothing else.\n"
+        "Answer CODE if they want software written, explained, debugged, reviewed or optimised, "
+        "or are asking about programming, databases, shells, APIs or developer tooling.\n"
+        "Answer CHAT for anything else, including casual talk that merely mentions technology.\n\n"
+        "Examples:\n"
+        "fix this null pointer in my java service -> CODE\n"
+        "my python died last week, poor snake -> CHAT\n"
+        "how do I make a rest api paginate -> CODE\n"
+        "is javascript a good career in 2026 -> CHAT\n"
+        "explain big-o for quicksort -> CODE\n"
+        "what should I cook tonight -> CHAT\n\n"
+        "Message: {msg}\nAnswer:")
+
+    def _classify_code(self, text):
+        """Ask the small classifier whether an ambiguous prompt is a coding request.
+
+        Any failure (model absent, timeout, junk output) returns False so the turn falls back to
+        ordinary chat — a routing helper must never be able to break the chat path.
+        """
+        try:
+            r = requests.post(
+                f"{self.ollama}/api/chat",
+                json={"model": ROUTE_CLASSIFIER_MODEL, "stream": False, "think": False,
+                      "options": {"temperature": 0, "num_predict": 4},
+                      "messages": [{"role": "user",
+                                    "content": self._CLASSIFY_PROMPT.format(msg=text[:600])}]},
+                timeout=ROUTE_CLASSIFIER_TIMEOUT)
+            if r.status_code != 200:
+                return False
+            verdict = ((r.json().get("message") or {}).get("content") or "").strip().upper()
+            return verdict.startswith("CODE")
+        except Exception:
+            return False
+
+    def _is_code_request(self, text):
+        """True when the 'auto' entry should answer with the coder tenant instead of the chat model."""
+        if not AUTO_ROUTE_CODER or not text:
+            return False
+        if self._CODE_STRONG.search(text):
+            return True
+        if not self._CODE_HINT.search(text):
+            return False
+        return self._classify_code(text)
+
+    async def _locked_stream(self, inner):
+        """Hold _GEN_LOCK for a whole streamed reply, so loading a large tenant can't land in the
+        middle of a ComfyUI render. Acquired on a worker thread (never the event loop) and released
+        in `finally` so a client disconnect cannot leak it."""
+        await asyncio.to_thread(_GEN_LOCK.acquire)
+        try:
+            async for tok in inner:
+                yield tok
+        finally:
+            # Release BEFORE closing `inner`: the lock is the contended resource and must come back
+            # even if the underlying HTTP stream misbehaves on teardown.
+            _GEN_LOCK.release()
+            try:
+                await inner.aclose()
+            except Exception:
+                pass
 
     # ---------- content parsing ----------
     def _last_user(self, messages):
@@ -1362,7 +1469,7 @@ class Pipe:
         "state the language and any assumptions, and point out real bugs or edge cases you notice. "
         "Use fenced code blocks. This entry does not generate images or video.")
 
-    async def _entry_chat_stream(self, entry, messages):
+    def _entry_chat_stream(self, entry, messages):
         """Chat path for the non-'auto' manifold entries. No media routing reaches here at all.
 
         The coder entry loads a large tenant (Phase 8: ~17.7 GB), so it is serialized under the same
@@ -1378,18 +1485,12 @@ class Pipe:
         else:
             guard, model = self._KNOWLEDGE_GUARD, None
 
+        # Deliberately NOT an async generator: it RETURNS the stream rather than iterating it. Wrapping
+        # one generator in another breaks close propagation — aclose() on the outer raises
+        # GeneratorExit there, and the inner is only finalised whenever GC gets to it, so a client
+        # disconnect would hold _GEN_LOCK (and the GPU) for an unbounded time.
         inner = self._achat_stream(messages, guard_text=guard, keep_system=True, force_model=model)
-        if entry != "coder":
-            async for tok in inner:
-                yield tok
-            return
-
-        await asyncio.to_thread(_GEN_LOCK.acquire)
-        try:
-            async for tok in inner:
-                yield tok
-        finally:
-            _GEN_LOCK.release()
+        return self._locked_stream(inner) if entry == "coder" else inner
 
     async def _gen_and_cache(self, cid, prompt, ref, msgs=None):
         def run():
@@ -1637,10 +1738,19 @@ class Pipe:
         # question about it, attach the pixels to the last user message so the vision model (gemma4)
         # actually sees it — otherwise text-only dolphin answers blind (the image was scrubbed).
         omsgs = self._ollama_messages(msgs)
-        if kind == "image" and isinstance(media, str) and not ref:
+        attached_img = kind == "image" and isinstance(media, str) and not ref
+        if attached_img:
             for m in reversed(omsgs):
                 if m.get("role") == "user":
                     if media not in (m.get("images") or []):
                         m["images"] = (m.get("images") or []) + [media]
                     break
+        # Automatic coder routing. Reached only when every media branch above declined, so a request
+        # to *render* something never gets diverted into a text answer. Skipped when the turn carries
+        # an image, because that has to go to the vision model — the coder is text-only.
+        # `text` here is the clean routing prompt (metadata user_prompt, filter blocks stripped),
+        # never the RAG blob, so a document about Python cannot pull the conversation to the coder.
+        if not attached_img and not ref and await asyncio.to_thread(self._is_code_request, text):
+            return self._locked_stream(self._achat_stream(
+                omsgs, guard_text=self._CODER_GUARD, force_model=self.coder_model))
         return self._achat_stream(omsgs)

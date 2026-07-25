@@ -264,6 +264,65 @@ mechanism above remains available if legacy proves too limiting.
 
 ---
 
+## Phase 2b — Automatic coder routing on 🪄 auto ✅ DONE
+
+**Question answered: no, you do not have to switch entries to get the coder.** 🪄 Assistant now picks
+the model itself. What it *cannot* do is switch on knowledge bases, web search or citations —
+`function_calling: "legacy"` is read by middleware at `:2363`/`:2377`/`:2458` **before the pipe is
+ever invoked**, so it is a per-entry setting and the pipe has no say. 📚 Knowledge stays the entry
+for document- and recall-shaped work.
+
+### How the decision is made — three tiers, so the common cases cost nothing
+
+| Tier | Trigger | Cost | Action |
+|---|---|---|---|
+| **STRONG** | fenced code, `def`/`class`/`import`/`#include`, `SELECT…FROM`, a traceback, `TypeError:`, or a build/fix verb aimed at a code noun | 0 | → coder immediately |
+| **HINT** | programming vocabulary that is regularly used about non-code things (`python`, `rust`, `docker`, `git`, `java`…) | one small LLM call | ask the classifier |
+| neither | — | 0 | → normal chat |
+
+**Classifier is `gemma3:1b` (0.99 GB), and the choice is load-bearing.** It is the one model *proven*
+to stay co-resident with the 18.37 GB coder (20561/24576 MiB measured), so a classify→answer turn
+costs **one** model load. `gemma4:e2b` at ~3.3 GB would evict the coder, making every routed turn pay
+**two** loads. Do not "upgrade" the classifier without re-checking co-residency.
+
+### Ordering guarantees
+
+- **Media always wins.** Coder routing is reached only after every media branch declines, so
+  *"make a picture of a python snake in a data centre"* still renders an image.
+- **Vision beats coder.** A turn carrying an image goes to `gemma4:31b`; the coder is text-only.
+- **Routing uses the clean prompt** (`user_prompt` + `_strip_injected_context`), so a RAG blob full of
+  Python or a memory saying *"the user is a Rust developer"* cannot drag the conversation to the coder.
+- **Failure degrades to chat.** Classifier unreachable, timed out, or returning junk → ordinary chat.
+  A routing helper must never be able to break the chat path.
+- The coder route holds `_GEN_LOCK` for the whole stream, exactly as the 💻 Coder entry does.
+
+### Measured classifier accuracy — `gemma3:1b`, 12 deliberately ambiguous prompts: **10/12**
+
+Both misses are in the safe direction and are arguably not wrong: *"my python keeps dying on me"* and
+*"is javascript still worth learning in 2026?"* → CODE. A coding-tuned model answering a career
+question is fine; the chat model fumbling a borrow-checker question is not. **There were no misses in
+the dangerous direction** — every genuine coding question routed correctly.
+
+A "refined" classifier prompt was tried and **rejected on evidence**: it scored 7/12, fixing the
+JavaScript case but breaking four clear CHAT ones (*"my java tastes burnt this morning"* → CODE,
+which would waste an 18 GB load). The original prompt is kept.
+
+### Tests
+
+`tests/test_autoroute.py` — **39 checks, all passing**, including: 8 STRONG cases that must route
+without consulting the classifier, 5 plain cases that must not consult it either, media-wins cases
+phrased with programming words, an attached image beating the coder, RAG- and memory-injected text
+failing to pull the route, and classifier-unreachable degrading to chat.
+
+`tests/qa_live.py` grew cases **B1/B2** — on 🪄 auto, *"tallest mountain in Africa"* → `dolphin`
+(answered Kilimanjaro) and *"reverse a string without slicing"* → `Qwen3.6` (answered with a loop).
+Both verified at the wire level and graded PASS. **16/16 overall.**
+
+**Toggle:** `AUTO_ROUTE_CODER = True` at the top of `auto_assistant.py`. Set `False` to go back to
+manual entry selection.
+
+---
+
 ## Phase 3 — Documents & OCR
 
 **Your pick was `baidu/Unlimited-OCR`. It is real** (MIT, released 2026-06-23, 3B total / ~500M active
