@@ -7,3 +7,6 @@ pipes/backup-*/
 *.bak
 *.bak-*
 webui.db*
+
+# eval run artifacts — baseline.json IS tracked, individual runs are not
+tests/eval/results/
