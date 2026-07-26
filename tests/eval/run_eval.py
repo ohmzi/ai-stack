@@ -287,7 +287,23 @@ async def run_case(mod, case, models):
         got_route, media_err = "MEDIA:image", "routed correctly; image backend failed"
     else:
         used = SENT[0].get("model") if SENT else None
-        got_route = next((k for k, v in models.items() if v == used), used or "?")
+        # Chat, vision and the coder now all resolve to the SAME model tag, so mapping the tag back
+        # to a role name returns whichever key happens to come first — reporting every coder case as
+        # ROUTE-FAIL->chat. Identify the route by the DECISION instead: only the coder branch sends
+        # the coder guard, and only a vision turn carries images[].
+        guard = ""
+        imgs = False
+        if SENT and SENT[0].get("messages"):
+            guard = SENT[0]["messages"][0].get("content") or ""
+            imgs = any(m.get("images") for m in SENT[0]["messages"])
+        if "programming assistant" in guard:
+            got_route = "coder"
+        elif imgs:
+            got_route = "vision"
+        elif used:
+            got_route = "chat"
+        else:
+            got_route = "?"
     traj_ok = got_route == want
 
     # For VQA grading, a video is reduced to a representative frame so both media types grade the

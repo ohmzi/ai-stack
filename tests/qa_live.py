@@ -21,7 +21,11 @@ import asyncio, importlib.util, json, sys, time
 
 PIPE_PATH = sys.argv[1] if len(sys.argv) > 1 else "/home/ohmz/ai-stack/pipes/live/auto_assistant.py"
 OLLAMA = "http://localhost:11434"
-JUDGE_MODEL = "gemma4:31b"          # loaded ONCE at the end to grade every captured response
+# Judge must NOT be the model under test — self-grading inflates scores, which is the whole reason
+# QA_TEST_PLAN.md insists on cross-family judging. gemma4:31b was retired, and the only remaining
+# capable chat model IS the one under test, so the task model takes over: different family (Gemma vs
+# Qwen), and binary PASS/FAIL against a written criterion is well within a 5B.
+JUDGE_MODEL = "gemma4:e2b"
 
 spec = importlib.util.spec_from_file_location("aa_qa", PIPE_PATH)
 mod = importlib.util.module_from_spec(spec)
@@ -124,14 +128,21 @@ async def run_case(cid, entry, messages, expect_model, criterion):
     el = time.time() - t0
     used = SENT[0].get("model") if SENT else None
     sent_roles = [m["role"] for m in SENT[0]["messages"]] if SENT else []
+    sys_ctx = "\n".join(m["content"] for m in messages if m.get("role") == "system")
     return {"id": cid, "entry": entry, "expect_model": expect_model, "used_model": used,
-            "roles_sent": sent_roles, "elapsed": el, "criterion": criterion,
+            "roles_sent": sent_roles, "elapsed": el, "criterion": criterion, "system": sys_ctx,
             "question": messages[-1]["content"], "answer": text.strip()}
 
 
 async def judge(session, r):
+    # The judge MUST see the system context. Without it, a case like A3 — where the fact lives in a
+    # system message — looks like a hallucination and gets failed for being correct. That happened.
+    ctx = f"CONTEXT THE ASSISTANT WAS GIVEN:\n{r['system']}\n\n" if r.get("system") else ""
     prompt = (
-        "You are grading an AI assistant's answer. Be strict and literal.\n\n"
+        "You are grading an AI assistant's answer. Be strict and literal.\n"
+        "Information in CONTEXT was legitimately available to the assistant — using it is CORRECT, "
+        "not hallucination.\n\n"
+        f"{ctx}"
         f"QUESTION:\n{r['question']}\n\n"
         f"ANSWER:\n{r['answer'][:3000]}\n\n"
         f"CORRECTNESS CRITERION:\n{r['criterion']}\n\n"
@@ -159,7 +170,19 @@ async def free_vram():
     await asyncio.sleep(3)
 
 
+def _assert_judge_installed():
+    """A missing judge marks every case UNPARSEABLE, i.e. a total FAIL that looks like a model
+    regression. That happened once when the judge tag was deleted — fail loudly instead."""
+    import urllib.request
+    tags = json.loads(urllib.request.urlopen(f"{OLLAMA}/api/tags", timeout=30).read())
+    names = {m["name"] for m in tags.get("models", [])}
+    if JUDGE_MODEL not in names and f"{JUDGE_MODEL}:latest" not in names:
+        sys.exit(f"judge model {JUDGE_MODEL!r} is not installed — `ollama pull {JUDGE_MODEL}` or pass "
+                 f"a different one. Refusing to run, because a missing judge fails every case.")
+
+
 async def main():
+    _assert_judge_installed()
     print(f"Pipe under test: {PIPE_PATH}")
     print(f"Judge model:     {JUDGE_MODEL}\n")
     print("=" * 78)
