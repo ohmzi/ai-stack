@@ -36,6 +36,133 @@ vision projector and the ~305 MiB CUDA context. Several research passes quoted `
 
 ---
 
+## 0. Model consolidation evaluation — 2026-07-26
+
+_Question asked: can ONE model replace the coder, `dolphin-venice:24b`, and "the Hermes agent"?_
+
+**Answer in one line: two of those three, yes — but not with the model that was proposed, and "Hermes
+Agent" is not a model at all.**
+
+### 0.1 What was actually tested
+
+`tests/bench_models.py` (committed, re-runnable). Objective grading wherever possible: coding is
+**executed** against hidden tests, refusals are pattern-matched, facts are exact-matched, and only
+false-premise probes are judged — by a *third* model, so nothing grades its own family. Models load
+one at a time; the box cannot hold two.
+
+| Metric | `Qwen3.6-35B-A3B` *(incumbent coder)* | `hermes-genesis:apex-compact` *(candidate)* | `dolphin-venice:24b` |
+|---|---|---|---|
+| VRAM (nvidia-smi delta) | 18369 MiB | **18285 MiB** | 16581 MiB |
+| gen tok/s | 130.8 | **135.3** | 52.9 |
+| **Coding** — 9 tasks × 3 runs, executed | 27/27 | 27/27 | 27/27 |
+| **Uncensored** — enhancer-style prompts | **3/5** ❌ | **5/5** ✅ | 5/5 ✅ |
+| General exact-match | 4/5 | 4/5 | 4/5 |
+| Critical thinking (judged) | 2/2 | 2/2 | 1/2 |
+| Vision | PASS | PASS | **no support** (HTTP 400) |
+
+> ⚠️ **The coding row does not discriminate.** All three scored 27/27, *including* on the harder tier
+> added specifically to separate them (touching-interval merges, subtractive Roman parsing, stride
+> arithmetic, in-place mutation). This shows **no detectable regression** — it does *not* show equal
+> quality. Do not cite it as evidence that the candidate codes as well as the incumbent.
+
+The one dimension that *did* separate them is refusals, which is the dimension that matters for
+retiring `dolphin`: the incumbent coder refused 2 of 5 prompt-enhancer requests. That is exactly why
+`dolphin` is still installed.
+
+### 0.2 Why the tested candidate is NOT recommended
+
+The benchmark says adopt it. The provenance says do not. Provenance wins, because the benchmark
+cannot see the risk.
+
+| Claim | Evidence |
+|---|---|
+| **Not a Hermes fine-tune** | The "Hermes" content is ~2k blocks grafted from two FFN expert tensors of a **Qwen3.5** LoRA — a *different model generation* — into Qwen3.6 weights. |
+| **The GGUF will not name itself** | `general.basename` = `KL0.0764` (a KL-divergence number), `general.finetune` = `3Ref`, and **no `base_model` key at all**. Verified locally via `/api/show`. Legitimate derivatives declare their parent. |
+| **The author says not to use it for this** | *"V5 is useful for uncensored local roleplay. For coding, 27B Genesis is a lot better."* and *"I don't train or finetune models, I repair purity of signal in them on Google Colab Free on a Tesla T4."* |
+| **`ollama pull` gives you the wrong model** | No tag selects V5. `:latest` resolves to a 17,327,724,672-byte layer = **V3**, not V5 (17,392,736,384). `APEX-Compact` and `Q4_K_M` both return HTTP 400. This evaluation only tested V5 because the GGUF was downloaded directly. |
+
+One claim *did* check out: **`APEX-Compact` is a legitimate standard quant** — Ollama's parser reports
+`general.file_type=15` (Q4_K_M), and a tensor-table dump shows only ordinary k-quants. The marketing
+name hides nothing.
+
+### 0.3 The better-provenanced alternative
+
+**`HauhauCS/Qwen3.6-35B-A3B-Uncensored-HauhauCS-Aggressive`** — verified via the HF API:
+
+- **1,927,138 downloads** (26× the tested candidate), 3,111 likes, Apache-2.0, ungated
+- Abliterated **directly from official `Qwen/Qwen3.6-35B-A3B`** — no cross-generation graft
+- imatrix quants, mmproj bundled, and **cleanly `ollama pull`-able** at standard tags
+  (IQ4_XS / IQ4_NL / Q4_K_M / IQ3_M all resolve with model + projector layers)
+
+It is the upstream artifact the tested candidate was built on top of, minus the dubious part.
+
+**Recommended next step:** pull it, run the same bench, adopt whichever wins. Same benefit, sound
+provenance, and one command instead of a manual GGUF download plus Modelfile.
+
+### 0.4 "Hermes Agent" — resolved
+
+**It is [`NousResearch/hermes-agent`](https://github.com/NousResearch/hermes-agent)** (MIT, 220,767★,
+42k forks, pushed 2026-07-26). Not a model — a Python agent *runtime*: CLI, Telegram/Discord/Slack/
+WhatsApp/Signal gateways, cron scheduler, subagent spawning, skill-learning, FTS5 session memory.
+It also ships an MCP server, which is why several plausible readings of "hermes agent" collapse onto
+this one repo. **There is no Open WebUI component called Hermes** — a code search across `open-webui`
+returns only docs referencing this project.
+
+Open WebUI documents it **first-party** (`connect-an-agent/hermes-agent.mdx`), one of three agents
+they officially support.
+
+**But adopting it conflicts with this stack's architecture.** OWUI connects to it as a plain OpenAI
+connection (`http://localhost:8642/v1`), which means:
+
+- a second model row in a picker deliberately collapsed to one, and
+- a path that **bypasses `auto_assistant.auto` entirely** — no media routing, no memory, no
+  `_GEN_LOCK`. Every Hermes turn would load an 18.4 GB tenant **outside the lock**, which is precisely
+  the "can load a coder mid-render" failure that Phase 2 rejected shape A over.
+
+It can run fully local (provider `custom`, aliases `ollama`/`local`/`vllm`/`llamacpp`), and
+`OFFLINE_MODE=true` does not block it. Port 8642 is free.
+
+**Verdict: not rejected, but not a drop-in.** If wanted, evaluate it standalone in a terminal first.
+Do not wire it in as a second OWUI connection without deciding to reverse the single-entry collapse.
+
+**Two integration facts already measured**, should it ever be pointed at local Ollama:
+
+| Parameter on `/v1/chat/completions` | Tokens to answer "OK" |
+|---|---|
+| *(none)* | 171 — and **empty content** at `max_tokens:16` |
+| `"think": false` | 144 — **silently ignored** on this endpoint |
+| `"chat_template_kwargs": {"enable_thinking": false}` | 201 — **silently ignored** |
+| **`"reasoning_effort": "none"`** | **2** |
+
+The thinking model burns ~150 tokens on every trivial call through the OpenAI-compatible endpoint and
+returns **empty** on tight budgets — which would break an agent runtime making many small calls.
+Note this is a **different knob** from the native `/api/chat` `think: false` the pipe already uses.
+
+### 0.5 Free capability already owned: OpenWebUI Skills
+
+OWUI 0.10.2 ships a `skill` table, a `/api/v1/skills` router, and injection at
+`utils/middleware.py:2509-2556`. The gate is `use_builtin_tools`, which is **False whenever
+`function_calling == 'legacy'`** (`:2517-2521`). At `:2535`:
+
+```python
+if skill.id in mentioned_skill_ids or not use_builtin_tools:
+```
+
+→ in **legacy mode the full skill body is injected unconditionally**, where native mode only gets a
+lazy manifest the model must call `view_skill` to expand. **The "handicap" of legacy FC is the better
+branch here.** It lands in the *system* message, so it structurally cannot poison the router, which
+reads `metadata['user_prompt']`.
+
+Caveat: full-body injection every turn consumes context. One or two skills, not a library.
+
+### 0.6 Current state
+
+`hermes-genesis:apex-compact` is **installed but not wired in** — nothing in the pipe points at it.
+All incumbents are untouched. Rollback is `ollama rm hermes-genesis:apex-compact` plus deleting
+`/home/ohmz/models/hermes-genesis/` (18.3 GB).
+
+---
+
 ## 1. Where the stack actually stands
 
 The code is **ahead of the docs, not behind**. Phases 3 and 4 are fully applied in the live config

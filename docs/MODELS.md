@@ -10,6 +10,7 @@ baseline), not estimated — see the warning about `/api/ps` below.
 | **Task model** | `gemma4:e2b` | **3307 MiB** | 166.6 | Chat titles, tags, RAG query generation. Thinking is OFF (see below). ⚠️ see "the phantom". |
 | **Router classifier** | `gemma3:1b` | **1313 MiB** | 235.4 | The HINT-tier chat-vs-code classifier in the pipe. Co-resides with the coder. |
 | _retired_ | `gemma4:31b` | 21772 MiB | 33.4 | **No longer used.** Kept on disk for rollback only. |
+| _evaluated, not adopted_ | `hermes-genesis:apex-compact` | 18285 MiB | 135.3 | Installed for a head-to-head only; **nothing points at it**. See `UPGRADE_ROADMAP.md` §0 — it out-scored both incumbents but has bad provenance. |
 
 Idle baseline is **1023–1070 MiB**, and it is not what the old version of this doc claimed: the
 desktop is only ~186 MiB (Xorg + gnome-shell + TeamViewer + nautilus). The rest is
@@ -127,6 +128,15 @@ dense at comparable residency: **coder 119.6 tok/s at 18372 MiB vs dolphin 49.9 
 The blocker is not VRAM, it is the *uncensored* requirement: the Photoreal pipe's prompt enhancer
 needs a model that won't refuse. Abliterated builds measurably degrade quality, so this is a real
 trade, not a free upgrade.
+
+**Now measured, 2026-07-26.** The refusal gap is real: on five prompt-enhancer-style requests the
+coder refused **2 of 5**, while `dolphin` and an uncensored Qwen3.6 both complied 5/5. So `dolphin`
+cannot simply be deleted — something uncensored has to take its place.
+
+The recommended candidate is **`HauhauCS/Qwen3.6-35B-A3B-Uncensored-HauhauCS-Aggressive`**
+(1.93M downloads, Apache-2.0, abliterated directly from official Qwen3.6, mmproj bundled, pullable at
+standard quant tags). Full evaluation, including why a superficially similar "Hermes" repo was
+rejected on provenance, is in `UPGRADE_ROADMAP.md` §0.
 
 A cheaper variant worth trying first: point `chat_model` at the **coder** as well. Chat, code and
 vision would then be one tenant — 18372 MiB, zero eviction churn, 2.4× faster chat — but the
