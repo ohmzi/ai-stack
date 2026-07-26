@@ -81,19 +81,21 @@ class Pipe:
         self._recent = {}        # chat_id -> last produced image b64 (for follow-up edits without re-upload)
         self._recent_video = {}  # chat_id -> (prompt, seed) of the last produced video (for follow-up changes)
 
-    # Manifold entries. These MUST live in this one Function file: each OpenWebUI Function loads into
+    # ONE entry. It chats, sees images, writes code on the big coder tenant, renders images and
+    # video, searches the web, reads your documents and remembers things — choosing the model per
+    # turn rather than making you choose an entry.
+    #
+    # There used to be three (auto / knowledge / coder). Once `auto` gained legacy function calling,
+    # the memory filter and keep_system, `knowledge` became a STRICT SUBSET of it — same tools, same
+    # model, but unable to render or reach the coder. It only subtracted. `coder` only forced a model
+    # that _is_code_request now selects automatically. Both were removed rather than left as
+    # near-duplicates the user has to choose between.
+    #
+    # The single entry must still live in this one Function file: each OpenWebUI Function loads into
     # its own module namespace, so a second file would get its own _GEN_LOCK and nothing would
     # serialize GPU work between them (see CAPABILITY_UPGRADE_PLAN.md Phase 2, shape C).
-    #   auto      — full router: chat + image + video (unchanged behaviour)
-    #   knowledge — chat only. No media routing at all, and system messages are preserved so
-    #               memory/RAG-system-context injection survives.
-    #   coder     — chat only against a large coding tenant, serialized under _GEN_LOCK.
     def pipes(self):
-        return [
-            {"id": "auto", "name": "🪄 Assistant (auto chat + image + video)"},
-            {"id": "knowledge", "name": "📚 Knowledge (documents + memory, no media)"},
-            {"id": "coder", "name": "💻 Coder"},
-        ]
+        return [{"id": "auto", "name": "🪄 Assistant"}]
 
     def _entry(self, body):
         """Which manifold entry was selected. OpenWebUI sends '<function_id>.<pipe_id>'; anything
@@ -1407,16 +1409,23 @@ class Pipe:
     async def _achat_stream(self, messages, guard_text=None, keep_system=False, force_model=None):
         """Streamed Ollama chat.
 
-        Defaults reproduce the original 'auto' behaviour exactly: the anti-dalle guard replaces every
-        system message. The knowledge/coder entries override that — see _entry_chat_stream. The guard
-        is deliberately NOT shared: telling a coding model to "NEVER output JSON" would break it.
+        The default guard is the general-assistant one. Callers override it for coding turns — the
+        guard is deliberately NOT shared, because telling a coding model to "NEVER output JSON" would
+        break it outright.
         """
-        # Guard: keep Gemma from inventing "dalle"/tool-call JSON — image work is routed automatically.
+        # Two jobs. (1) Keep the model from inventing "dalle"/tool-call JSON: media is routed by the
+        # app, not requested by the model. (2) Preserve [id] citation markers verbatim — with legacy
+        # function calling, web-search and document context arrive already carrying them, and OWUI
+        # only renders clickable source badges if they survive into the reply.
         guard = {"role": "system", "content": guard_text if guard_text is not None else (
-            "You are a friendly, concise assistant in a chat app. Image generation and editing are "
-            "handled automatically by the app, not by you. Always reply in plain, natural language. "
-            "NEVER output JSON, tool calls, function calls, or an \"action\"/\"dalle\"/\"text2im\" object. "
-            "If the user asks to create or edit a picture, just acknowledge briefly in words.")}
+            "You are a friendly, concise assistant in a chat app. Image and video generation and "
+            "editing are handled automatically by the app, not by you. Always reply in plain, "
+            "natural language. NEVER output JSON, tool calls, function calls, or an "
+            "\"action\"/\"dalle\"/\"text2im\" object. If the user asks to create or edit a picture or "
+            "video, just acknowledge briefly in words.\n"
+            "When context from documents or a web search is provided, answer from it, keep any [id] "
+            "citation markers exactly as given, and say plainly when the answer is not in the "
+            "context rather than guessing.")}
         if keep_system:
             # Preserve OpenWebUI's own system messages (native memory, Adaptive Memory, RAG system
             # context). The historical unconditional strip below is what silently discarded them.
@@ -1467,18 +1476,22 @@ class Pipe:
         except Exception as e:
             yield f"⚠️ Chat backend error: {e}"
 
-    # Per-entry chat guards. Both keep_system=True so OpenWebUI's memory/RAG system context reaches
-    # the model instead of being stripped the way the 'auto' guard strips it.
-    _KNOWLEDGE_GUARD = (
-        "You are a careful research assistant working from the user's own documents and notes. "
-        "Answer from the provided context when it is present, and say plainly when it is not there "
-        "rather than guessing. Preserve any [id] inline citations exactly as given. "
-        "This entry does not generate images or video; if asked, say so in one line.")
-
+    # Guard used when a turn is routed to the coder tenant. Note what it does NOT say: the default
+    # guard forbids emitting JSON, which would be actively harmful here — JSON is frequently the
+    # correct answer to a coding question. It keeps the citation rule, because a coding turn can
+    # still carry web-search or document context.
     _CODER_GUARD = (
         "You are an expert programming assistant. Prefer complete, runnable code over fragments, "
         "state the language and any assumptions, and point out real bugs or edge cases you notice. "
-        "Use fenced code blocks. This entry does not generate images or video.")
+        "Use fenced code blocks. Image and video generation are handled by the app, not by you. "
+        "When context from documents or a web search is provided, keep any [id] citation markers "
+        "exactly as given.")
+
+    # Retained for backwards compatibility only. The manifold collapsed to a single 'auto' entry, so
+    # nothing selectable reaches this any more — but a chat saved against the old
+    # auto_assistant.knowledge / .coder ids, or a direct API caller using them, still degrades to
+    # sensible behaviour instead of erroring.
+    _KNOWLEDGE_GUARD = None      # None -> _achat_stream uses the default general-assistant guard
 
     def _entry_chat_stream(self, entry, messages):
         """Chat path for the non-'auto' manifold entries. No media routing reaches here at all.

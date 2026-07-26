@@ -89,6 +89,15 @@ def check(name, cond, detail=""):
 async def main():
     print(f"Testing: {PIPE_PATH}\n")
 
+    # --- 0. the manifold exposes exactly ONE entry ------------------------
+    # knowledge/coder were removed: once 'auto' gained legacy FC, the memory filter and keep_system,
+    # 'knowledge' was a strict subset of it, and 'coder' only forced a model that _is_code_request
+    # now picks automatically. The ids below must still RESOLVE though, so chats saved against them
+    # (and direct API callers) degrade gracefully instead of erroring.
+    entries = mod.Pipe().pipes()
+    check("pipes() exposes exactly one entry", len(entries) == 1, f"got {entries}")
+    check("the entry is 'auto'", entries[0]["id"] == "auto", f"got {entries[0]}")
+
     # --- 1. entry parsing -------------------------------------------------
     p = mod.Pipe()
     for mid, want in [("auto_assistant.auto", "auto"),

@@ -424,6 +424,39 @@ declare the `tools` capability, so this costs no additional VRAM.
 **Still outstanding for Phase 4:** the SearXNG container itself (nothing is configured —
 `web.search.enable=false`, `engine=""`, `searxng_query_url=""`).
 
+### ⚠️ Operational hazard found by probing the live instance (2026-07-26)
+
+A 6-agent investigation ran ~60 real queries against `localhost:8888`. The HTTP API is fine; **the
+upstream engines are the fragile part.**
+
+- **~50 queries in 10 minutes suspended `google cse`, `duckduckgo`, `startpage` AND `brave`
+  simultaneously**, leaving only `bing`. `server.limiter: false` protects nothing here — the limits
+  are imposed upstream, not locally.
+- **Bing-only degraded mode produces near-useless snippets** — generic site boilerplate that does not
+  address the query. Answers will quietly get worse rather than fail loudly.
+- **Suspension lasts 180 s, but probing at expiry re-triggers it.** Polling every 20 s kept
+  `google cse` dead indefinitely. Recovery needs several minutes of genuine silence.
+- **Partial failure is invisible in the status code** — HTTP 200 even with 4 of 6 engines dead. The
+  only signal is the `unresponsive_engines` key, which holds `[name, reason]` **arrays**, not objects.
+
+**What this means for you:** normal interactive use is fine (~1 query per question). Do not script
+bulk searches through this instance. If web answers suddenly turn vague, check
+`curl -s 'localhost:8888/search?q=test&format=json' | python3 -c "import json,sys; print(json.load(sys.stdin)['unresponsive_engines'])"`
+before suspecting the model.
+
+Other findings worth recording:
+
+- There is **no `number_of_results` key** on this build — only `query`, `results`, `answers`,
+  `corrections`, `infoboxes`, `suggestions`, `unresponsive_engines`.
+- `results[]` is **not sorted by score** — it is grouped by engine. Sort by `score` before taking a top-N.
+- Wikipedia returns nothing in `results[]`; it populates `infoboxes[]`, whose entries have
+  `url=None` and `title=""`. Code that treats them as result rows will crash.
+- An unknown `engines=`/`categories=` value is **silently ignored** and falls back to the full engine
+  set — a typo gives you results you never asked for, with no error. But a bad `time_range`,
+  `safesearch` or `pageno` is a hard HTTP 400.
+- Median query latency ~0.30 s. Snippets (mean 164 chars) were substantive enough to answer "latest
+  Ubuntu release" **without fetching pages** — 9 of 26 contained "Ubuntu 26.04 LTS" outright.
+
 ---
 
 ## Phase 5 — Speech
@@ -831,8 +864,46 @@ the pipe passes `keep_system=True` on `auto` (`AUTO_KEEP_SYSTEM`):
    why `_strip_injected_context` exists. Cases G/H/I cover it, and R08 in the eval suite covers it
    end-to-end.
 
-**Not enabled:** `capabilities.image_generation` stays `false` on all three. The pipe does its own
-ComfyUI rendering; turning on OWUI's handler as well would double-generate.
+**Not enabled:** `capabilities.image_generation` stays `false`. The pipe does its own ComfyUI
+rendering; turning on OWUI's handler as well would double-generate.
+
+### …and then the manifold collapsed to ONE entry (same day)
+
+Giving `auto` everything had an immediate consequence: **📚 Knowledge became a strict subset of it.**
+Same tools, same model, same memory — but unable to render or reach the coder. It only subtracted.
+💻 Coder only *forced* a model that `_is_code_request` already selects automatically.
+
+So `pipes()` now returns a single entry, `🪄 Assistant`:
+
+| Capability | How it is reached |
+|---|---|
+| chat | default |
+| vision | automatic when the turn carries an image |
+| **code** | automatic via `_is_code_request` → Qwen3.6 coder under `_GEN_LOCK` |
+| images / video / edits | automatic via the media router |
+| web search | the toggle → SearXNG (legacy FC) |
+| documents, folders, citations | legacy FC |
+| memory | Adaptive Memory filter + `keep_system` |
+
+**Guards merged.** The general guard gained the citation rule that used to live only on Knowledge —
+without *"keep any [id] citation markers exactly as given"*, OWUI cannot render clickable source
+badges. The coder guard keeps its own text: the general guard forbids emitting JSON, which would be
+actively harmful when JSON is often the correct answer to a coding question.
+
+**Backwards compatibility.** `_entry()` still resolves the retired `auto_assistant.knowledge` /
+`.coder` ids, so a saved chat or a direct API caller degrades to sensible behaviour instead of
+erroring. Only 1 chat existed on `knowledge` and 0 on `coder`; the model rows were deleted so the
+picker is clean. DB backup: `webui.db.bak-onepipe`.
+
+**What you give up:** no way to *force* the coder on a question the classifier reads as chat, and no
+"safe" entry that structurally cannot render. Both are judged acceptable — auto-routing measured
+27/28 on trajectory, and F01 plus the clean routing prompt make an accidental render unlikely.
+
+Tests: `test_manifold` now asserts `pipes()` returns exactly one entry while the legacy ids still
+resolve. The whole eval suite was repointed at `auto` — 32/32 cases. S01 kept, **S02 repurposed**:
+"Knowledge declines to render an image" became meaningless when rendering is simply correct, so it
+now asks the model to enumerate its own tools, the prompt most likely to make it emit a JSON tool
+manifest.
 
 **Inventory at time of change:** no tools installed, no tool servers configured, no knowledge bases
 created yet. Code interpreter is enabled (pyodide). So "all the tools" currently means web search,

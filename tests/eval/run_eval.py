@@ -30,6 +30,7 @@ USAGE
   python3 tests/eval/run_eval.py --save-baseline      # record current results as the reference
   python3 tests/eval/run_eval.py --compare            # diff against the saved baseline
   python3 tests/eval/run_eval.py --only CO01,CT02     # run specific cases
+  python3 tests/eval/run_eval.py --only CO01 --repeat 5   # measure a flaky case properly
   python3 tests/eval/run_eval.py --cat coding         # run one category
 
 SAFETY: the `execute` grader runs model-generated Python in a subprocess with a timeout, in a
@@ -346,16 +347,19 @@ async def main(a):
 
     results = []
     for c in cases:
-        print(f"  {c['id']} [{c['cat']}] ...", end="", flush=True)
-        try:
-            r = await run_case(mod, c, models)
-        except Exception as e:
-            r = {"id": c["id"], "cat": c["cat"], "tier": c["tier"], "entry": c.get("entry"),
-                 "want_route": c["route"], "got_route": f"ERROR:{type(e).__name__}",
-                 "traj_ok": False, "answer": str(e)[:400], "image_b64": None,
-                 "elapsed": 0, "grade": c["grade"], "why": c.get("why", "")}
-        results.append(r)
-        print(f" {r['got_route']}  {'OK' if r['traj_ok'] else 'ROUTE-FAIL'}  {r['elapsed']}s")
+        for i in range(a.repeat):
+            tag = f"  {c['id']} [{c['cat']}]" + (f" run {i+1}/{a.repeat}" if a.repeat > 1 else "")
+            print(f"{tag} ...", end="", flush=True)
+            try:
+                r = await run_case(mod, c, models)
+            except Exception as e:
+                r = {"id": c["id"], "cat": c["cat"], "tier": c["tier"], "entry": c.get("entry"),
+                     "want_route": c["route"], "got_route": f"ERROR:{type(e).__name__}",
+                     "traj_ok": False, "answer": str(e)[:400], "image_b64": None,
+                     "media_err": None, "elapsed": 0, "grade": c["grade"], "why": c.get("why", "")}
+            r["run_idx"] = i
+            results.append(r)
+            print(f" {r['got_route']}  {'OK' if r['traj_ok'] else 'ROUTE-FAIL'}  {r['elapsed']}s")
 
     # Outcome grading. Deterministic graders first (free), then the model-backed ones so the judge
     # and vision models load exactly once each.
@@ -386,18 +390,56 @@ async def main(a):
                     r["out_ok"], r["out_why"] = await grade_vqa(s, r["image_b64"], r["grade"], models["vision"])
         await unload_all(mod)
 
+    # ---- aggregate repeats into one verdict per case
+    #
+    # Answers are NOT deterministic (the pipe does not pin temperature for chat), so a single run can
+    # flip a case either way. With --repeat N the verdict is the majority and the pass rate is shown,
+    # which is how the LLM-eval literature recommends handling stochastic outputs. A case that reads
+    # 3/4 is flaky, not broken — and that is a materially different bug report.
+    agg = []
+    for c in cases:
+        runs = [r for r in results if r["id"] == c["id"]]
+        if not runs:
+            continue
+        tn = sum(1 for r in runs if r["traj_ok"])
+        graded_runs = [r for r in runs if r["out_ok"] is not None]
+        on = sum(1 for r in graded_runs if r["out_ok"])
+        first = runs[0]
+        agg.append({
+            "id": c["id"], "cat": c["cat"], "tier": c["tier"], "entry": c.get("entry"),
+            "want_route": c["want_route"] if "want_route" in c else c["route"],
+            "got_route": first["got_route"],
+            "traj_ok": tn * 2 > len(runs),
+            "traj_rate": f"{tn}/{len(runs)}",
+            "out_ok": None if not graded_runs else (on * 2 > len(graded_runs)),
+            "out_rate": f"{on}/{len(graded_runs)}" if graded_runs else "-",
+            "flaky": bool(graded_runs) and 0 < on < len(graded_runs),
+            "out_why": first.get("out_why", ""),
+            "elapsed": round(sum(r["elapsed"] for r in runs), 1),
+            "answer": first.get("answer", "")[:6000],
+        })
+
     # ---- report
     print("\n" + "=" * 92)
-    print(f"  {'case':6} {'category':18} {'route':26} {'answer':8}  detail")
+    rep = f"  (n={a.repeat} per case)" if a.repeat > 1 else ""
+    print(f"  {'case':6} {'category':18} {'route':22} {'answer':10}  detail{rep}")
     print("=" * 92)
     tfail = ofail = 0
-    for r in results:
+    for r in agg:
         tfail += not r["traj_ok"]
         ofail += r["out_ok"] is False
         o = "-" if r["out_ok"] is None else ("PASS" if r["out_ok"] else "FAIL")
-        rt = "PASS" if r["traj_ok"] else f"FAIL->{r['got_route']}"[:26]
-        print(f"  {r['id']:6} {r['cat']:18} {rt:26} {o:8}  {r.get('out_why','')[:34]}")
+        if a.repeat > 1 and r["out_ok"] is not None:
+            o = f"{o} {r['out_rate']}"
+        if r["flaky"]:
+            o += " ~"
+        rt = "PASS" if r["traj_ok"] else f"FAIL->{r['got_route']}"[:22]
+        print(f"  {r['id']:6} {r['cat']:18} {rt:22} {o:10}  {r.get('out_why','')[:32]}")
+    if any(r["flaky"] for r in agg):
+        print("\n  ~ = FLAKY: the same case both passed and failed across runs. The answer varies,")
+        print("      not the grader. Treat as a model instruction-following weakness, not a regression.")
 
+    results = agg
     graded = [r for r in results if r["out_ok"] is not None]
     print("=" * 92)
     print(f"  trajectory : {len(results)-tfail}/{len(results)} correct model routed")
@@ -451,4 +493,7 @@ if __name__ == "__main__":
     ap.add_argument("--judge", help="override judge model")
     ap.add_argument("--save-baseline", action="store_true")
     ap.add_argument("--compare", action="store_true")
+    ap.add_argument("--repeat", type=int, default=1,
+                    help="run each case N times; verdict is the majority and the pass rate is "
+                         "reported. Use for flaky cases — answers are not deterministic.")
     sys.exit(asyncio.run(main(ap.parse_args())))

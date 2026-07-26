@@ -11,7 +11,12 @@ python3 tests/eval/run_eval.py --compare           # diff against the saved base
 python3 tests/eval/run_eval.py --save-baseline     # record current behaviour as the reference
 python3 tests/eval/run_eval.py --cat coding        # one category
 python3 tests/eval/run_eval.py --only CT02,CO04    # specific cases
+python3 tests/eval/run_eval.py --only CO01 --repeat 6   # is a case broken, or just flaky?
 ```
+
+> **All cases run on the single 🪄 Assistant entry.** The manifold collapsed from three entries to
+> one on 2026-07-26 — see `CAPABILITY_UPGRADE_PLAN.md`. Model choice is the pipe's job, so the suite
+> tests exactly what a user experiences: type a question, get the right model.
 
 Cases live in `tests/eval/cases.json` — **data, not code**. Add a case by adding an object; the
 runner needs no changes. Every run writes `tests/eval/results/run-<timestamp>.json`.
@@ -101,11 +106,34 @@ self-preference, format, and calibration drift. Mitigations applied:
 > (failing a criterion that forbids the latter); the next discussed only coffee. The pipe does not
 > pin temperature for chat, so open-ended answers vary between runs.
 >
-> Practical consequence: **treat a single `judge` flip as noise; treat a `regex`/`execute` flip as a
-> real regression.** This is a further argument for the grader hierarchy in §1.2 — the objective
-> graders are not merely more accurate, they are more *stable*, which is what a regression detector
-> actually needs. If a judge case matters enough to gate on, run it a few times and take the
-> majority, or rewrite the criterion so a deterministic grader can express it.
+> **Correction (2026-07-26): an earlier version of this section said "treat a `judge` flip as noise
+> but a `regex`/`execute` flip as a real regression." That was wrong**, and the suite disproved it.
+> The distinction confuses *grader* determinism with *answer* determinism. A `regex`/`execute` grader
+> is perfectly reproducible **given a fixed answer** — but the answer is stochastic for every case,
+> so an execute flip can be pure noise too.
+>
+> Demonstrated: `--compare` flagged CO01 as a `PASS -> FAIL` regression right after an unrelated
+> change. Re-running it six times gave **4/6** — the reversal logic is always right, but roughly one
+> run in three the coder ignores the "without slicing" constraint and reaches for `[::-1]`. Nothing
+> had regressed; the case is simply flaky.
+>
+> **The correct rule: any single-run flip may be noise, whatever the grader. Use `--repeat N` before
+> concluding anything.**
+>
+> ```bash
+> python3 tests/eval/run_eval.py --only CO01 --repeat 6
+> #   CO01  coding  PASS  PASS 4/6 ~
+> #   ~ = FLAKY: the same case both passed and failed across runs.
+> ```
+>
+> With `--repeat N` the verdict is the majority and the pass rate is shown, which is how the
+> literature recommends handling stochastic outputs. A case reading **3/4 is flaky, not broken** —
+> a materially different bug report. Known-flaky cases carry a `known_issue` recording the measured
+> rate, so a *changed* rate is still detectable.
+>
+> The grader hierarchy in §1.2 still stands, just for the right reason: objective graders remove the
+> *grader* as a source of variance, leaving only the model. That is what makes a flake rate
+> measurable at all.
 
 ---
 

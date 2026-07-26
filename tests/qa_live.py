@@ -4,15 +4,16 @@
 Unlike test_router.py / test_manifold.py (which stub the model layer to test routing decisions),
 this makes ACTUAL inference calls. It answers three questions the unit tests cannot:
 
-  1. Does each manifold entry actually reach the model it is supposed to?
+  1. Does the single 🪄 Assistant entry pick the right model per turn, unaided?
   2. Is the response correct?
   3. Does keep_system=True really deliver system-message context to the model?
 
 Model selection is observed by wrapping aiohttp at the transport layer, so what is recorded is the
 payload the pipe genuinely sent to /api/chat — not what the code says it intends to send.
 
-Cases are ordered to group same-model work together: OLLAMA_KEEP_ALIVE=60s on this host, and each
-cold load costs 30-40 s, so interleaving entries would triple the runtime.
+Every case runs on the one entry — model choice is the pipe's job, not the user's. Cases are ordered
+to group same-model work together: OLLAMA_KEEP_ALIVE=60s on this host, so interleaving chat and coder
+turns would pay a model load on nearly every case.
 
 Usage:  python3 tests/qa_live.py [pipe_path]
 """
@@ -43,12 +44,12 @@ mod.aiohttp.ClientSession = SpySession
 
 # (id, entry, messages, what a correct answer must contain/do)
 CASES = [
-    ("A1", "knowledge",
+    ("A1", "auto",
      [{"role": "user", "content": "What is the capital of Australia? Answer in one short sentence."}],
      "dolphin-venice:24b",
      "States that the capital of Australia is Canberra. Naming Sydney or Melbourne is WRONG."),
 
-    ("A2", "knowledge",
+    ("A2", "auto",
      [{"role": "user", "content": "A train travels 60 km in 45 minutes. What is its average speed "
                                   "in km/h? Give the number."}],
      "dolphin-venice:24b",
@@ -56,7 +57,7 @@ CASES = [
 
     # The decisive test for the Phase 2 keep_system=True change: this fact exists nowhere in training
     # data, so a correct answer PROVES the system message reached the model.
-    ("A3", "knowledge",
+    ("A3", "auto",
      [{"role": "system", "content": "Known facts about this user: their bicycle is a matte green "
                                     "Bianchi named Persimmon, bought in March 2024."},
       {"role": "user", "content": "What is my bicycle called and what colour is it?"}],
@@ -77,22 +78,22 @@ CASES = [
      "Contains a Python function that reverses a string and does NOT use [::-1] slicing. "
      "A loop, reversed(), or recursion are all acceptable."),
 
-    ("C1", "coder",
+    ("C1", "auto",
      [{"role": "user", "content": "Write a Python function fib(n) returning the nth Fibonacci number "
                                   "iteratively, with fib(0)=0. Code only."}],
      "hf.co/unsloth/Qwen3.6-35B-A3B-GGUF:UD-IQ4_XS",
      "Contains a Python function computing Fibonacci ITERATIVELY (a loop, not recursion), and the "
      "logic is correct for fib(0)=0, fib(1)=1, fib(10)=55."),
 
-    ("C2", "coder",
+    ("C2", "auto",
      [{"role": "user", "content": "What is the bug in this Python code?\n"
                                   "def add_item(item, lst=[]):\n    lst.append(item)\n    return lst"}],
      "hf.co/unsloth/Qwen3.6-35B-A3B-GGUF:UD-IQ4_XS",
      "Identifies the MUTABLE DEFAULT ARGUMENT problem — that the default list is created once and "
      "shared across calls, so it accumulates. Anything else is WRONG."),
 
-    # coder keeps the same keep_system guarantee as knowledge
-    ("C3", "coder",
+    # A coder-routed turn must ALSO honour system-message conventions.
+    ("C3", "auto",
      [{"role": "system", "content": "Project convention: all internal helper functions in this "
                                     "codebase must be prefixed with 'zz_'."},
       {"role": "user", "content": "Write a tiny internal helper that squares a number. Code only."}],
