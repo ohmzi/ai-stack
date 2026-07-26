@@ -104,7 +104,7 @@ async def route(query, pipe=None, images=None, model="auto_assistant.auto"):
 
 
 CHAT = "dolphin-venice:24b"
-VISION = "gemma4:31b"
+VISION = mod.Pipe().vision_model   # now the SAME tag as the coder — see the note at the check below
 CODER = "hf.co/unsloth/Qwen3.6-35B-A3B-GGUF:UD-IQ4_XS"
 
 results = []
@@ -173,9 +173,16 @@ async def main():
         check(f"MEDIA wins: {q[:44]}", await route(q, make_pipe(classifier=lambda t: True)), want)
 
     # --- 5. Vision beats coder when an image is attached ----------------------
-    check("attached image + code question -> vision, not coder",
+    # Vision now runs on the coder tag, so asserting on the MODEL NAME no longer discriminates
+    # between "went to vision" and "went to the coder". The property that actually matters is that
+    # the pixels reach the model: the coder is multimodal, but the coder-routing branch strips images
+    # when force_model is set for a text-only tenant. So assert the payload carries images[].
+    check("attached image + code question -> vision path",
           await route("what's wrong with the code in this screenshot?",
                       make_pipe(classifier=lambda t: True), images=True), VISION)
+    sent_imgs = [m for m in SENT[0]["messages"] if m.get("images")] if SENT else []
+    results.append(("   ...and the image actually reaches the model", bool(sent_imgs),
+                    f"no images[] in the payload: {[list(m) for m in (SENT[0]['messages'] if SENT else [])]}"))
 
     # --- 6. Injected context cannot pull us to the coder ----------------------
     # The pipe routes on the CLEAN prompt, so a document full of Python must not matter.

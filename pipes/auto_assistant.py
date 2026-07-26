@@ -71,7 +71,14 @@ class Pipe:
         self.comfy = "http://localhost:8188"
         self.ollama = "http://localhost:11434"
         self.chat_model = "dolphin-venice:24b"   # text chat + all prompt-rewrite/merge/plan helpers
-        self.vision_model = "gemma4:31b"         # dolphin is text-only; gemma does image QA + vision chat
+        # Vision runs on the CODER, not a separate vision model. Qwen3.6-35B-A3B is multimodal (it
+        # carries a 1134 MiB mmproj and declares `vision`), and on this box it reads an image at
+        # 123.7 tok/s versus gemma4:31b's 33.4 — 3.7x faster at 18372 MiB instead of 21772 MiB.
+        #
+        # Retiring gemma4:31b matters beyond speed: Ollama predicted 25.5 GiB for it at 32k context,
+        # i.e. more than the card, so it evicted every other model unconditionally on every image
+        # turn. Pointing vision at a tenant that is often already resident removes that churn.
+        self.vision_model = "hf.co/unsloth/Qwen3.6-35B-A3B-GGUF:UD-IQ4_XS"
         # Coder entry's tenant (Phase 8). MoE, ~3 B active of 35 B — roughly 135 t/s on this 3090 vs
         # ~20-25 t/s for a dense 27B at the same residency. Do NOT use `ollama run qwen3.6:35b`: that
         # tag resolves to a 23.94 GB layer against ~24.35 GB usable and will OOM or silently spill.
@@ -335,24 +342,50 @@ class Pipe:
             rf"\b(?:animated|animation[\s-]style|cartoon(?:[\s-]style)?|anime[\s-]style)\s+"
             rf"(?:\w+\s+){{0,2}}({self._STILL_NOUNS})\b", r"\1", t)
 
+    # Explicit render prefixes. These exist so the default-deny predicates below can be strict:
+    # anything they reject can still be forced with two keystrokes.
+    _MEDIA_SLASH_IMG = re.compile(r"^\s*/(?:img|image|draw)\b", re.I)
+    _MEDIA_SLASH_VID = re.compile(r"^\s*/(?:vid|video|animate)\b", re.I)
+    # A drawing verb in IMPERATIVE position — optionally behind a politeness or request preamble.
+    _IMPERATIVE_DRAW = re.compile(
+        r"^\s*(?:(?:please|pls|hey|ok|okay|now)[,\s]+)*"
+        r"(?:(?:can|could|would|will)\s+you\s+(?:please\s+)?)?"
+        r"(?:go\s+ahead\s+and\s+)?"
+        r"(draw|sketch|paint|illustrate|render)\b", re.I)
+
     def _is_video_request(self, t):
         raw = t.lower()
         t = self._strip_still_style(raw)
         # collocations that carry a video-noun but are never motion requests
         t = re.sub(r"\b(video\s?games?|clip\s?art|music\s+videos?)\b", " ", t)
-        # explicit generation verb + a video-noun object → a request even if phrased as a question
-        if re.search(r"\b(make|create|generate|render|produce|animate|show me|give me)\b"
+        # A STRONG generation verb + a video-noun object → a request even if phrased as a question.
+        if re.search(r"\b(make|create|generate|render|produce|animate)\b"
                      r".{0,25}\b(clip|video|animation|gif|footage|moving image)\b", t):
+            return True
+        # "show me" / "give me" are DEICTIC, not generative — they only mean "render one" when the
+        # object is indefinite. "show me a clip of a dog" asks for a render; "show me the footage
+        # from the meeting notes" points at something that already exists. The determiner is the
+        # whole difference, so the definite case must not reach the renderer.
+        if re.search(r"\b(show|give|send)\s+me\b(?:(?!\bthe\b).){0,25}?"
+                     r"\b(clip|video|animation|gif|footage|moving image)\b", t):
             return True
         if re.search(r"\banimate\s+(this|it|that|the|my|him|her|them)\b", t):
             return True
         if re.search(r"\bbring\b[\w\s]{0,20}?\bto\s+life\b", t):
             return True
-        # bare motion nouns / idioms → only when the message isn't a question or acknowledgement
-        if self._is_question(raw) or self._is_smalltalk(raw):
-            return False
-        if re.search(r"\b(video|animation|footage|moving image|make it move)\b", t):
+        # Explicit escape hatch for terse phrasing the default-deny rule below would reject.
+        if self._MEDIA_SLASH_VID.match(raw):
             return True
+        # An imperative motion instruction ("make it move") is a request; a bare motion NOUN is not.
+        if re.search(r"^\s*(?:please\s+|pls\s+)?make\s+(?:it|this|that)\s+move\b", t):
+            return True
+        # DEFAULT DENY. There used to be a fallback here that returned True on a bare
+        # \b(video|animation|footage|moving image)\b anywhere in the message, guarded only against
+        # questions and small-talk. Declarative sentences sailed straight through it: measured, 8 of
+        # 10 ordinary sentences started a render — "I watched a great video about sourdough
+        # yesterday" queued a Wan job, and so did "the video card in this machine is a 3090". Each
+        # false render costs 1-5 GPU-minutes holding _GEN_LOCK. Mentioning a video is not asking for
+        # one; ask with a verb, or use /vid.
         return False
 
     def _wants_new_video(self, t):
@@ -393,20 +426,25 @@ class Pipe:
         if self._FIGURATIVE.search(raw):
             return False
         # explicit generation verb + an image object → a request even if phrased as a question
-        if re.search(r"\b(create|creating|generate|make|design|produce|render|show me|give me|"
-                     r"i want|can you make|could you make)\b.{0,30}\b(image|images|picture|pictures|"
+        if re.search(r"\b(create|creating|generate|make|design|produce|render|draw|sketch|paint|"
+                     r"illustrate|show me|give me|i want|can you make|could you make)\b"
+                     r".{0,30}\b(image|images|picture|pictures|"
                      r"photo|photos|pic|drawing|painting|illustration|art|artwork|logo|wallpaper|"
                      r"portrait|render|scene|poster|cartoon|caricature)\b", raw):
             return True
-        # bare draw/paint verbs and the '<noun> of' pattern → only when not a question / small-talk
-        # ('what do you paint with?', 'nice drawing of a cat' must NOT trigger t2i)
-        if self._is_question(raw) or self._is_smalltalk(raw):
-            return False
-        if re.search(r"\b(draw|sketch|paint|illustrate)\b", raw):
+        # Explicit escape hatch for terse phrasing the default-deny rule below would reject.
+        if self._MEDIA_SLASH_IMG.match(raw):
             return True
-        if re.search(r"\b(image|picture|photo|portrait|drawing|painting|wallpaper|logo|cartoon|"
-                     r"caricature)\s+of\b", raw):
+        # An IMPERATIVE drawing verb is a request ("draw a cat", "paint a stormy sea"). The same verb
+        # embedded in a sentence is not ("my kid loves to draw", "we should paint the fence").
+        # Position is the discriminator, so this is anchored to the start of the message.
+        if self._IMPERATIVE_DRAW.match(raw):
             return True
+        # DEFAULT DENY. Two fallbacks used to live here: a bare \b(draw|sketch|paint|illustrate)\b
+        # anywhere in the message, and a bare '<image-noun> of'. Both were guarded only against
+        # questions and small-talk, so declarative sentences went through — "there's a photo of my
+        # grandmother on the shelf" and "she wants to illustrate a children's book someday" both
+        # started renders. Mentioning a picture is not asking for one.
         return False
 
     def _is_edit_request(self, t):
