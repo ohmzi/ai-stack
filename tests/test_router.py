@@ -58,13 +58,31 @@ def make_pipe():
         return f"MEDIA[{result}]"
 
     def _achat_stream(omsgs, **kw):   # **kw: guard_text / keep_system / force_model
-        return "CHAT"
+        # Distinguish WHICH model the chat path chose. Without this the stub returns "CHAT" for
+        # everything, and a case whose hazard is "silently routed to the 18 GB coder" would pass
+        # while broken — which is exactly what case J tests for.
+        return "CODER" if kw.get("force_model") else "CHAT"
+
+    def _locked_stream(inner):
+        # The coder path wraps its stream in _GEN_LOCK. Here the "stream" is just the stub's string,
+        # so pass it straight through. Lock acquire/release/disconnect behaviour is covered properly
+        # by test_manifold.py, which does not stub the stream.
+        return inner
 
     async def _status(*a, **k):
         return None
 
-    p._tracked, p._finish, p._achat_stream, p._status = _tracked, _finish, _achat_stream, _status
+    p._tracked, p._finish, p._achat_stream = _tracked, _finish, _achat_stream
+    p._locked_stream, p._status = _locked_stream, _status
     return p
+
+
+async def drain(result):
+    """The coder path returns an async generator (it holds _GEN_LOCK for the stream), every other
+    path returns a plain string. Normalise so cases can assert on a simple value."""
+    if hasattr(result, "__aiter__"):
+        return "".join([tok async for tok in result])
+    return result
 
 
 async def route(query, doc=None, with_metadata=True, chat_id="testchat"):
@@ -74,7 +92,7 @@ async def route(query, doc=None, with_metadata=True, chat_id="testchat"):
     meta = {"chat_id": chat_id}
     if with_metadata:
         meta["user_prompt"] = query      # middleware.py:2803 — captured BEFORE RAG injection
-    return await p.pipe(body, __metadata__=meta, __event_emitter__=None)
+    return await drain(await p.pipe(body, __metadata__=meta, __event_emitter__=None))
 
 
 # A document whose *text* trips the media regexes. This is ordinary prose in a real PDF.
@@ -103,6 +121,27 @@ MEMORY_BLOCK = (
     "2. The user enjoys watching video essays about animation\n\n"
 )
 
+# OpenWebUI's own code-interpreter prompt, APPENDED to the user message at middleware.py:2482 when
+# the toggle is on and function_calling is legacy (add_or_update_user_message defaults append=True).
+# Abridged, but keeps the marker and the phrases that make it match the coder regexes.
+CODE_INTERPRETER_BLOCK = (
+    "\n#### Code Interpreter\n\n"
+    "You have access to a Python code interpreter via: "
+    "`<code_interpreter type=\"code\" lang=\"python\"></code_interpreter>`\n"
+    "- The Python shell runs directly in the user's browser for fast execution of analysis, "
+    "calculations, or problem-solving. Use it in this response.\n"
+    "- You can use a wide array of libraries for data manipulation, visualization, API calls, or any "
+    "computational task.\n"
+    "- **You must enclose your code within `<code_interpreter type=\"code\" lang=\"python\">` XML "
+    "tags** and stop right away. If you don't, the code won't execute.\n"
+    # This line is why the block matches _CODE_STRONG: it contains literal triple backticks, which the
+    # fenced-code alternative treats as "there is code on screen". Verified against the real 2218-char
+    # prompt — the fence is the ONLY alternative that fires, so omitting this line would make the test
+    # pass for the wrong reason.
+    "- Do NOT use triple backticks (```py ... ```) inside the XML tags — that is markdown "
+    "formatting, not executable Python code.\n"
+    "- If a link to an image, audio, or any file appears in the output, display it exactly as-is.\n")
+
 FILTER_CASES = [
     # (name, injected_user_prompt, expected)
     ("G  memory block + genuine question",
@@ -111,6 +150,19 @@ FILTER_CASES = [
      MEMORY_BLOCK + "make a picture of a cat",               "MEDIA[Generating image]"),
     ("I  memory block only, no user text",
      MEMORY_BLOCK.rstrip("\n"),                              "CHAT"),
+    # The code-interpreter block is APPENDED, so it needs the opposite strip direction to the memory
+    # block. Unstripped it matches _CODE_STRONG on its own, which would send every single turn to the
+    # 18 GB coder while the toggle is on.
+    ("J  code-interpreter block + trivial question",
+     "what is 2+2?" + CODE_INTERPRETER_BLOCK,                "CHAT"),
+    ("K  code-interpreter block + image request",
+     "make a picture of a cat" + CODE_INTERPRETER_BLOCK,     "MEDIA[Generating image]"),
+    ("L  both blocks at once",
+     MEMORY_BLOCK + "what time is my meeting?" + CODE_INTERPRETER_BLOCK, "CHAT"),
+    # Positive control for the stub itself: a genuine coding request must still reach the coder,
+    # otherwise cases J-L would pass simply because nothing ever routes there.
+    ("M  genuine coding request still reaches the coder",
+     "write a python function that merges two sorted lists",  "CODER"),
 ]
 
 
@@ -125,12 +177,13 @@ async def main():
         if not ok:
             print(f"          expected {expected!r}, got {got!r}")
 
-    print("\n--- filter-injected context (Adaptive Memory prepends BEFORE user_prompt is captured) ---")
+    print("\n--- app/filter text spliced into the user message BEFORE user_prompt is captured ---")
     for name, injected, expected in FILTER_CASES:
         p = make_pipe()
         body = {"messages": [{"role": "user", "content": injected}]}
         got = await p.pipe(body, __metadata__={"chat_id": "t", "user_prompt": injected},
                            __event_emitter__=None)
+        got = await drain(got)
         ok = got == expected
         fails += (not ok)
         print(f"  [{'PASS' if ok else 'FAIL'}] {name}")
@@ -142,13 +195,13 @@ async def main():
         got = await route(q, doc, with_metadata=False)
         print(f"  {name}: {got!r}   <- pre-fix behaviour ({'BUG REPRODUCED' if got != expected else 'no bug'})")
 
-    print("\n--- control: memory block with the strip DISABLED (proves the hazard is real) ---")
-    for name, injected, expected in FILTER_CASES[2:3]:
+    print("\n--- control: injected blocks with the strip DISABLED (proves the hazards are real) ---")
+    for name, injected, expected in (FILTER_CASES[2], FILTER_CASES[3]):
         p = make_pipe()
         p._strip_injected_context = lambda t: t      # simulate not having the guard
         body = {"messages": [{"role": "user", "content": injected}]}
-        got = await p.pipe(body, __metadata__={"chat_id": "t", "user_prompt": injected},
-                           __event_emitter__=None)
+        got = await drain(await p.pipe(body, __metadata__={"chat_id": "t", "user_prompt": injected},
+                                       __event_emitter__=None))
         print(f"  {name}: {got!r}   <- unguarded ({'HAZARD REPRODUCED' if got != expected else 'no hazard'})")
 
     print(f"\n{'ALL PASS' if not fails else str(fails) + ' FAILURE(S)'}")

@@ -107,32 +107,48 @@ class Pipe:
         leaf = mid.rsplit(".", 1)[-1].strip().lower()
         return leaf if leaf in ("auto", "knowledge", "coder") else "auto"
 
-    # Blocks that inlet FILTERS prepend to the last user message. Marker text only — each block is
-    # "<header line(s)>\n\n<the user's actual words>".
-    _INJECTED_MARKERS = ("User Memories (",)
+    # Text that OpenWebUI or its filters splice into the last user message BEFORE the routing prompt
+    # is captured. Each entry is (marker, position):
+    #   "prefix" — block comes first, the user's real words follow after a blank line
+    #   "suffix" — the user's words come first and the block is appended to the end
+    _INJECTED_MARKERS = (
+        # Adaptive Memory (and any v4+ memory filter). Inlet filters run at middleware.py:2428 and
+        # PREPEND to the last user message.
+        ("User Memories (", "prefix"),
+        # OpenWebUI's own code-interpreter prompt. In LEGACY function-calling mode middleware.py:2482
+        # calls add_or_update_user_message(prompt, ...), which defaults to append=True (misc.py:527),
+        # tacking ~2.2 kB onto the END of the user's message.
+        #
+        # Measured: that block on its own matches _CODE_STRONG. So with the code-interpreter toggle
+        # on, EVERY message — "what is 2+2?" included — would route to the 18 GB coder. Stripping it
+        # is what stops a UI toggle silently hijacking model selection.
+        ("#### Code Interpreter", "suffix"),
+    )
 
     def _strip_injected_context(self, text):
-        """Remove filter-injected blocks from the text used for ROUTING.
+        """Remove app- and filter-injected blocks from the text used for ROUTING.
 
-        `metadata['user_prompt']` is captured at middleware.py:2803, but inlet filters run earlier at
-        :2428 on the same form_data. So a filter that prepends to the last user message — Adaptive
-        Memory does exactly that — lands its block inside the routing text. That is the Phase 1
-        failure mode through a different door: a stored memory mentioning "a picture of my dog" could
-        make an ordinary question start a render.
+        `metadata['user_prompt']` is captured at middleware.py:2803, but several things mutate the
+        last user message before that: inlet filters at :2428, and the code-interpreter prompt at
+        :2482. Whatever they add lands in the router's input — the Phase 1 failure mode through a
+        different door.
 
-        Adaptive Memory is currently scoped to the knowledge/coder entries, which do no media routing
-        at all, so this cannot fire today. It exists because flipping that filter to "global" is a
-        single toggle in the UI, and the failure would be silent and expensive.
+        Note what is deliberately NOT listed here, because it does not need to be: retrieved file
+        context, web-search results and folder files all arrive via form_data['files'] and are merged
+        into the messages only at :2808, i.e. AFTER user_prompt is captured. Those are already safe.
         """
         if not isinstance(text, str):
             return text
-        for marker in self._INJECTED_MARKERS:
+        for marker, pos in self._INJECTED_MARKERS:
             idx = text.find(marker)
             if idx == -1:
                 continue
+            if pos == "suffix":
+                text = text[:idx]
+                continue
             sep = text.find("\n\n", idx + len(marker))
-            # Block is followed by a blank line then the real message; if there is no separator the
-            # whole string was injected context, leaving only whatever preceded it (normally "").
+            # Prefix block is followed by a blank line then the real message; with no separator the
+            # whole string was injected context, leaving whatever preceded it (normally "").
             text = text[sep + 2:] if sep != -1 else text[:idx]
         return text
 
