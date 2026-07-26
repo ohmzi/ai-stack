@@ -142,6 +142,20 @@ async def main():
         check(f"{entry}: system message {'preserved' if want_kept else 'stripped'}",
               kept == want_kept, f"system msgs={[m['content'][:40] for m in sys_msgs]}")
 
+    # --- 3b. system messages must be MERGED into exactly one ---------------
+    # hermes-genesis:apex-compact fails the whole request with HTTP 400 ("Unable to generate parser
+    # for this template") when sent more than one system message. keep_system=True naturally produces
+    # two — our guard plus OpenWebUI's memory/context — so without merging, every turn carrying a
+    # memory or a system convention breaks. Measured: 1 works, 2 is a hard 400.
+    _t, payload = await run_entry("auto_assistant.auto", WITH_SYS)
+    sys_msgs = [m for m in payload["messages"] if m["role"] == "system"]
+    check("exactly ONE system message is sent", len(sys_msgs) == 1,
+          f"sent {len(sys_msgs)}: {[m['content'][:30] for m in sys_msgs]}")
+    check("...and the merge keeps the guard", "NEVER output JSON" in sys_msgs[0]["content"])
+    check("...and keeps the caller's context", "Rex" in sys_msgs[0]["content"])
+    check("...guard first, caller's context after",
+          sys_msgs[0]["content"].index("NEVER output JSON") < sys_msgs[0]["content"].index("Rex"))
+
     # --- 4. model selection ------------------------------------------------
     _t, payload = await run_entry("auto_assistant.coder", WITH_SYS)
     check("coder: uses coder_model", payload["model"] == mod.Pipe().coder_model,

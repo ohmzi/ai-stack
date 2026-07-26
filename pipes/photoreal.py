@@ -19,9 +19,15 @@ class Pipe:
         self.comfy = "http://localhost:8188"
         self.ollama = "http://localhost:11434"
         self.model = "lustifySDXL.safetensors"
-        # Prompt enhancement MUST use the uncensored model — gemma4/gemma3 refuse this content and
+        # Prompt enhancement MUST use an uncensored model — gemma4/gemma3 refuse this content and
         # would break the pipe's deliberate isolation from the shared config.
-        self.text_model = "dolphin-venice:24b"
+        #
+        # Was dolphin-venice:24b. Swapped because this build measured 5/5 compliance on exactly this
+        # job (prompt-enhancer-style requests) in tests/bench_models.py, matching dolphin, while also
+        # being the tenant every other pipe now uses — so this pipe no longer forces a separate
+        # 14.3 GB load that evicts whatever was resident. Stock Qwen3.6 was NOT a viable substitute
+        # here: it refused 2 of the same 5 requests.
+        self.text_model = "hermes-genesis:apex-compact"
 
     def pipes(self):
         return [{"id": "photo", "name": "Photoreal"}]

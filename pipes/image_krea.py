@@ -53,11 +53,15 @@ class Pipe:
         self.valves = self.Valves()
         self.comfy = "http://localhost:8188"
         self.ollama = "http://localhost:11434"
-        # Model split mirrors the Assistant pipe: dolphin (text-only) for prompt expansion / edit
-        # rewrite, gemma4 (vision) only for the image QA check — so a pure text task no longer
-        # evicts a resident dolphin to load the 19.9 GB vision model.
-        self.text_model = "dolphin-venice:24b"
-        self.vision_model = "gemma4:31b"
+        # Mirrors the Assistant pipe, which now uses ONE tenant for everything. The old split
+        # (dolphin for text, gemma4:31b for the image QA check) existed to stop a pure text task
+        # evicting a resident model to load the 19.9 GB vision model — with a single multimodal
+        # tenant there is nothing left to evict, so the split has no purpose.
+        #
+        # Both point at the same tag on purpose; kept as two attributes so re-splitting later is a
+        # one-line change rather than a refactor.
+        self.text_model = "hermes-genesis:apex-compact"
+        self.vision_model = "hermes-genesis:apex-compact"
         self._recent = {}  # chat_id -> last produced image b64 (for follow-up edits without re-upload)
         # Krea 2 (text-to-image) model files
         self.unet = "krea2/krea2_turbo_fp8_scaled.safetensors"

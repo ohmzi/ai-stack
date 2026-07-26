@@ -70,30 +70,32 @@ class Pipe:
     def __init__(self):
         self.comfy = "http://localhost:8188"
         self.ollama = "http://localhost:11434"
-        # Chat, code and vision are ONE tenant. Measured: the coder answers at 119.6 tok/s versus
-        # dolphin's 49.9 — 2.4x faster — for +1.8 GiB, and because code and vision already live here
-        # a normal session now loads a single model instead of swapping between three.
+        # ONE MODEL FOR EVERYTHING. Chat, code, vision and the uncensored prompt helpers all run on
+        # this single tenant — across every pipe on the box, not just this one.
         #
-        # This is the whole point: only two models fit at once at 32k context, so every distinct
-        # model this pipe reaches for is a potential eviction. Collapsing chat onto the coder removes
-        # that churn rather than trying to schedule around it.
+        # Why this tag rather than the stock Qwen3.6 it replaces: measured head-to-head
+        # (tests/bench_models.py, see UPGRADE_ROADMAP.md §0), it matched stock Qwen on 27/27 executed
+        # coding tasks and on critical thinking, ran marginally faster (135.3 vs 130.8 tok/s) in
+        # slightly less VRAM (18285 vs 18369 MiB) — and complied with 5/5 prompt-enhancer requests
+        # where stock Qwen REFUSED 2 of 5. That refusal gap was the only reason dolphin-venice:24b
+        # still existed, so closing it is what allows the box to drop to one large tenant.
         #
-        # dolphin stays installed and is NOT replaced globally: photoreal.py and uncensored.py hold
-        # their own reference to it, because their prompt enhancer needs a model that will not
-        # refuse. Those pipes are unaffected by this line.
-        self.chat_model = "hf.co/unsloth/Qwen3.6-35B-A3B-GGUF:UD-IQ4_XS"
-        # Vision runs on the CODER, not a separate vision model. Qwen3.6-35B-A3B is multimodal (it
-        # carries a 1134 MiB mmproj and declares `vision`), and on this box it reads an image at
-        # 123.7 tok/s versus gemma4:31b's 33.4 — 3.7x faster at 18372 MiB instead of 21772 MiB.
-        #
-        # Retiring gemma4:31b matters beyond speed: Ollama predicted 25.5 GiB for it at 32k context,
-        # i.e. more than the card, so it evicted every other model unconditionally on every image
-        # turn. Pointing vision at a tenant that is often already resident removes that churn.
-        self.vision_model = "hf.co/unsloth/Qwen3.6-35B-A3B-GGUF:UD-IQ4_XS"
-        # Coder entry's tenant (Phase 8). MoE, ~3 B active of 35 B — roughly 135 t/s on this 3090 vs
-        # ~20-25 t/s for a dense 27B at the same residency. Do NOT use `ollama run qwen3.6:35b`: that
-        # tag resolves to a 23.94 GB layer against ~24.35 GB usable and will OOM or silently spill.
-        self.coder_model = "hf.co/unsloth/Qwen3.6-35B-A3B-GGUF:UD-IQ4_XS"
+        # ⚠️ Known caveat, recorded rather than hidden: the coding benchmark does not discriminate —
+        # all candidates scored 27/27, so it shows no DETECTABLE regression, not equal quality. The
+        # upstream author states this build is tuned for uncensored roleplay and that a different
+        # model is better for coding. Adopted on the user's explicit decision. If code quality feels
+        # worse, the rollback is in UPGRADE_ROADMAP.md §0.6.
+        self.chat_model = "hermes-genesis:apex-compact"
+        # Same tenant again — it ships its own F16 projector and passed the vision check in the
+        # head-to-head. gemma4:31b, the old vision model, is gone: Ollama predicted 25.5 GiB for it
+        # at 32k context, more than the card, so it evicted everything unconditionally on every
+        # image turn.
+        self.vision_model = "hermes-genesis:apex-compact"
+        # Same tenant a third time. Kept as a separate attribute rather than collapsed into one
+        # field because the coder ROUTE still differs — it gets its own guard prompt and holds
+        # _GEN_LOCK for the stream — and because splitting them again later should be a one-line
+        # change, not a refactor.
+        self.coder_model = "hermes-genesis:apex-compact"
         # (OpenWebUI's own title/tag/query task model is gemma4:e2b, configured at the server level —
         # this pipe does not call it directly, so no task_model attribute is kept here.)
         self._recent = {}        # chat_id -> last produced image b64 (for follow-up edits without re-upload)
@@ -1511,6 +1513,23 @@ class Pipe:
             messages = [guard] + list(messages)
         else:
             messages = [guard] + [m for m in messages if m.get("role") != "system"]
+
+        # Collapse every system message into exactly ONE, guard first.
+        #
+        # Not cosmetic. Sending two system messages to hermes-genesis:apex-compact makes Ollama fail
+        # the whole request with HTTP 400 — "Unable to generate parser for this template" — because
+        # that GGUF's embedded chat template cannot handle more than one. Measured: 1 system message
+        # works, 2 is a hard 400. keep_system=True produces exactly that shape (our guard + OWUI's
+        # memory/context), so every turn carrying memory or a system convention broke.
+        #
+        # Stock Qwen3.6 tolerates multiple, so this is not a universal requirement — but one system
+        # message is what most chat templates actually expect, so merging is the portable shape and
+        # removes a whole class of model-specific breakage rather than special-casing one tag.
+        sys_parts = [m.get("content") for m in messages
+                     if m.get("role") == "system" and m.get("content")]
+        if len(sys_parts) > 1:
+            messages = ([{"role": "system", "content": "\n\n".join(sys_parts)}]
+                        + [m for m in messages if m.get("role") != "system"])
         # Route on the CURRENT turn only: gemma4 (vision) when the LATEST user turn carries an image,
         # else dolphin. Scanning the whole history pinned every later text turn to gemma4 forever
         # after a single image appeared, forcing a needless dolphin<->gemma4 eviction each turn.
