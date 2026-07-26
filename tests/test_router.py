@@ -57,7 +57,7 @@ def make_pipe():
     async def _finish(emitter, result, verb, elapsed, detail):
         return f"MEDIA[{result}]"
 
-    def _achat_stream(omsgs):
+    def _achat_stream(omsgs, **kw):   # **kw: guard_text / keep_system / force_model
         return "CHAT"
 
     async def _status(*a, **k):

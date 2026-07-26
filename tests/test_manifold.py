@@ -123,7 +123,10 @@ async def main():
     check("auto: image request still renders", got == "MEDIA[Generating image]", f"got {got!r}")
 
     # --- 3. system message survival ---------------------------------------
-    for entry, want_kept in (("knowledge", True), ("coder", True), ("auto", False)):
+    # All three entries now preserve system messages. 'auto' was changed deliberately so OpenWebUI's
+    # native memory and system prompts reach it too — see AUTO_KEEP_SYSTEM. Routing is unaffected:
+    # system messages are never part of the routing text (test_router.py covers that).
+    for entry, want_kept in (("knowledge", True), ("coder", True), ("auto", True)):
         _t, payload = await run_entry(f"auto_assistant.{entry}", WITH_SYS)
         sys_msgs = [m for m in payload["messages"] if m["role"] == "system"]
         kept = any("Rex" in m["content"] for m in sys_msgs)

@@ -54,6 +54,17 @@ AUTO_ROUTE_CODER = True
 ROUTE_CLASSIFIER_MODEL = "gemma3:1b"
 ROUTE_CLASSIFIER_TIMEOUT = 12       # seconds; on any failure we fall back to normal chat
 
+# Let OpenWebUI's own system messages through on the 'auto' entry — native memory, folder system
+# prompts, and anything else injected as role=system. Historically 'auto' replaced every system
+# message with the anti-dalle guard below, which silently discarded all of it.
+#
+# Safe with respect to routing: system messages are NEVER part of the routing text. Routing reads
+# metadata['user_prompt'] (the user's verbatim words) and strips known filter blocks on top; see
+# _strip_injected_context. Web-search and file context are likewise safe — chat_web_search_handler
+# attaches to form_data['files'], and middleware only merges that into the messages at :2808, AFTER
+# user_prompt is captured at :2803.
+AUTO_KEEP_SYSTEM = True
+
 
 class Pipe:
     def __init__(self):
@@ -1752,5 +1763,6 @@ class Pipe:
         # never the RAG blob, so a document about Python cannot pull the conversation to the coder.
         if not attached_img and not ref and await asyncio.to_thread(self._is_code_request, text):
             return self._locked_stream(self._achat_stream(
-                omsgs, guard_text=self._CODER_GUARD, force_model=self.coder_model))
-        return self._achat_stream(omsgs)
+                omsgs, guard_text=self._CODER_GUARD, keep_system=AUTO_KEEP_SYSTEM,
+                force_model=self.coder_model))
+        return self._achat_stream(omsgs, keep_system=AUTO_KEEP_SYSTEM)

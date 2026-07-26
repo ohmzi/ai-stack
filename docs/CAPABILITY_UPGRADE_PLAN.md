@@ -790,7 +790,7 @@ of truth and must stay md5-identical to `function.content`.
 | 2 | Legacy vs native FC | **Legacy first**, internal tool loop reconsidered later — shipped, Phase 4 |
 | 3 | Driver pinning | **Yes, `apt-mark hold`** — widened to all 15 × 580 packages — shipped, Phase 0 |
 | 4 | OCR ambition | **Tika now, judge OCR against real documents afterwards** — Phase 3 |
-| 5 | `auto` entry treatment | **Keep it lean.** No memory, no knowledge, native FC. Media router only |
+| 5 | `auto` entry treatment | ~~Keep it lean~~ → **REVERSED 2026-07-26: `auto` gets everything.** See below |
 | 6 | Memory | **Adaptive Memory v4.5.0**, pinned to `gemma4:e2b` — Phase 6 |
 | 7 | Retrieval | **Settings only, 0 VRAM.** `top_k` 3→20, hybrid on, `top_k_reranker` 3. No reranker yet — Phase 7 |
 | 8 | Coder role | **Add Qwen3.6-35B-A3B as a fourth tenant**; keep `dolphin-venice:24b` for the uncensored Photoreal helper — Phase 8 |
@@ -798,11 +798,49 @@ of truth and must stay md5-identical to `function.content`.
 | 10 | TTS | **Kokoro on CPU**, OpenAI-compatible, local base URL — Phase 5 |
 | 11 | QA split | **Automated checks run by Claude; a short numbered checklist for the browser-only tests** — Phase 9 |
 
-### Consequences worth keeping in view
+### Decision 5 reversed — 🪄 Assistant is now fully powered (2026-07-26)
 
-- **Decision 5 means the entries are not interchangeable.** `🪄 auto` will never see memory, knowledge
-  bases, folder files or web search. Use `📚 Knowledge` for anything document- or recall-shaped. If
-  that split turns out to be annoying in daily use, revisit decision 5 — it is one setting per entry.
+**Trigger.** Toggling web search on 🪄 Assistant produced *"I don't have real-time browsing
+capabilities"*, while the identical question on 📚 Knowledge searched and answered correctly. That was
+the documented consequence of decision 5, not a bug — but it is the wrong trade in daily use.
+
+**Applied.** All three now carry `function_calling: "legacy"` and the `adaptive_memory` filter, and
+the pipe passes `keep_system=True` on `auto` (`AUTO_KEEP_SYSTEM`):
+
+| Entry | function_calling | filters | keep_system |
+|---|---|---|---|
+| `auto_assistant.auto` | **legacy** *(was native)* | **adaptive_memory** *(was none)* | **True** *(was False)* |
+| `auto_assistant.knowledge` | legacy | adaptive_memory | True |
+| `auto_assistant.coder` | legacy | adaptive_memory | True |
+
+**Why this is safe — the concern I raised earlier was overstated, and one part of it was simply wrong.**
+
+1. *"Legacy FC injects a RAG blob on every turn."* **Wrong.** Every gate is conditional on something
+   being active: `:2456` fires only when the user toggles web search (`features['web_search']`),
+   `:2377` only when a knowledge base is attached to the model entry, `:2363` only when folder files
+   exist. `features` is popped from the per-message request at `:2438`. An ordinary chat turn injects
+   nothing at all, so the media path is untouched.
+2. *"It puts document text on the render path."* **It cannot reach the router.**
+   `chat_web_search_handler` attaches results to `form_data['files']` — it never touches
+   `form_data['messages']`. Messages are only merged at `:2808`, **after** `user_prompt` is captured
+   at `:2803`. So search and file context land on exactly the path the Phase 1 fix was built for, and
+   `tests/test_router.py` cases A/B/E already prove that path is clean.
+3. **System messages are never routing input.** Routing reads `metadata['user_prompt']` plus
+   `_strip_injected_context`, so `keep_system=True` has no routing consequence.
+4. Memory *does* reach the routing text (filters run at `:2428`, before `:2803`) — which is precisely
+   why `_strip_injected_context` exists. Cases G/H/I cover it, and R08 in the eval suite covers it
+   end-to-end.
+
+**Not enabled:** `capabilities.image_generation` stays `false` on all three. The pipe does its own
+ComfyUI rendering; turning on OWUI's handler as well would double-generate.
+
+**Inventory at time of change:** no tools installed, no tool servers configured, no knowledge bases
+created yet. Code interpreter is enabled (pyodide). So "all the tools" currently means web search,
+memory, file/folder context and citations — plus the pipe's native media generation.
+
+Tests updated: `test_manifold` previously asserted *"auto: system message stripped"* and correctly
+**failed** on this change; it now asserts preservation for all three entries. 9/9 router, 24/24
+manifold, 39/39 autoroute all pass.
 - **Decision 8 means four large tags on disk (~59 GB of 363 GB free).** Only one large tenant is
   resident at a time under `_GEN_LOCK`, so this costs eviction churn and cold-load latency
   (`gemma4:e2b` alone measured **54.5 s** cold), not simultaneous VRAM.
