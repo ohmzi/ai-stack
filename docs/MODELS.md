@@ -3,14 +3,19 @@
 Single 24 GB RTX 3090. **Every number here is measured** (`nvidia-smi` delta on a clean idle
 baseline), not estimated — see the warning about `/api/ps` below.
 
+**As of 2026-07-26 the box runs FOUR models, one of which does almost everything.**
+
 | Slot | Model | Real VRAM | tok/s | Role |
 |---|---|---|---|---|
-| **Chat + pipe helpers** | `dolphin-venice:24b` (dense 24B) | **16584 MiB** | 49.9 | Text chat, and every prompt helper the pipes run — enhance, edit-rewrite, shot-planning, prompt-merge. Uncensored (the Photoreal pipe's enhancer needs a model that won't refuse). |
-| **Code + vision** | `hf.co/unsloth/Qwen3.6-35B-A3B-GGUF:UD-IQ4_XS` (MoE, ~3 B active) | **18372 MiB** | **119.6** gen / 123.7 vision | Coding turns, **and all vision work** — image Q&A and the `_verify_image` QA check. |
-| **Task model** | `gemma4:e2b` | **3307 MiB** | 166.6 | Chat titles, tags, RAG query generation. Thinking is OFF (see below). ⚠️ see "the phantom". |
-| **Router classifier** | `gemma3:1b` | **1313 MiB** | 235.4 | The HINT-tier chat-vs-code classifier in the pipe. Co-resides with the coder. |
-| _retired_ | `gemma4:31b` | 21772 MiB | 33.4 | **No longer used.** Kept on disk for rollback only. |
-| _evaluated, not adopted_ | `hermes-genesis:apex-compact` | 18285 MiB | 135.3 | Installed for a head-to-head only; **nothing points at it**. See `UPGRADE_ROADMAP.md` §0 — it out-scored both incumbents but has bad provenance. |
+| **Everything** | `hermes-genesis:apex-compact` (MoE, ~3 B active of 34.7 B) | **18285 MiB** | **135.3** | Chat, code, vision, and the uncensored prompt helpers — across `auto_assistant`, `photoreal` and `image_krea`. |
+| **Task model** | `gemma4:e2b` | **3307 MiB** | 166.6 | Chat titles, tags, RAG query generation. Thinking is OFF (see below). Also the QA judge. ⚠️ see "the phantom". |
+| **Router classifier** | `gemma3:1b` | **1313 MiB** | 235.4 | The HINT-tier chat-vs-code classifier in the pipe. Co-resides with the main tenant. |
+| **Embeddings** | `bge-m3:latest` | ~941 MiB, transient | — | RAG embeddings via the Ollama engine. 1024-dim, 8192-token window. |
+
+**Deleted 2026-07-26** — ~55 GB reclaimed, disk 277 → 332 GB free:
+`hf.co/unsloth/Qwen3.6-35B-A3B-GGUF:UD-IQ4_XS` (18 GB) · `dolphin-venice:24b` (14 GB) ·
+`gemma4:31b` (19 GB) · `gemma4:e2b-it-qat` (4.3 GB) · `qwen3-embedding:0.6b` · `embeddinggemma:300m`
+(the last three were never referenced by anything).
 
 Idle baseline is **1023–1070 MiB**, and it is not what the old version of this doc claimed: the
 desktop is only ~186 MiB (Xorg + gnome-shell + TeamViewer + nautilus). The rest is
@@ -24,6 +29,29 @@ desktop is only ~186 MiB (Xorg + gnome-shell + TeamViewer + nautilus). The rest 
 > Working formula, validated to within 16 MiB on all five models:
 > `nvidia-smi delta = model_buffer + KV_cache + compute_buffer + mmproj + ~305 MiB CUDA context`
 
+## ⚠️ This model accepts only ONE system message
+
+Its embedded chat template cannot parse more than one. Send two and Ollama fails the whole request:
+
+```
+HTTP 400 — "Unable to generate parser for this template.
+            Automatic parser generation failed: ... While executing CallExpression at line 85"
+```
+
+Measured: **1 system message works, 2 is a hard 400.** Stock Qwen3.6 handled 2 fine, so this is
+specific to this build.
+
+That is exactly the shape `keep_system=True` produces — the pipe's own guard plus OpenWebUI's
+memory/RAG context — so **every turn carrying a memory or a system convention returned an error
+string** until it was fixed. `_achat_stream` now collapses all system messages into one, guard first,
+which is the portable shape most chat templates expect anyway. Four assertions in `test_manifold.py`
+lock it in.
+
+Worth noting how this was caught: `bench_models.py` missed it completely, because it only ever sends
+a single user message. `qa_live.py` caught it because cases A3 and C3 deliberately test
+system-message delivery. A benchmark that only exercises the happy path will not find this class of
+defect.
+
 ## Vision runs on the coder (2026-07-26)
 
 `gemma4:31b` was retired. Qwen3.6-35B-A3B is multimodal — it carries a 1134 MiB `mmproj` and declares
@@ -35,12 +63,17 @@ The bigger win is churn, not speed. Ollama *predicted* 25.5 GiB for `gemma4:31b`
 more than the card — so it evicted **every** other model unconditionally on every image turn. Vision
 now lands on a tenant that is often already resident.
 
-Rollback: set `self.vision_model` back to `"gemma4:31b"` in `pipes/auto_assistant.py`. The tag is
-still on disk; do not `ollama rm` it until a real render-QA pass is green.
+⚠️ `gemma4:31b` has since been **deleted**. Rolling vision back to it now requires
+`ollama pull gemma4:31b` (19 GB) first — see Rollback at the foot of this doc.
 
 ## Co-residency — measured, and order matters
 
 Only **two models fit at once** at the current `OLLAMA_CONTEXT_LENGTH=32768`. Any 3-way is impossible.
+
+The table below was measured before the 2026-07-26 consolidation and names models that are now
+deleted. It is kept because the *shape* still governs the box: the main tenant co-resides with
+`gemma3:1b` and with nothing larger. In practice there is now only one large model, so eviction
+churn between big tenants no longer arises at all.
 
 | Combination | Result |
 |---|---|
@@ -76,7 +109,8 @@ buys nothing and costs VRAM:
 | coder | 327 MiB |
 | `gemma4:e2b` | 124 MiB |
 
-Most of that lever belongs to dolphin. ⚠️ Do **not** drop the global to 8192 while `--context-shift`
+Most of that lever belonged to dolphin, which is now deleted — so on the current single-tenant setup
+the 32k default costs only ~327 MiB. ⚠️ Do **not** drop the global to 8192 while `--context-shift`
 is on: oversized RAG and web-search turns would degrade silently instead of erroring.
 
 ## KV cache: keep `q8_0`
@@ -119,15 +153,23 @@ Verified: titles now generate in **~0.04 s** warm with zero thinking.
   zero extra GB and zero downloads.
 - **q4_0 KV cache** — measured and rejected above.
 
-## Open: replacing dolphin with an uncensored MoE
+## Resolved: dolphin replaced (2026-07-26)
 
-The highest-value remaining swap, and this doc has flagged it before. Measured on this box, MoE vs
-dense at comparable residency: **coder 119.6 tok/s at 18372 MiB vs dolphin 49.9 tok/s at 16584 MiB**
-— a 30–35B-A3B-class uncensored chat model would be ~2.4× faster than dolphin for +1.8 GiB.
+This doc flagged the swap for weeks; it is now done. `hermes-genesis:apex-compact` is an uncensored
+Qwen3.6-35B-A3B derivative, so it satisfies the Photoreal enhancer requirement **and** the coding
+role at once — 135.3 tok/s at 18285 MiB, versus dolphin's 49.9 at 16584.
 
-The blocker is not VRAM, it is the *uncensored* requirement: the Photoreal pipe's prompt enhancer
-needs a model that won't refuse. Abliterated builds measurably degrade quality, so this is a real
-trade, not a free upgrade.
+The blocker was never VRAM, it was the *uncensored* requirement. Measured refusal rates on five
+prompt-enhancer-style requests settle it:
+
+| Model | Complied |
+|---|---|
+| stock `Qwen3.6-35B-A3B` | **3/5** — refused 2 |
+| `dolphin-venice:24b` | 5/5 |
+| **`hermes-genesis:apex-compact`** | **5/5** |
+
+That gap is the entire reason dolphin survived this long, and closing it is what let the box go from
+three large tenants to one.
 
 **Now measured, 2026-07-26.** The refusal gap is real: on five prompt-enhancer-style requests the
 coder refused **2 of 5**, while `dolphin` and an uncensored Qwen3.6 both complied 5/5. So `dolphin`
@@ -144,5 +186,15 @@ Photoreal helper would still need an uncensored model, so dolphin could not be d
 
 ## Rollback
 
-- Vision → `gemma4:31b`: edit `self.vision_model` in `pipes/auto_assistant.py`.
-- Task model → `gemma3:1b`: set `task.model.default` / `task.model.external`, restart OpenWebUI.
+The 2026-07-26 consolidation deleted the models it replaced, so reverting means re-pulling. Costs are
+download size, not just config.
+
+| To undo | Steps |
+|---|---|
+| **The whole consolidation** | `ollama pull hf.co/unsloth/Qwen3.6-35B-A3B-GGUF:UD-IQ4_XS` (17.7 GB) and `ollama pull dolphin-venice:24b` (14 GB), then revert `chat_model`/`vision_model`/`coder_model` in `pipes/auto_assistant.py`, `text_model` in `photoreal.py`, and both in `image_krea.py`. Git history has the exact prior values. |
+| **Vision only** | `ollama pull gemma4:31b` (19 GB), set `self.vision_model`. |
+| **Task model → `gemma3:1b`** | set `task.model.default` / `task.model.external`, restart OpenWebUI. No download — it is still installed. |
+| **Re-create the main model** | The source GGUFs are kept at `/home/ohmz/models/hermes-genesis/` (18.3 GB) precisely so this does not need a re-download: `ollama create hermes-genesis:apex-compact -f Modelfile`. Worth keeping — the upstream repo's `:latest` tag resolves to **V3**, not the V5 build in use here, so a re-download would not reproduce it. |
+
+DB backups taken along the way: `webui.db.bak-genesis` (before the swap), `webui.db.bak-embedder`,
+`webui.db.bak-onepipe`, `webui.db.bak-autofull`.

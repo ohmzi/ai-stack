@@ -155,11 +155,64 @@ reads `metadata['user_prompt']`.
 
 Caveat: full-body injection every turn consumes context. One or two skills, not a library.
 
-### 0.6 Current state
+### 0.6 ADOPTED — 2026-07-26
 
-`hermes-genesis:apex-compact` is **installed but not wired in** — nothing in the pipe points at it.
-All incumbents are untouched. Rollback is `ollama rm hermes-genesis:apex-compact` plus deleting
-`/home/ohmz/models/hermes-genesis/` (18.3 GB).
+**Decision: adopt, overriding the §0.2 provenance recommendation.** Taken by the user with the
+objection on record. The benchmark did back it on every measurable axis; the objection was origin,
+not performance.
+
+`hermes-genesis:apex-compact` is now the **only** large model on the box. Every pipe points at it:
+
+| Pipe | Fields | Was |
+|---|---|---|
+| `auto_assistant` | `chat_model`, `vision_model`, `coder_model` | stock Qwen3.6 |
+| `photoreal` (deployed as `uncensored`) | `text_model` | `dolphin-venice:24b` |
+| `image_krea` | `text_model`, `vision_model` | `dolphin` + `gemma4:31b` |
+
+**Deleted — ~55 GB reclaimed, disk 277 → 332 GB free:** stock Qwen3.6 (18 GB), `dolphin-venice:24b`
+(14 GB), `gemma4:31b` (19 GB), `gemma4:e2b-it-qat` (4.3 GB), `qwen3-embedding:0.6b`,
+`embeddinggemma:300m`. Stale OpenWebUI picker rows for the first three were removed too. Remaining:
+`hermes-genesis` + `gemma4:e2b` (task/judge) + `gemma3:1b` (classifier) + `bge-m3` (embeddings).
+
+#### ⚠️ A hard defect the benchmark missed
+
+Its chat template **cannot parse more than one system message** — Ollama returns HTTP 400
+*"Unable to generate parser for this template"*. Measured: 1 works, 2 is a hard 400. Stock Qwen3.6
+handled 2 fine, so this is specific to this build.
+
+`keep_system=True` produces exactly that shape (the pipe's guard + OpenWebUI's memory/context), so
+**every turn carrying a memory or a system convention returned an error string instead of an answer.**
+
+Fixed in `_achat_stream` by collapsing all system messages into one, guard first — the portable shape
+most chat templates expect, so it removes a class of model-specific breakage rather than
+special-casing one tag. Four assertions in `test_manifold.py` lock it in.
+
+**Why `bench_models.py` missed it:** that harness only ever sends a single user message. `qa_live.py`
+caught it because cases A3/C3 deliberately test system-message delivery. A benchmark that only walks
+the happy path will not find this class of defect — worth remembering before trusting the next one.
+
+#### Harness fallout from deleting models
+
+Retiring `gemma4:31b` broke the QA judge, and every case came back UNPARSEABLE — **8/8 FAIL that
+looked exactly like a total model regression** while the answers were in fact correct. Judge moved to
+`gemma4:e2b`, which keeps the cross-family property (Gemma vs Qwen) that `QA_TEST_PLAN.md` requires,
+since the only other capable chat model is now the one under test. A pre-flight check now refuses to
+run when the judge is missing.
+
+Two further harness bugs surfaced and were fixed: the judge could not see system context (so a
+*correct* answer sourced from a system message was failed as hallucination), and `run_eval.py` mapped
+a model tag back to a role name — impossible now that chat/vision/coder share one tag, which reported
+every coder case as `ROUTE-FAIL->chat`.
+
+#### Verification after adoption
+
+8/8 live QA including both system-context cases · 10/11 eval smoke tier (R05 is the documented
+java/coffee known-fail) · 15/15 router · 28/28 manifold · 40/40 autoroute · 40/40 media-intent.
+
+Rollback is documented in `MODELS.md`. Note it now costs downloads: the replaced models were deleted.
+The source GGUFs are deliberately **kept** at `/home/ohmz/models/hermes-genesis/`, because the
+upstream repo's `:latest` resolves to **V3**, not the V5 build in use — a re-download would not
+reproduce it.
 
 ---
 
