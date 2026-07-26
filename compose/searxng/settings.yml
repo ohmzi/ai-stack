@@ -12,7 +12,27 @@
 # Note: OWUI 0.10.2 no longer needs the legacy `<query>` placeholder in the query URL; searxng.py
 # actively strips any query string from it.
 
-use_default_settings: true
+# Whitelist the engine set instead of inheriting SearXNG's full default roster.
+#
+# WHY: with the full roster, every query fans out to dozens of upstream engines. An audit that ran
+# ~60 queries in 10 minutes got google cse, duckduckgo, startpage AND brave rate-limited or
+# CAPTCHA-blocked simultaneously, degrading results to bing-only boilerplate. `server.limiter: false`
+# does not help — those limits are imposed upstream, not here.
+#
+# A small curated set means each engine sees far fewer requests, so normal interactive use stays well
+# under their thresholds. Note a CAPTCHA block lasts ~3600 s, not the 180 s of a plain rate-limit.
+#
+# Health check:
+#   curl -s 'localhost:8888/search?q=test&format=json' \
+#     | python3 -c "import json,sys; print(json.load(sys.stdin)['unresponsive_engines'])"
+use_default_settings:
+  engines:
+    keep_only:
+      - duckduckgo      # good general coverage; CAPTCHAs only under sustained load
+      - bing            # the most tolerant of server-to-server use from this IP
+      - mojeek          # independent index, no API key, rarely rate-limits
+      - wikipedia       # note: populates infoboxes[], not results[]
+      - wikidata
 
 general:
   debug: false
@@ -41,16 +61,23 @@ search:
 ui:
   static_use_hash: true
 
-# Keep the engine set small and reliable for programmatic use. Engines that rate-limit aggressively
-# or need API keys are left disabled by default via use_default_settings.
+# BOTH directives are required and they do different jobs:
+#   use_default_settings.engines.keep_only (top of file) RESTRICTS which engines exist at all.
+#   this `engines:` list FLIPS THE disabled FLAG on the ones that ship disabled by default.
+#
+# keep_only alone is not enough, and it fails quietly: bing and mojeek ship `disabled: true`
+# upstream, so keeping them still left them switched off. Verified via /config — with keep_only alone
+# only duckduckgo, wikipedia and wikidata were enabled, i.e. one real web engine and no fallback.
+#
+# Verify after any change:
+#   curl -s localhost:8888/config | python3 -c \
+#     "import json,sys; [print(e['name'], e.get('enabled')) for e in json.load(sys.stdin)['engines']]"
+#
+# Deliberately NOT kept: google cse, startpage and brave. All three rate-limited or CAPTCHA-blocked
+# this IP during the audit ("too many requests" / CAPTCHA). Re-add one at a time and watch
+# unresponsive_engines if you want broader coverage.
 engines:
-  - name: wikipedia
-    disabled: false
-  - name: duckduckgo
-    disabled: false
   - name: bing
     disabled: false
-  - name: brave
-    disabled: false
-  - name: startpage
+  - name: mojeek
     disabled: false

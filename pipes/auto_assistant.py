@@ -1381,6 +1381,18 @@ class Pipe:
             import shutil
             shutil.rmtree(d, ignore_errors=True)
 
+    @staticmethod
+    def _clip_frames(opts):
+        """How many frames this clip will ACTUALLY contain.
+
+        The 5B fast path ignores opts['length'] and renders V_LEN_5B unless 'longer' was asked for.
+        Reported separately from opts['length'] the two drifted, and the status line claimed 81f on
+        clips that were really 49f — so both the workflow builder and the status line call this.
+        """
+        if not opts or not opts.get("fast"):
+            return (opts or {}).get("length", V_LEN_14B)
+        return V_LEN_LONG if opts.get("length", 0) >= V_LEN_LONG else V_LEN_5B
+
     def _gen_video(self, prompt, seed=None, opts=None, check=None):
         seed = seed if seed is not None else random.randint(0, 2**31)
         opts = opts or {"w": V_W, "h": V_H, "length": V_LEN_14B, "fast": False}
@@ -1389,8 +1401,7 @@ class Pipe:
             if V_QUALITY == "best" and not opts.get("fast"):
                 return self._wf_video_14b(p, seed, opts["w"], opts["h"], opts["length"])
             # 5B fast path now honors the parsed resolution; length only stretches on explicit 'longer'
-            length5 = V_LEN_LONG if opts.get("length", 0) >= V_LEN_LONG else V_LEN_5B
-            return self._wf_video_5b(p, seed, opts["w"], opts["h"], length5)
+            return self._wf_video_5b(p, seed, opts["w"], opts["h"], self._clip_frames(opts))
 
         self._free_vram()
         data, err, _ = self._submit_poll(build(prompt), "save", "Video", 900)
@@ -1441,7 +1452,10 @@ class Pipe:
             "video, just acknowledge briefly in words.\n"
             "When context from documents or a web search is provided, answer from it, keep any [id] "
             "citation markers exactly as given, and say plainly when the answer is not in the "
-            "context rather than guessing.")}
+            "context rather than guessing.\n"
+            "If the app has given you a tag syntax to use — for example a <code_interpreter> block — "
+            "follow those instructions and emit the tag raw. Never wrap such a tag in a markdown "
+            "code fence; fenced tags are displayed as text instead of being executed.")}
         if keep_system:
             # Preserve OpenWebUI's own system messages (native memory, Adaptive Memory, RAG system
             # context). The historical unconditional strip below is what silently discarded them.
@@ -1725,7 +1739,7 @@ class Pipe:
                                              self._gen_video_and_cache(cid, cleaned, enhance=VID_ENHANCE, opts=opts))
             model = "Wan 2.2 5B" if opts.get("fast") else "Wan 2.2 A14B"
             return await self._finish(emitter, result, "Generated", el,
-                                      f"{model} · {opts['w']}×{opts['h']} · {opts['length']}f")
+                                      f"{model} · {opts['w']}×{opts['h']} · {self._clip_frames(opts)}f")
         # Fresh image generation ("create/draw a …") → a brand-new image, even mid-conversation.
         # (unless it's a restyle of the image on the table — "make this picture realistic" — which
         # must fall through to the EDIT path below, not t2i a mangled prompt from scratch)

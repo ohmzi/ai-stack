@@ -190,6 +190,31 @@ async def main():
         if not ok:
             print(f"          expected {expected!r}, got {got!r}")
 
+    # The edit branch sits ABOVE the coder branch in pipe(), so when an image is already in the
+    # conversation the appended code-interpreter block makes an ordinary request look like an edit
+    # instruction — the user asks for a chart and gets their picture re-rendered. Unstripped,
+    # _wants_edit("plot my sales data" + CI block) is True; stripped it is False.
+    print("\n--- image already in the chat + code-interpreter block ---")
+    PRIOR_IMAGE = ('<img src="data:image/png;base64,'
+                   'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg=="'
+                   ' alt="prior">')
+    for name, msg, expected in [
+            ("N  image in chat + CI block + chart request", "plot my sales data", "CHAT"),
+            ("O  image in chat + CI block + genuine edit", "make it brighter", "MEDIA[Editing image]")]:
+        p = make_pipe()
+        injected = msg + CODE_INTERPRETER_BLOCK
+        body = {"messages": [
+            {"role": "user", "content": "make a picture of a bar chart"},
+            {"role": "assistant", "content": PRIOR_IMAGE},
+            {"role": "user", "content": injected}]}
+        got = await drain(await p.pipe(body, __metadata__={"chat_id": "t", "user_prompt": injected},
+                                       __event_emitter__=None))
+        ok = got == expected
+        fails += (not ok)
+        print(f"  [{'PASS' if ok else 'FAIL'}] {name}")
+        if not ok:
+            print(f"          expected {expected!r}, got {got!r}")
+
     print("\n--- control: same cases with routing metadata REMOVED (simulates the pre-fix path) ---")
     for name, q, doc, _m, expected in CASES[:2]:
         got = await route(q, doc, with_metadata=False)
