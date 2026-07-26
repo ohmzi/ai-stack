@@ -80,6 +80,46 @@ CODE = [
      "prompt": "Write a Python function to_roman(n) converting an integer 1-3999 to a Roman numeral "
                "string. Respond with code only.",
      "tests": [("(1,)", "'I'"), ("(4,)", "'IV'"), ("(1994,)", "'MCMXCIV'"), ("(3999,)", "'MMMCMXCIX'")]},
+
+    # --- harder tier -------------------------------------------------------------------------
+    # The five above are the sort of task every 30B-class model now passes, which makes them useless
+    # for CHOOSING between models — they only prove the absence of a regression. These four are
+    # chosen for the specific places models actually break: off-by-one boundaries, an edge case that
+    # contradicts the obvious algorithm, mutation-during-iteration, and precise spec compliance.
+    {"id": "interval_merge", "entry": "merge_intervals",
+     "prompt": "Write a Python function merge_intervals(intervals) that merges a list of [start, end] "
+               "intervals and returns them sorted by start. Touching intervals like [1,2] and [2,3] "
+               "MUST merge into [1,3]. Respond with code only.",
+     "tests": [("([[1,3],[2,6],[8,10],[15,18]],)", "[[1, 6], [8, 10], [15, 18]]"),
+               ("([[1,2],[2,3]],)", "[[1, 3]]"),
+               ("([],)", "[]"),
+               ("([[5,6],[1,2]],)", "[[1, 2], [5, 6]]")]},
+    {"id": "roman_parse", "entry": "from_roman",
+     "prompt": "Write a Python function from_roman(s) that parses a Roman numeral string into an "
+               "integer. It must handle subtractive pairs such as IV, IX, XL, XC, CD, CM. "
+               "Respond with code only.",
+     "tests": [("('I',)", "1"), ("('IV',)", "4"), ("('MCMXCIV',)", "1994"),
+               ("('MMMCMXCIX',)", "3999"), ("('XLII',)", "42")]},
+    # Sliding-window chunking: the stride is size-overlap, and getting that arithmetic right at the
+    # tail is precisely where implementations slip. Lengths below are chosen so the window lands
+    # exactly on the end and there is only ONE defensible answer — an ambiguous expectation would
+    # penalise a correct model, which is worse than having no test.
+    {"id": "chunk_overlap", "entry": "chunk_text",
+     "prompt": "Write a Python function chunk_text(text, size, overlap) that splits text into chunks "
+               "of at most `size` characters, where each chunk after the first begins `overlap` "
+               "characters before the previous chunk ended (i.e. the stride is size - overlap). "
+               "The final chunk may be shorter. Never return an empty chunk. Respond with code only.",
+     "tests": [("('abcdefghij', 5, 0)", "['abcde', 'fghij']"),
+               ("('abcdefghijkl', 5, 2)", "['abcde', 'defgh', 'ghijk', 'jkl']"),
+               ("('abc', 5, 0)", "['abc']")]},
+    {"id": "safe_del", "entry": "remove_evens",
+     "prompt": "Write a Python function remove_evens(nums) that removes every even number from the "
+               "list IN PLACE (mutating the caller's list, not returning a new one) and returns None. "
+               "Respond with code only.",
+     "tests": [("([1,2,3,4,5,6],)", "None"),
+               ("@[(lambda _l: (remove_evens(_l), _l)[1])([1,2,3,4,5,6])][0]", "[1, 3, 5]"),
+               ("@[(lambda _l: (remove_evens(_l), _l)[1])([2,4,6])][0]", "[]"),
+               ("@[(lambda _l: (remove_evens(_l), _l)[1])([1,3,5])][0]", "[1, 3, 5]")]},
 ]
 
 
@@ -100,8 +140,13 @@ def grade_code(ans, spec):
         return False, f"no function {spec['entry']}"
     h = [code, "", "_f=[]"]
     for args, want in spec["tests"]:
-        lbl = json.dumps(f"{spec['entry']}{args}")
-        h.append(f"try:\n    _g={spec['entry']}{args}\n    if _g!={want}: _f.append({lbl}+' -> '+repr(_g))\n"
+        # An args string starting with '@' is a COMPLETE expression, used verbatim. Needed for things
+        # the entry(args) form cannot express — e.g. checking a function that mutates its argument in
+        # place and returns None, where the assertion is about the argument afterwards, not the
+        # return value.
+        expr = args[1:] if args.startswith("@") else f"{spec['entry']}{args}"
+        lbl = json.dumps(expr)
+        h.append(f"try:\n    _g={expr}\n    if _g!={want}: _f.append({lbl}+' -> '+repr(_g))\n"
                  f"except Exception as _e:\n    _f.append({lbl}+' raised '+type(_e).__name__)")
     h.append("print('FAILS:'+'; '.join(_f) if _f else 'ALLPASS')")
     with tempfile.TemporaryDirectory() as td:
@@ -208,13 +253,19 @@ def bench(model, img_b64, repeat):
 
     print("  vision")
     if img_b64:
-        ans, el, *_ = call(model, [{"role": "user", "content":
-                                    "Describe exactly what shapes and colours are in this image."}],
-                           images=[img_b64], num_predict=250)
-        got = all(w in ans.lower() for w in ("red", "blue")) and \
-            ("circle" in ans.lower() and ("square" in ans.lower() or "rectangle" in ans.lower()))
-        r["vision"] = (got, round(el, 1), ans[:90])
-        print(f"    {'PASS' if got else 'FAIL'}  {el:.1f}s  {ans[:70]!r}")
+        # Text-only models return HTTP 400 for an images[] payload. That is a capability answer, not
+        # a harness failure — record it and carry on rather than aborting the whole comparison.
+        try:
+            ans, el, *_ = call(model, [{"role": "user", "content":
+                                        "Describe exactly what shapes and colours are in this image."}],
+                               images=[img_b64], num_predict=250)
+            got = all(w in ans.lower() for w in ("red", "blue")) and \
+                ("circle" in ans.lower() and ("square" in ans.lower() or "rectangle" in ans.lower()))
+            r["vision"] = (got, round(el, 1), ans[:90])
+            print(f"    {'PASS' if got else 'FAIL'}  {el:.1f}s  {ans[:70]!r}")
+        except Exception as e:
+            r["vision"] = (False, 0.0, f"no vision support ({type(e).__name__})")
+            print(f"    NO VISION  ({type(e).__name__}: {str(e)[:50]})")
 
     r["critical_raw"] = []
     for name, q, crit in CRITICAL:
