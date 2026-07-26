@@ -76,3 +76,39 @@ services:
       options:
         max-size: "1m"
         max-file: "1"
+
+  # Cross-encoder reranker, Cohere-schema, on CPU.
+  #
+  # This is NOT an optional quality add-on. Reading the running OWUI source
+  # (retrieval/utils.py:1702-1735): when rag.reranking_model is empty, RerankCompressor takes the
+  # RRF-fused hybrid candidates, RE-EMBEDS them with the ordinary embedding model, re-sorts by plain
+  # cosine and truncates. The BM25 half of hybrid search is discarded at the final ranking step. So
+  # with hybrid on and no reranker, hybrid was buying candidate recall and then throwing the fusion
+  # away. A reranker is what makes enable_hybrid_search mean anything.
+  #
+  # CPU deliberately: 0 VRAM on a card holding an 18.4 GB coder, and reranking ~20 short passages is
+  # a small job for 24 idle cores. The GPU image is 4.76 GB; this one is 0.75 GB.
+  #
+  # OWUI side: rag.reranking_engine="external", rag.external_reranker_url="http://localhost:7997/rerank".
+  # Infinity implements Cohere's schema, which is the shape OWUI expects — note HF TEI does NOT
+  # (it returns a bare array rather than {results:[...]}) and is therefore incompatible.
+  infinity-rerank:
+    image: michaelf34/infinity:0.0.77-cpu
+    container_name: infinity-rerank
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:7997:7997"
+    volumes:
+      - ./infinity-cache:/app/.cache
+    command: >
+      v2
+      --model-id BAAI/bge-reranker-v2-m3
+      --engine torch
+      --device cpu
+      --port 7997
+      --batch-size 8
+    logging:
+      driver: json-file
+      options:
+        max-size: "1m"
+        max-file: "1"

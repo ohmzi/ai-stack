@@ -70,7 +70,18 @@ class Pipe:
     def __init__(self):
         self.comfy = "http://localhost:8188"
         self.ollama = "http://localhost:11434"
-        self.chat_model = "dolphin-venice:24b"   # text chat + all prompt-rewrite/merge/plan helpers
+        # Chat, code and vision are ONE tenant. Measured: the coder answers at 119.6 tok/s versus
+        # dolphin's 49.9 — 2.4x faster — for +1.8 GiB, and because code and vision already live here
+        # a normal session now loads a single model instead of swapping between three.
+        #
+        # This is the whole point: only two models fit at once at 32k context, so every distinct
+        # model this pipe reaches for is a potential eviction. Collapsing chat onto the coder removes
+        # that churn rather than trying to schedule around it.
+        #
+        # dolphin stays installed and is NOT replaced globally: photoreal.py and uncensored.py hold
+        # their own reference to it, because their prompt enhancer needs a model that will not
+        # refuse. Those pipes are unaffected by this line.
+        self.chat_model = "hf.co/unsloth/Qwen3.6-35B-A3B-GGUF:UD-IQ4_XS"
         # Vision runs on the CODER, not a separate vision model. Qwen3.6-35B-A3B is multimodal (it
         # carries a 1134 MiB mmproj and declares `vision`), and on this box it reads an image at
         # 123.7 tok/s versus gemma4:31b's 33.4 — 3.7x faster at 18372 MiB instead of 21772 MiB.

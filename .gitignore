@@ -10,3 +10,6 @@ webui.db*
 
 # eval run artifacts — baseline.json IS tracked, individual runs are not
 tests/eval/results/
+
+# reranker model cache (downloaded at runtime, ~2GB)
+compose/infinity-cache/

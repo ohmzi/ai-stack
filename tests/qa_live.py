@@ -42,17 +42,22 @@ class SpySession(aiohttp.ClientSession):
 mod.aiohttp.ClientSession = SpySession
 
 
+# Expected models are read from the pipe, not hardcoded. Chat, code and vision were collapsed onto
+# one tenant on 2026-07-26, so a literal tag here would assert nothing and would rot on the next swap.
+_P = mod.Pipe()
+CHAT_MODEL, CODER_MODEL = _P.chat_model, _P.coder_model
+
 # (id, entry, messages, what a correct answer must contain/do)
 CASES = [
     ("A1", "auto",
      [{"role": "user", "content": "What is the capital of Australia? Answer in one short sentence."}],
-     "dolphin-venice:24b",
+     CHAT_MODEL,
      "States that the capital of Australia is Canberra. Naming Sydney or Melbourne is WRONG."),
 
     ("A2", "auto",
      [{"role": "user", "content": "A train travels 60 km in 45 minutes. What is its average speed "
                                   "in km/h? Give the number."}],
-     "dolphin-venice:24b",
+     CHAT_MODEL,
      "Arrives at 80 km/h. Any other number is WRONG."),
 
     # The decisive test for the Phase 2 keep_system=True change: this fact exists nowhere in training
@@ -61,34 +66,34 @@ CASES = [
      [{"role": "system", "content": "Known facts about this user: their bicycle is a matte green "
                                     "Bianchi named Persimmon, bought in March 2024."},
       {"role": "user", "content": "What is my bicycle called and what colour is it?"}],
-     "dolphin-venice:24b",
+     CHAT_MODEL,
      "Says the bicycle is named Persimmon AND that it is (matte) green. Both required. Saying it "
      "does not know, or inventing a different name/colour, is WRONG."),
 
     # The 🪄 auto entry must pick the model itself — no manual entry switching.
     ("B1", "auto",
      [{"role": "user", "content": "What is the tallest mountain in Africa? One sentence."}],
-     "dolphin-venice:24b",
+     CHAT_MODEL,
      "States Mount Kilimanjaro. Anything else is WRONG."),
 
     ("B2", "auto",
      [{"role": "user", "content": "Write a Python function that reverses a string without using "
                                   "slicing. Code only."}],
-     "hf.co/unsloth/Qwen3.6-35B-A3B-GGUF:UD-IQ4_XS",
+     CODER_MODEL,
      "Contains a Python function that reverses a string and does NOT use [::-1] slicing. "
      "A loop, reversed(), or recursion are all acceptable."),
 
     ("C1", "auto",
      [{"role": "user", "content": "Write a Python function fib(n) returning the nth Fibonacci number "
                                   "iteratively, with fib(0)=0. Code only."}],
-     "hf.co/unsloth/Qwen3.6-35B-A3B-GGUF:UD-IQ4_XS",
+     CODER_MODEL,
      "Contains a Python function computing Fibonacci ITERATIVELY (a loop, not recursion), and the "
      "logic is correct for fib(0)=0, fib(1)=1, fib(10)=55."),
 
     ("C2", "auto",
      [{"role": "user", "content": "What is the bug in this Python code?\n"
                                   "def add_item(item, lst=[]):\n    lst.append(item)\n    return lst"}],
-     "hf.co/unsloth/Qwen3.6-35B-A3B-GGUF:UD-IQ4_XS",
+     CODER_MODEL,
      "Identifies the MUTABLE DEFAULT ARGUMENT problem — that the default list is created once and "
      "shared across calls, so it accumulates. Anything else is WRONG."),
 
@@ -97,7 +102,7 @@ CASES = [
      [{"role": "system", "content": "Project convention: all internal helper functions in this "
                                     "codebase must be prefixed with 'zz_'."},
       {"role": "user", "content": "Write a tiny internal helper that squares a number. Code only."}],
-     "hf.co/unsloth/Qwen3.6-35B-A3B-GGUF:UD-IQ4_XS",
+     CODER_MODEL,
      "The function name starts with the zz_ prefix (e.g. zz_square). Any other name is WRONG."),
 ]
 

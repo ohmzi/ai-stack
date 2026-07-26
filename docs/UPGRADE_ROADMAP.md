@@ -1,5 +1,29 @@
 # Upgrade roadmap — enhanced
 
+> ## ✅ SHIPPED 2026-07-26 (Wave 1, first pass)
+>
+> | Item | Result |
+> |---|---|
+> | **Vision → the coder**, retire `gemma4:31b` | 123.7 vs 33.4 tok/s, 18372 vs 21772 MiB. Verified end-to-end (9.2 s, `images[]` on the wire). Tag kept on disk for rollback. |
+> | **Chat → the coder** | Chat + code + vision are now ONE tenant. 119.6 vs 49.9 tok/s. `dolphin` stays for `photoreal.py`/`uncensored.py`, which hold their own reference. |
+> | **Default-deny media intent** | Was a live bug: **8 of 10 ordinary sentences started a GPU render.** Now needs an explicit verb, an imperative, or `/img`&nbsp;/&nbsp;`/vid`. New suite: 40 checks, 20 of them negative. |
+> | **Embeddings → `bge-m3` via Ollama** | 384→**1024 dim**, 256→8192 tokens, fixing 13% silent chunk truncation. **Freed 360 MiB**: Open WebUI now holds *zero* VRAM (baseline 1029→664 MiB). |
+> | **Reranker: Infinity CPU + `bge-reranker-v2-m3`** | 0 VRAM, **1.07 s for 20 docs**, correct Cohere schema. Not a nicety — see below. |
+> | `top_k_reranker` 3 → 5 | Precision now earned by a cross-encoder rather than assumed. |
+>
+> **Why the reranker was not optional.** Reading `retrieval/utils.py:1702-1735`: with
+> `rag.reranking_model` empty, `RerankCompressor` takes the RRF-fused hybrid candidates, **re-embeds
+> them with the ordinary embedding model, re-sorts by plain cosine and truncates**. The BM25 half of
+> hybrid search was being discarded at the final ranking step. Phase 7's "settings only, defer the
+> reranker" decision was based on a wrong reading of the code and is hereby corrected.
+>
+> **Correction to this document:** the Infinity image is `michaelf34/infinity`, not `michaelfeil/…`
+> as written below. Tag `0.0.77-cpu`, 0.75 GB.
+>
+> Still open from Wave 1: the confirmation gate before renders, task-model revert to `gemma3:1b`,
+> and the `keep_alive:0` audit.
+
+
 _Created 2026-07-26. **Supersedes the "what's left" / open-decision sections of
 `CAPABILITY_UPGRADE_PLAN.md`.** That document remains the historical record of Phases 0–9 and the
 decision ledger; this one is the forward-looking work list._
