@@ -153,6 +153,13 @@ self-preference, format, and calibration drift. Mitigations applied:
 | `media-generation` | 3 | Image and video prompt adherence via VQA |
 | `media-editing` | 1 | Two-turn edit of a previously generated image |
 
+Two capabilities are tested by standalone harnesses rather than `cases.json`:
+
+| Harness | Tests for |
+|---|---|
+| `tests/test_websearch.py` | Live SearXNG round trip, grounded answer, `[id]` citations preserved |
+| `tests/test_gpu_diagnosis.py` | A revoked GPU is reported as such, not as a wedged allocator (see `TROUBLESHOOTING.md`) |
+
 ### 2.1 The trap cases are the point
 
 Ordinary questions mostly work. The suite is weighted toward inputs designed to break it:
@@ -272,8 +279,17 @@ it trains you to ignore a red result.*
 - **The OWUI HTTP layer is not covered.** The suite drives the `Pipe` directly. API keys are
   disabled on this instance and the session-signing secret is not extractable, so anything that
   lives in middleware — `function_calling: legacy`, knowledge-base attachment, the web-search
-  button, citation rendering, Adaptive Memory as an inlet filter — still needs the browser
-  checklist in `CAPABILITY_UPGRADE_PLAN.md`.
+  *button*, citation rendering, Adaptive Memory as an inlet filter — still needs the browser
+  checklist in `CAPABILITY_UPGRADE_PLAN.md`. What the suite *can* assert is that the code the UI
+  runs is the code under test: the `function` rows in `webui.db` are byte-identical to
+  `pipes/live/*.py` (compare SHA-256), so a green suite is a statement about production behaviour,
+  not about a drifted copy. Re-check that after every edit — editing the file does **not** update
+  the installed Function.
+- **Web search is covered outside the suite.** `tests/test_websearch.py` runs a live SearXNG query,
+  injects the results the way OpenWebUI does, and asserts the answer is grounded in them *and* keeps
+  its `[id]` citation markers. It lives outside `cases.json` because it needs a live HTTP round trip
+  before the case can be built. Search failure is silent — the assistant answers from training data
+  instead of erroring — so this is the one capability with no natural alarm.
 - **STT and TTS are not covered** (audio in/out is a browser concern).
 - **`_GEN_LOCK` contention is not covered.** Verifying that a coder request serialises behind a
   running render needs two concurrent sessions; it remains a manual test.

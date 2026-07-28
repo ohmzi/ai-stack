@@ -852,6 +852,37 @@ class Pipe:
         return (f"{d.get('exception_type', 'Error')} in {d.get('node_type', '?')} — "
                 f"{str(d.get('exception_message', ''))[:200]}")
 
+    @staticmethod
+    def _job_exec_secs(entry):
+        """How long the job actually ran before erroring, from ComfyUI's own status timestamps.
+        Queue wait is excluded, so the number means the same thing on a busy and an idle server."""
+        ts = {m[0]: m[1].get("timestamp") for m in entry.get("status", {}).get("messages", [])
+              if len(m) > 1 and isinstance(m[1], dict)}
+        start, end = ts.get("execution_start"), ts.get("execution_error")
+        return (end - start) / 1000.0 if (start and end) else None
+
+    def _gpu_revoked(self, exec_secs):
+        """True when an 'OutOfMemory' really means the container can no longer reach the GPU.
+
+        Docker injects /dev/nvidia* through the NVIDIA legacy hook, which writes the device rule
+        straight into the container's cgroup — behind systemd's back. Any `systemctl daemon-reload`
+        (snapd and unattended-upgrades both trigger one) makes systemd reapply the scope's device
+        policy from its own records, which never mentioned the GPU, and every container on the box
+        silently loses CUDA. See NVIDIA/nvidia-docker#1730.
+
+        Two signals separate it from a real squeeze, and neither is sufficient alone:
+          * a genuine OOM dies *while* weights stream onto the card, so the job runs for seconds
+            (13.5 s when this last happened here); a revoked device is refused at the first
+            allocation, before any VRAM moves, in well under one second;
+          * /system_stats keeps reporting the card as near-empty, because ComfyUI answers that from
+            the CUDA context it opened before the revocation.
+        Anything ambiguous falls through to the wedged-allocator message, which is the safe side:
+        its advice (restart the container) happens to be the cure for both."""
+        if exec_secs is None or exec_secs > 3.0:
+            return False
+        free = self._vram_free_gib()
+        return free is not None and free > 8
+
     def _fetch_node_output(self, entry, node):
         items = entry.get("outputs", {}).get(node, {}).get("images", [])
         if not items:
@@ -885,6 +916,7 @@ class Pipe:
             except Exception as e:
                 return None, f"⚠️ {kind} backend error: {e}", {}
             err = None
+            exec_secs = None  # how long the failing job ran — tells a real OOM from a lost GPU
             missing = 0  # consecutive polls where the job is absent from history / the GET failed
             for _ in range(iters):
                 try:
@@ -902,6 +934,7 @@ class Pipe:
                 missing = 0
                 err = self._job_error(h[pid])
                 if err:
+                    exec_secs = self._job_exec_secs(h[pid])
                     break
                 # Fetch the finished output INSIDE the poll's protected region: a transient /view
                 # error must re-poll (the render persists in history), not discard a multi-minute job.
@@ -918,15 +951,27 @@ class Pipe:
             if attempt == 1 and ("OutOfMemory" in err or "out of memory" in err.lower()):
                 # ComfyUI-side OOM: unload BOTH the ollama models AND ComfyUI's own models before the
                 # single retry (the original only freed ollama, so a ComfyUI residual/allocator issue
-                # re-failed identically).
+                # re-failed identically). A revoked GPU is the exception — freeing VRAM cannot give
+                # the container its device back, so skip a retry that costs ~50 s of unload waits to
+                # fail identically.
+                if self._gpu_revoked(exec_secs):
+                    break
                 self._free_vram()
                 self._comfy_free()
                 continue
             break
-        # A phantom OOM with the card actually near-empty means ComfyUI wedged its CUDA allocator
-        # (seen after long uptime / a prior OOM) — no amount of freeing recovers it, only a restart.
+        # An OOM with the card reportedly near-empty is one of two different faults. Name the right
+        # one: the remedy is the same but the follow-up is not, and telling someone their allocator
+        # is wedged sends them hunting for a ComfyUI bug that isn't there.
         if err and "OutOfMemory" in err:
             free = self._vram_free_gib()
+            if self._gpu_revoked(exec_secs):
+                return None, (f"⚠️ {kind} failed: ComfyUI's container has lost access to the GPU. CUDA "
+                              f"refused the very first allocation (job died in {exec_secs:.2f} s) while "
+                              f"the card still reads {free:.0f} GB free — that is a revoked device, not "
+                              f"a memory shortage. A `systemctl daemon-reload` on the host strips the "
+                              f"GPU out of every container's cgroup (NVIDIA/nvidia-docker#1730). Fix: "
+                              f"`docker restart comfyui`, then try again."), {}
             if free is not None and free > 8:
                 return None, (f"⚠️ {kind} failed: ComfyUI reported out-of-memory but {free:.0f} GB was "
                               f"free — its GPU allocator is wedged (common after long uptime). Fix: "
