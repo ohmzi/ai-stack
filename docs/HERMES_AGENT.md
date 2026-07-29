@@ -40,6 +40,27 @@ Proven end-to-end 2026-07-29 with a bounded demo (books.toscrape.com, every 2 m,
 posted "£51.77 (first run)", run 2 read the state file and posted "£51.77 (unchanged)", job then
 retired itself.
 
+## Phone notifications (added 2026-07-29, verified end to end)
+
+Condition alerts ("alert me when it drops below X") reach the phone through **self-hosted ntfy
+v2.26.3** (pinned, in `compose/docker-compose.yml`): deny-all auth, bound to loopback + the
+Tailscale interface, and fronted by the user's own cloudflared tunnel at `https://notify.ohmz.cloud`
+(anonymous publish verified 403 on the public endpoint). Jobs push only in a run where the condition
+fires — rule 8 of the delegation brief — reading the URL+token from `~/.hermes/ntfy_alert`; the
+phone app logs in with `~/.hermes/ntfy_credentials`, topic `hermes-alerts`.
+
+Two iOS facts that cost an afternoon, recorded so they never cost another:
+
+- iOS cannot hold background sockets, so a self-hosted server needs `NTFY_UPSTREAM_BASE_URL=
+  https://ntfy.sh` — a CONTENTLESS wake ping (message id + topic) goes upstream, then the app
+  fetches the real message from this server. Content never leaves the box; ntfy.sh sees topic name
+  and timing. Android needs none of this.
+- **`NTFY_BASE_URL` must match the URL the app subscribes with** (here: the tunnel domain, not the
+  tailscale IP), and Apple's registration is created AT SUBSCRIBE TIME — after changing base_url,
+  every existing subscription must be deleted and re-added or banners silently never arrive while
+  in-app messages work. Both failure modes were observed live before the two-test protocol
+  (immediate + delayed after re-subscribe) confirmed banners on a locked phone.
+
 ## Rollback
 
 ```bash
