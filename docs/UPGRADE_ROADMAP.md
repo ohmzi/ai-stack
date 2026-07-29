@@ -8,7 +8,7 @@
 > | **Chat → the coder** | Chat + code + vision are now ONE tenant. 119.6 vs 49.9 tok/s. `dolphin` stays for `photoreal.py`/`uncensored.py`, which hold their own reference. |
 > | **Default-deny media intent** | Was a live bug: **8 of 10 ordinary sentences started a GPU render.** Now needs an explicit verb, an imperative, or `/img`&nbsp;/&nbsp;`/vid`. New suite: 40 checks, 20 of them negative. |
 > | **Embeddings → `bge-m3` via Ollama** | 384→**1024 dim**, 256→8192 tokens, fixing 13% silent chunk truncation. **Freed 360 MiB**: Open WebUI now holds *zero* VRAM (baseline 1029→664 MiB). |
-> | **Reranker: Infinity CPU + `bge-reranker-v2-m3`** | 0 VRAM, **1.07 s for 20 docs**, correct Cohere schema. Not a nicety — see below. |
+> | **Reranker: Infinity CPU + `bge-reranker-v2-m3`** | 0 VRAM, correct Cohere schema. Not a nicety — see below. **Timing corrected 2026-07-29:** the 1.07 s/20-docs figure was measured on ~120-char snippets. On real stored chunks (mean 818 chars, `rag.chunk_size = 1000`) it is **0.26 s/doc, linear — 5.2 s for 20**. `rag.top_k` is a latency dial, not a free recall knob. Measured by `tests/test_retrieval_quality.py`. |
 > | `top_k_reranker` 3 → 5 | Precision now earned by a cross-encoder rather than assumed. |
 >
 > **Why the reranker was not optional.** Reading `retrieval/utils.py:1702-1735`: with
@@ -137,6 +137,11 @@ Do not wire it in as a second OWUI connection without deciding to reverse the si
 The thinking model burns ~150 tokens on every trivial call through the OpenAI-compatible endpoint and
 returns **empty** on tight budgets — which would break an agent runtime making many small calls.
 Note this is a **different knob** from the native `/api/chat` `think: false` the pipe already uses.
+
+> **Confirmed 2026-07-29.** On `/api/chat` — the endpoint the pipe actually posts to — `think: false`
+> works: 2 eval tokens in 0.3 s, against 109 tokens in 19.4 s with no parameter. `reasoning_effort`
+> is the one ignored there (109 → 126 tokens, no change). The two endpoints behave oppositely, so
+> the table above must not be read as an argument for changing the pipe. It is already optimal.
 
 ### 0.5 Free capability already owned: OpenWebUI Skills
 
