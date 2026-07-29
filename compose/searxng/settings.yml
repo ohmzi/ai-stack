@@ -44,7 +44,7 @@ general:
 server:
   # Generated per-install. Not a secret that protects anything reachable off-host (the port is
   # bound to 127.0.0.1), but SearXNG refuses to start without one.
-  secret_key: "715c345044f1c6a31d5041f5266c8278d470ba1a678390c04e00de66f55517a5"
+  secret_key: "rotated-out-of-git-2026-07-29-use-SEARXNG_SECRET-env"  # real value in compose/.env (untracked)
   limiter: false
   image_proxy: false
   method: "GET"

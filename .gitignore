@@ -13,3 +13,6 @@ tests/eval/results/
 
 # reranker model cache (downloaded at runtime, ~2GB)
 compose/infinity-cache/
+
+# searxng secret — rotated out of git 2026-07-29, lives here only
+compose/.env

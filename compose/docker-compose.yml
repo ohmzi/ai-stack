@@ -42,6 +42,7 @@ services:
       - ./searxng:/etc/searxng:rw
     environment:
       - SEARXNG_BASE_URL=http://localhost:8888/
+      - SEARXNG_SECRET=${SEARXNG_SECRET}
       - UWSGI_WORKERS=4
       - UWSGI_THREADS=4
     cap_drop:
