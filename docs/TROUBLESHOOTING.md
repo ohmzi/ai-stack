@@ -74,13 +74,61 @@ docker restart comfyui immich_machine_learning ebook2audiobook-ebook2audiobook-g
 neither free:
 
 1. **CDI mode** (NVIDIA's recommended path). Generate a CDI spec and start the container with
-   `--runtime=nvidia --device nvidia.com/gpu=all` instead of `--gpus all`. The devices then go into
-   the OCI spec, `runc` emits real `DeviceAllow` entries for them, and a reload leaves them alone.
-   Costs: one `nvidia-ctk cdi generate`, plus re-creating each GPU container.
+   `--device nvidia.com/gpu=all` instead of `--gpus all`. The devices then go into the OCI spec,
+   `runc` emits real `DeviceAllow` entries for them, and a reload leaves them alone. Costs: one
+   `nvidia-ctk cdi generate`, plus re-creating each GPU container.
 2. **Switch Docker's cgroup driver to `cgroupfs`** (`exec-opts` in `/etc/docker/daemon.json`).
    Containers stop being systemd scopes, so a reload cannot touch them. Immune stack-wide and needs
    no per-container work, but it restarts every container on the box once and moves the host off
    the upstream-recommended driver.
+
+#### What was done here — comfyui is on CDI as of 2026-07-28
+
+Docker 28.2.2 already reports `CDISpecDirs: [/etc/cdi /var/run/cdi]`, so CDI needed no daemon
+change and no `--runtime=nvidia`; `--device` is enough.
+
+```bash
+sudo nvidia-ctk system create-dev-char-symlinks --create-all   # runc maps devices via /dev/char/MAJ:MIN
+sudo nvidia-ctk cdi generate --output=/etc/cdi/nvidia.yaml
+```
+
+The `/dev/char` symlinks are the part that makes `DeviceAllow` work at all — without them `runc`
+cannot name the devices to systemd. They do not survive a driver reload on their own, so
+`/lib/udev/rules.d/71-nvidia-dev-char.rules` recreates them when the `nvidia` PCI driver binds.
+
+The container is then created with `--device nvidia.com/gpu=all` and **no** `--gpus all`. Verified:
+the scope now carries `DeviceAllow=/dev/char/195:0`, `195:254`, `195:255`, `511:0`, `511:1`, and
+three consecutive `systemctl daemon-reload`s leave `nvidia-smi -L` and a live 2 GiB CUDA allocation
+working.
+
+**`immich_machine_learning` and `ebook2audiobook-…-gpu-1` are still on the legacy hook** and will
+still lose the GPU on the next reload. They only need a `docker restart` to recover, so converting
+them is optional.
+
+#### The trap: re-creating the container loses hand-installed packages
+
+Re-creating comfyui broke *video* while leaving images working — `RuntimeError in KSamplerAdvanced —
+Failed to find C compiler`. SageAttention (`attention_sage` in ComfyUI-KJNodes, which the Wan
+workflows use) JIT-compiles Triton kernels on first use, and Triton shells out to a C compiler to
+build its CUDA driver shim. The base image has none: `gcc` had been `apt install`-ed by hand inside
+the *running* container, so it lived only in that container's writable layer and vanished the moment
+the container was replaced.
+
+`docker diff` on the old container is what surfaced it — 27 added packages, the entire gcc/g++
+toolchain and nothing else:
+
+```bash
+docker diff <container> | grep '^A /usr/bin/.*gcc'
+```
+
+That state was a landmine regardless of CDI: *any* recreate, image rebuild or `compose up
+--force-recreate` would have silently broken video the same way. It is now a real image layer
+(`comfyui-local:tier2-gcc`, `FROM comfyui-local:tier2` + `apt-get install -y gcc g++`), so it
+survives a recreate. Images, edits and video all re-verified green on it afterwards.
+
+Worth knowing: the image had also lost its `comfyui-local:tier2` tag at some point and was
+referenced only by digest, one `docker image prune` away from being unrecoverable. It has been
+re-tagged.
 
 ### How the assistant reports it
 
