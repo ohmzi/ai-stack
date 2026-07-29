@@ -1675,8 +1675,16 @@ class Pipe:
         "one-shot in 1 minute. This session cannot fetch pages itself — do not try to do the "
         "check directly here. A one-shot removes itself after running; that is success, not a "
         "lost job — do not re-query it afterwards.\n"
+        "8. When the user asks to be ALERTED on a condition (a threshold, a drop, back in stock), "
+        "the routine channel POST from rule 5 still happens every run — and ADDITIONALLY, only in "
+        "a run where the condition actually fires, the job must push to the user's phone by "
+        "running: curl -s -H \"Authorization: Bearer $(sed -n 2p ~/.hermes/ntfy_alert)\" "
+        "-H 'Title: <short alert title>' -d '<what happened, with the number>' "
+        "\"$(sed -n 1p ~/.hermes/ntfy_alert)\" — never push when the condition did not fire, and "
+        "never more than once per run.\n"
         "Reply to the user with plain-language confirmation: what will be checked, how often, "
-        "until when, and that results will appear in the background-tasks channel. Keep it short."
+        "until when, and that results will appear in the background-tasks channel (plus a phone "
+        "push if they asked to be alerted). Keep it short."
     )
 
     def _hermes_key(self):

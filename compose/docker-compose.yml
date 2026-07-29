@@ -113,3 +113,37 @@ services:
       options:
         max-size: "1m"
         max-file: "1"
+
+  # Self-hosted push notifications (phone alerts from hermes background jobs).
+  # Reachable on loopback and on the Tailscale interface ONLY — never the LAN.
+  # deny-all + accounts: nothing can publish or subscribe without credentials.
+  # The tailscale-IP bind can race tailscaled at boot; unless-stopped retries
+  # until the interface exists.
+  ntfy:
+    image: binwiederhier/ntfy:v2.26.3
+    container_name: ntfy
+    command: serve
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:8300:80"
+      - "100.101.5.51:8300:80"
+    environment:
+      - TZ=America/New_York
+      - NTFY_BASE_URL=http://100.101.5.51:8300
+      - NTFY_CACHE_FILE=/var/lib/ntfy/cache.db
+      - NTFY_AUTH_FILE=/var/lib/ntfy/auth.db
+      - NTFY_AUTH_DEFAULT_ACCESS=deny-all
+      - NTFY_ENABLE_LOGIN=true
+      - NTFY_ATTACHMENT_CACHE_DIR=/var/lib/ntfy/attachments
+    volumes:
+      - ./ntfy:/var/lib/ntfy
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q --tries=1 -O - http://localhost:80/v1/health | grep -q '\"healthy\":true'"]
+      interval: 60s
+      timeout: 10s
+      retries: 3
+    logging:
+      driver: json-file
+      options:
+        max-size: "5m"
+        max-file: "2"
