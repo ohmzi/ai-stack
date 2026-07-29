@@ -129,7 +129,10 @@ services:
       - "100.101.5.51:8300:80"
     environment:
       - TZ=America/New_York
-      - NTFY_BASE_URL=http://100.101.5.51:8300
+      # MUST match the URL clients subscribe with — iOS APNs routing keys on it.
+      # notify.ohmz.cloud is the user's cloudflared tunnel to 127.0.0.1:8300.
+      - NTFY_BASE_URL=https://notify.ohmz.cloud
+      - NTFY_BEHIND_PROXY=true
       - NTFY_CACHE_FILE=/var/lib/ntfy/cache.db
       - NTFY_AUTH_FILE=/var/lib/ntfy/auth.db
       - NTFY_AUTH_DEFAULT_ACCESS=deny-all
