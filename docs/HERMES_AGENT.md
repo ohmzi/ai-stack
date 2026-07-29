@@ -61,6 +61,30 @@ Two iOS facts that cost an afternoon, recorded so they never cost another:
   in-app messages work. Both failure modes were observed live before the two-test protocol
   (immediate + delayed after re-subscribe) confirmed banners on a locked phone.
 
+## Multi-user (added 2026-07-29)
+
+Accounts self-provision: `scripts/ntfy_sync.py` (systemd **user** timer `ntfy-sync.timer`, every
+2 min) mirrors every active, approved OpenWebUI account into ntfy — **same username, same
+password, zero plaintext**: OpenWebUI's bcrypt hash is copied verbatim into ntfy's declarative
+provisioning (`compose/ntfy/provision.env`, generated — gitignored, do not edit), and ntfy
+reconciles on a container recreate that happens only when something actually changed. Password
+changes propagate within 2 min; removed users are reconciled away; `pending` users are excluded.
+
+Usernames are the email local part, sanitized (`derive_username`, duplicated in the pipe as
+`_ntfy_username` — `tests/test_ntfy_sync.py` asserts the two stay identical, since a drift means
+pushes to a topic nobody subscribes to). Each user gets READ-ONLY access to their own topic
+`alerts-<username>`; only the `hermes-bot` service account (write-only on `alerts-*`, static
+provisioned token in `~/.hermes/ntfy_alert`: line 1 base URL, line 2 token) can publish. The pipe
+threads `__user__` through to hermes so each job pushes to the requester's topic, and appends
+one-time setup instructions (app, server, username, topic) to every task confirmation.
+
+Hard-won detail: **docker compose interpolates `$` inside env_file values** — it ate the third `$`
+of a bcrypt hash and ntfy crash-looped on "hashedSecret too short". `render()` escapes `$` as `$$`.
+
+Privacy note: the background-tasks channel is shared — all users' job logs are visible to anyone
+with channel access. Phone pushes are per-user. If untrusted users ever join, per-user channels
+are the next step.
+
 ## Rollback
 
 ```bash

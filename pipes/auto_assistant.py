@@ -1677,11 +1677,12 @@ class Pipe:
         "lost job — do not re-query it afterwards.\n"
         "8. When the user asks to be ALERTED on a condition (a threshold, a drop, back in stock), "
         "the routine channel POST from rule 5 still happens every run — and ADDITIONALLY, only in "
-        "a run where the condition actually fires, the job must push to the user's phone by "
-        "running: curl -s -H \"Authorization: Bearer $(sed -n 2p ~/.hermes/ntfy_alert)\" "
-        "-H 'Title: <short alert title>' -d '<what happened, with the number>' "
-        "\"$(sed -n 1p ~/.hermes/ntfy_alert)\" — never push when the condition did not fire, and "
-        "never more than once per run.\n"
+        "a run where the condition actually fires, the job must push to THIS user's phone topic "
+        "(named in the request context below) by running: curl -s -H \"Authorization: Bearer "
+        "$(sed -n 2p ~/.hermes/ntfy_alert)\" -H 'Title: <short alert title>' "
+        "-d '<what happened, with the number>' "
+        "\"$(sed -n 1p ~/.hermes/ntfy_alert)/<their alerts topic>\" — never push when the "
+        "condition did not fire, and never more than once per run.\n"
         "Reply to the user with plain-language confirmation: what will be checked, how often, "
         "until when, and that results will appear in the background-tasks channel (plus a phone "
         "push if they asked to be alerted). Keep it short."
@@ -1694,7 +1695,34 @@ class Pipe:
         except Exception:
             return None
 
-    async def _hermes_stream(self, text):
+    @staticmethod
+    def _ntfy_username(user):
+        """OpenWebUI identity -> ntfy username. MUST stay in lockstep with derive_username in
+        scripts/ntfy_sync.py — tests/test_ntfy_sync.py asserts the two are identical, because a
+        drift here means jobs push to a topic nobody is subscribed to."""
+        u = user or {}
+        local = (u.get("email") or "").split("@")[0] or (u.get("name") or "")
+        uname = re.sub(r"[^a-z0-9_-]", "", local.lower())
+        return uname or "user"
+
+    @staticmethod
+    def _ntfy_onboarding(uname):
+        """Appended to every background-task confirmation. Accounts are auto-provisioned from
+        OpenWebUI (same username, same password — the bcrypt hash is mirrored by
+        scripts/ntfy_sync.py), so these instructions are complete for any user, first task or
+        fiftieth."""
+        return (
+            "\n\n---\n"
+            "📲 **Get alerts on your phone** (one-time setup):\n"
+            "1. Install the **ntfy** app — App Store or Play Store.\n"
+            "2. In the app, add server `https://notify.ohmz.cloud` and sign in as "
+            f"**{uname}** with your OpenWebUI password.\n"
+            f"3. Subscribe to the topic **`alerts-{uname}`**.\n"
+            "Job results always appear in the *background-tasks* channel here; your phone "
+            "buzzes only when a condition you asked about actually fires."
+        )
+
+    async def _hermes_stream(self, text, uname="user"):
         """Delegate a background-task request to the local hermes-agent API server.
 
         A plain HTTP client, deliberately: hermes's API server is an agent runtime that streams
@@ -1706,8 +1734,11 @@ class Pipe:
             yield ("⚠️ Background tasks are configured but the hermes-agent key is missing "
                    f"({HERMES_KEY_FILE}). Is the hermes gateway set up on this host?")
             return
+        ctx = (f"Request context: the requesting user is '{uname}'. Their personal phone-alert "
+               f"topic is 'alerts-{uname}' — rule 8's push URL for this user's jobs is "
+               f"\"$(sed -n 1p ~/.hermes/ntfy_alert)/alerts-{uname}\".")
         payload = {"model": "hermes-agent", "stream": True,
-                   "messages": [{"role": "system", "content": self._HERMES_BRIEF},
+                   "messages": [{"role": "system", "content": self._HERMES_BRIEF + "\n" + ctx},
                                 {"role": "user", "content": text}]}
         timeout = aiohttp.ClientTimeout(total=None, sock_connect=15, sock_read=HERMES_TIMEOUT_S)
         try:
@@ -1724,6 +1755,7 @@ class Pipe:
                             continue
                         data = line[5:].strip()
                         if data == b"[DONE]":
+                            yield self._ntfy_onboarding(uname)
                             return
                         try:
                             d = json.loads(data)
@@ -2005,7 +2037,7 @@ class Pipe:
             await self._status(emitter, "", done=True)  # error text is already in the message body
         return result
 
-    async def pipe(self, body: dict, __metadata__=None, __event_emitter__=None):
+    async def pipe(self, body: dict, __metadata__=None, __event_emitter__=None, __user__=None):
         emitter = __event_emitter__
         msgs = body.get("messages", [])
         text, ref = self._last_user(msgs)
@@ -2144,7 +2176,7 @@ class Pipe:
         # alert me" contains no code but 'script-like' phrasing must not reach the coder either).
         # `text` is the clean routing prompt, so RAG/search context cannot fabricate a job.
         if BG_TASKS and not attached_img and not ref and self._is_bg_task_request(text):
-            return self._hermes_stream(text)
+            return self._hermes_stream(text, self._ntfy_username(__user__))
         if not attached_img and not ref and await asyncio.to_thread(self._is_code_request, text):
             return self._locked_stream(self._achat_stream(
                 omsgs, guard_text=self._CODER_GUARD, keep_system=AUTO_KEEP_SYSTEM,
