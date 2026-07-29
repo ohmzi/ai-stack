@@ -65,10 +65,17 @@ backwards.
 The literature names five recurring failure modes in LLM judging — position, verbosity,
 self-preference, format, and calibration drift. Mitigations applied:
 
-- **Cross-family judging.** The judge (`gemma4:31b`) is a different family from both models under
-  test (`dolphin-venice:24b`, Mistral-derived; `Qwen3.6-35B-A3B`). Judges systematically prefer
-  output from their own family. The runner **prints a warning** if the judge is also a model under
-  test.
+- **Cross-family judging.** The judge is `gemma4:e2b` — a different family from
+  `hermes-genesis:apex-compact`, which since the 2026-07-26 consolidation is the single model under
+  test for chat, code and vision. Judges systematically prefer output from their own family. The
+  runner **prints a warning** if the judge is also a model under test.
+
+  > **This control was silently off until 2026-07-29.** `cases.json` declared
+  > `"judge": "gemma4:e2b"`, but the runner read `models["vision"]` — which the consolidation had
+  > pointed at the model under test. So every judge-graded case was self-graded, and the runner's own
+  > warning fired on every run and was read past. Fixed at `run_eval.py:338`
+  > (`a.judge or models.get("judge") or models["vision"]`). Any result file with
+  > `"judge": "hermes-genesis:apex-compact"` predates the fix and is self-graded.
 - **Binary verdicts.** Every criterion yields PASS/FAIL, never a 1–10 score. Numeric scales drift
   between runs and models; a binary decision against a written criterion does not.
 - **Blind grading.** The judge sees the answer and the criterion. It is never told which model
@@ -78,10 +85,12 @@ self-preference, format, and calibration drift. Mitigations applied:
 - **The judge id is recorded in every result file**, so swapping judges is visible when comparing
   runs rather than being mistaken for a model regression.
 
-> **Known limitation.** For `vqa` cases the grader is `gemma4:31b`, which is *also* the pipe's vision
-> model. It does not generate the images (ComfyUI does), so this is not strict self-grading — but if
-> the same vision model both captions and verifies, correlated blind spots are possible. Treat VQA
-> scores as a smoke test for gross prompt-adherence failures, not a fine-grained quality metric.
+> **Known limitation.** `vqa` grading is the one place self-grading survives. The vision model is
+> `hermes-genesis:apex-compact`, the model under test, because the consolidation left no other
+> vision-capable model installed. It does not generate the images — ComfyUI does — so this is not
+> strict self-grading, but a single model both captioning and verifying can share blind spots. Treat
+> VQA scores as a smoke test for gross prompt-adherence failures, not a quality metric. `gemma4:e2b`
+> has no vision, so closing this properly needs a second vision model back on disk.
 
 ### 1.4 Repeatability
 
@@ -114,8 +123,13 @@ self-preference, format, and calibration drift. Mitigations applied:
 >
 > Demonstrated: `--compare` flagged CO01 as a `PASS -> FAIL` regression right after an unrelated
 > change. Re-running it six times gave **4/6** — the reversal logic is always right, but roughly one
-> run in three the coder ignores the "without slicing" constraint and reaches for `[::-1]`. Nothing
-> had regressed; the case is simply flaky.
+> run in three the coder ignored the "without slicing" constraint and reached for `[::-1]`. Nothing
+> had regressed; the case was simply flaky.
+>
+> **Postscript (2026-07-29): CO01 is now 6/6.** The flakiness was never the model — the pipe sent no
+> sampling options, so every turn ran at Ollama's default temperature 0.8. See §1.7. The method
+> above is still right; the example is now historical. CT02 replaced it as the resident flaky case
+> at 2/6, and that one *is* the model: it measures 2/6 at 0.8 and 0.45 alike.
 >
 > **The correct rule: any single-run flip may be noise, whatever the grader. Use `--repeat N` before
 > concluding anything.**
@@ -135,6 +149,78 @@ self-preference, format, and calibration drift. Mitigations applied:
 > *grader* as a source of variance, leaving only the model. That is what makes a flake rate
 > measurable at all.
 
+### 1.5 The deploy check, and why a green suite was not enough
+
+Every other test in this repo imports `pipes/live/auto_assistant.py` from disk. OpenWebUI does not:
+it executes a copy of the source stored in its own SQLite `function` table, reachable only by pasting
+into Workspace → Functions. So a change can be written, tested, reviewed and committed while the
+running server continues to serve the previous build.
+
+That happened on 2026-07-28. The `_gpu_revoked` fix was committed; the UI kept the old copy; the
+whole suite passed against a file the server had never loaded. A clean `git status` next to a green
+run read as "shipped", and nothing in the repo could tell the difference.
+
+```bash
+python3 tests/test_deployed.py
+```
+
+compares the SHA of each installed Function against its repo source and fails on any mismatch. Run it
+before believing a fix is live.
+
+### 1.6 Measuring the media pipeline instead of arguing about it
+
+`_metric()` in the pipe appends one JSON line per finished media job — render seconds, QA seconds,
+how many correction rounds ran, and what the verifier complained about.
+
+```bash
+python3 tests/media_metrics.py            # p50/p90 per job type, correction rate and its cost
+```
+
+This exists because image latency here is bimodal and the split was invisible. The same V01 prompt
+measured 28.2 s, 32.3 s, 43.6 s and **196.9 s** across four runs on 2026-07-28; the slow one was a
+16.5 s Krea 2 render followed by a 154.8 s Qwen-Image-Edit correction, on an image that then scored
+4/4 on independent VQA. A clean job now measures ~22 s end to end, so a correction costs roughly nine
+times the entire job it is trying to improve. Whether that trade is worth making is a decision to
+take on the correction rate once there is enough traffic to read one — which is what the file is for.
+
+Percentiles, not means: the mean of a bimodal distribution describes nothing that ever happens.
+
+### 1.7 Sampling, and why CO01 stopped being flaky
+
+The pipe sent no `options` to Ollama and `hermes-genesis` carries no `PARAMETER` lines, so every
+chat, coding and vision turn ran at the default **temperature 0.8**. CO01's documented flakiness —
+4/6 with `--repeat 6`, "roughly one run in three the coder ignores the 'without slicing'
+constraint" — was that, not a model weakness. `CODER_OPTIONS` (0.15) and `CHAT_OPTIONS` (0.45) in
+the pipe fixed it: **CO01 and CO04 are now 6/6**.
+
+It also lowered the noise floor. A ±2-3 case wobble on a 32-case suite hid everything smaller than
+itself; measuring anything else honestly depended on this landing first.
+
+`AA_EVAL_DETERMINISTIC=1` forces temperature 0 and a fixed seed on both routes, for when a run needs
+to be repeatable rather than representative.
+
+Not everything flaky was sampling. **CT02 measured 2/6 at temperature 0.8 AND 2/6 at 0.45** — the
+model half-rejects the false premise and then confabulates a second claim. It had passed on single
+runs before, which was luck. One run is not a measurement.
+
+### 1.8 The skill experiment, and why it is not attached
+
+`docs/skills/house-rules.md` exists, `--skill` attaches any skill to every case, and `inject_skill`
+does the same per case — the mechanism is built and tested. The skill itself is **not attached**,
+because the A/B said not to:
+
+- **No measurable benefit.** All six cases written for it (SK01–SK06) already passed **6/6 without
+  it** once sampling was fixed.
+- **A measurable cost.** S02 — "describe your capabilities", which must answer in plain prose —
+  went **4/4 → 3/4**. The skill's bulleted environment section leaks its formatting into the answer.
+- **And a live bug the A/B caught.** The first draft said *keep `[id]` markers exactly as given*,
+  and the model emitted the literal string `[id]` instead of `[2]`: SK01 fell 3/3 → 1/3. In
+  production that would have broken every citation on the site. A placeholder inside a skill body is
+  read as literal text.
+
+The general lesson is the one worth keeping: judge a skill by what it costs the turns it was *not*
+written for. `--skill house-rules --tier standard` is that test.
+
 ---
 
 ## 2. What is covered
@@ -144,21 +230,30 @@ self-preference, format, and calibration drift. Mitigations applied:
 | `routing` | 3 | Unambiguous prompts reach the right tenant |
 | `routing-trap` | 5 | **Deliberately misleading prompts** — the historical failure mode |
 | `factual` | 3 | Real-world recall, deterministic answers |
-| `reasoning` | 3 | Multi-step arithmetic and the Cognitive Reflection Test |
-| `critical-thinking` | 4 | **False-premise queries and sycophancy** |
+| `reasoning` | 4 | Multi-step arithmetic and the Cognitive Reflection Test |
+| `critical-thinking` | 5 | **False-premise queries and sycophancy** |
+| `calibration` | 1 | Refuses to invent an API signature that does not exist |
 | `coding` | 4 | Execution-graded generation and bug-fixing |
-| `grounding` | 2 | RAG hallucination, with a positive control |
+| `grounding` | 4 | RAG hallucination and citation discipline, with positive controls |
 | `memory-context` | 2 | System-message context survives to the model |
-| `output-hygiene` | 2 | Declines conversationally; never emits tool-call JSON |
+| `output-hygiene` | 3 | Declines conversationally; never emits tool-call JSON |
 | `media-generation` | 3 | Image and video prompt adherence via VQA |
 | `media-editing` | 1 | Two-turn edit of a previously generated image |
 
-Two capabilities are tested by standalone harnesses rather than `cases.json`:
+38 cases. SK01–SK06 were added on 2026-07-29 for the skill A/B (§1.8); they are kept because they
+cover grounding-with-irrelevant-sources and calibration, which nothing else did — not because the
+skill they were written for survived.
+
+Some checks are standalone harnesses rather than `cases.json` cases:
 
 | Harness | Tests for |
 |---|---|
 | `tests/test_websearch.py` | Live SearXNG round trip, grounded answer, `[id]` citations preserved |
 | `tests/test_gpu_diagnosis.py` | A revoked GPU is reported as such, not as a wedged allocator (see `TROUBLESHOOTING.md`) |
+| `tests/test_deployed.py` | **OpenWebUI is running the code in this repo** — see below |
+| `tests/test_retrieval_quality.py` | Which sources survive `rag.relevance_threshold`, scored on real stored chunks |
+| `tests/test_bgtask_intent.py` | Background-task requests reach hermes-agent; ordinary conversation never does (default-deny) |
+| `tests/test_gpuguard.py` | Hermes cron defers while ComfyUI renders; fails open when ComfyUI is down (see `HERMES_AGENT.md`) |
 
 ### 2.1 The trap cases are the point
 
@@ -194,7 +289,46 @@ so. But a model that *always* says "not in the document" would pass G01 while be
 
 ---
 
-## 3. Results — 2026-07-25 baseline
+## 3. Results — 2026-07-29 baseline (current)
+
+`baseline.json`, `--tier full`, 38 cases, judge `gemma4:e2b`, model `hermes-genesis:apex-compact`.
+Run `run-20260729T124321Z.json`, 859 s.
+
+```
+trajectory : 36/38 correct model routed
+outcome    : 28/30 answers correct
+by category: coding 4/4  grounding 4/4  factual 3/3  media-generation 3/3  media-editing 1/1
+             memory-context 2/2  output-hygiene 3/3  routing 3/3  critical-thinking 4/5
+             reasoning 3/4  routing-trap 4/5  calibration 0/1
+```
+
+This replaces the 2026-07-25 baseline below, which was recorded against `dolphin-venice:24b`,
+`gemma4:31b` and a separate Qwen coder — all three retired on 2026-07-26 — and judged by
+`gemma4:31b`, which no longer exists. Comparing against it was meaningless.
+
+**Media is green end to end**: image generation 4/4 and 3/3 on VQA, the two-turn edit 2/2, video 2/2.
+Independently confirmed the same day — the edit changed only the mug and left the scene intact
+(14% of pixels, margins at diff 4.9), and the balloon clip's centroid rises 323 px across 161 frames.
+
+**The two trajectory misses are both benign and known.** R05 ("my java tastes burnt") routes to the
+coder — deterministic, documented, and the answer is still about coffee. SK03 does the same for a
+question about a function signature. Both cost a model load, not a wrong answer.
+
+**Two outcome failures, and one entry that is not what it looks like:**
+
+- **RE02** — the bat-and-ball CRT item. Fails at 0.8 and 0.45 alike; see the superseded note in §3.1.
+- **SK03** — calibration, asking for the signature of a function that does not exist. Single-run FAIL
+  here; measured **2/3 and 3/3** on repeats. Flaky, not broken.
+- **CT04** — recorded FAIL, but measured **6/6 with `--repeat 6`** immediately afterwards. The
+  baseline caught a genuine one-off. Its `known_issue` says so, because a spurious FAIL in a baseline
+  is worse than no baseline: it would mask a future real regression as `FAIL -> FAIL`.
+
+That last point is the honest weakness of a single-run baseline on a stochastic system, and it is
+why every `known_issue` in `cases.json` records a *measured rate* rather than a verdict.
+
+---
+
+## 3.1 Results — 2026-07-25 baseline (historical)
 
 Full tier, 32 cases. **Trajectory 31/32. Outcome 23/24 graded.** Wall clock ~15 min.
 (Saved as `tests/eval/baseline.json`; the one outcome failure is RE02.)
@@ -229,6 +363,12 @@ more than the ball, how much is the ball?"* the chat model answers **$0.10**. Th
 $0.05. This is the canonical Cognitive Reflection Test item and the classic intuitive-but-wrong
 response. RE03 (the widget problem) passes, so this is a specific weakness rather than a general
 reasoning failure. **Real limitation of `dolphin-venice:24b`, not a stack bug.**
+
+> **Superseded 2026-07-29.** Attributing this to `dolphin-venice:24b` was too narrow. RE02 still
+> fails on `hermes-genesis:apex-compact`, and at temperature 0.45 as well as 0.8 — so it is not the
+> model *or* the sampling, but the item: CRT questions defeat models that answer before checking.
+> The remedy, if one is wanted, is to make the model show intermediate values rather than to swap
+> anything. SK05 tests exactly that shape and passes 3/3.
 
 **R05 — one routing miss, deterministic and benign.** *"My java tastes burnt this morning, any idea
 why?"* routes to the coder. The *routing* is deterministic across 8 runs: `gemma3:1b` reads the
