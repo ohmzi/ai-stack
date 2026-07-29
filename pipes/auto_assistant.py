@@ -61,6 +61,23 @@ CODER_OPTIONS = {"temperature": 0.15, "top_p": 0.9, "top_k": 20, "repeat_penalty
 # seed so a flipped case means the change flipped it. Mirrors the MEDIA_METRICS override above.
 EVAL_DETERMINISTIC = bool(os.environ.get("AA_EVAL_DETERMINISTIC"))
 EVAL_SEED = 20260728
+
+# --- background tasks via hermes-agent (2026-07-29) ----------------------------------------------
+# "Monitor this price for 2 weeks" is not a chat turn — it is a standing job. Those are delegated
+# to a local NousResearch hermes-agent gateway (v0.19.0, pinned; ~/.hermes) whose API server is an
+# agent RUNTIME on localhost: it creates/manages its own cron jobs (60 s ticker, GPU-guarded by the
+# ~/.hermes/plugins/gpuguard provider so a due job never fires while ComfyUI is rendering), runs
+# each job in an isolated session against hermes-genesis:agent (the same weights as the chat model,
+# second tag with num_ctx 65536 — hermes hard-requires a 64 K window), and posts results to the
+# OpenWebUI "background-tasks" channel via its webhook. The pipe stays the single front end: this
+# is delegation over HTTP, not a second model entry in the picker.
+BG_TASKS = True
+HERMES_URL = "http://127.0.0.1:8642/v1"
+# The API key lives in hermes's .env; a copy is staged where the container can read it so the pipe
+# carries no secret. Empty/missing file => the feature reports itself unavailable rather than 401s.
+# Env override for the host-side harnesses, same pattern as MEDIA_METRICS.
+HERMES_KEY_FILE = os.environ.get("HERMES_KEY_FILE", "/app/backend/data/hermes_api_key")
+HERMES_TIMEOUT_S = 300  # an agent turn can run several tool calls before answering
 VID_ENHANCE = True  # expand terse video ideas ("guy shooting hoops") into detailed prompts — the
                     # single biggest quality lever for Wan; terse prompts produce broken scenes
 VID_VERIFY = True   # vision-check a mid frame of the clip against the request; one corrected retry
@@ -456,6 +473,41 @@ class Pipe:
         except Exception:
             pass
         return f"{prev}. {change}."
+
+    # Background-task intent. DEFAULT-DENY like the media predicates: mentioning a monitor is not
+    # asking for one ("what's a good price tracker?" is a question, "I've been watching the price"
+    # is conversation). A standing job needs either the explicit /task prefix, a management verb
+    # aimed at existing jobs, or an imperative monitoring verb PLUS evidence of recurrence — a
+    # schedule word, a duration, or an alert condition. One regex alone does not commit.
+    _BG_SLASH = re.compile(r"^\s*/task\b", re.I)
+    _BG_MANAGE = re.compile(
+        r"^\s*(?:please\s+)?(?:(?:list|show|what are)\b.{0,20}\b(?:background|scheduled|monitoring)?"
+        r"\s*(?:tasks|monitors|jobs|watches)\b"
+        r"|(?:cancel|stop|pause|resume|remove|delete)\b.{0,40}\b(?:task|monitor|monitoring|job|watch|tracking)\b)", re.I)
+    _BG_VERB = re.compile(
+        r"^\s*(?:please\s+|can you\s+|could you\s+)?"
+        r"(?:monitor|track|watch|keep an eye on|keep track of|alert me|notify me|remind me|ping me)\b", re.I)
+    _BG_RECURRENCE = re.compile(
+        r"\b(?:every\s+(?:\d+\s+)?(?:minute|hour|day|week|morning|evening|night)s?"
+        r"|hourly|daily|weekly|nightly"
+        r"|for\s+(?:the\s+next\s+)?\d+\s+(?:hour|day|week|month)s?"
+        r"|for\s+(?:a|two|three|the next few)\s+(?:hour|day|week|month)s?"
+        r"|until\s+(?:it|the|price)"
+        r"|(?:when|if|once)\s+(?:it|the price|the value|it's|stock)\b.{0,30}\b(?:drops?|falls?|changes?|"
+        r"rises?|goes\s+(?:below|above|down|up)|hits|reaches|back in stock|available)"
+        r"|in\s+\d+\s+(?:minute|hour|day|week)s?\b)", re.I)
+    _BG_QUESTION = re.compile(
+        r"^\s*(?:how|what|which|why|is there|are there|do you know|can i|should i)\b", re.I)
+
+    def _is_bg_task_request(self, t):
+        raw = (t or "").strip().lower()
+        if self._BG_SLASH.match(raw):
+            return True
+        if self._BG_QUESTION.match(raw):
+            return False  # asking ABOUT monitoring is chat, whatever else matches
+        if self._BG_MANAGE.match(raw):
+            return True
+        return bool(self._BG_VERB.match(raw) and self._BG_RECURRENCE.search(raw))
 
     def _is_image_request(self, t):
         raw = t.lower()
@@ -1592,6 +1644,83 @@ class Pipe:
                 f'style="max-width:100%;border-radius:8px">\n'
                 f'data:video/webm;base64,{b64}\n</video>\n\n*🎬 {prompt[:80]}*')
 
+    # What the hermes agent is told when a background task is delegated. This is the contract that
+    # keeps unattended jobs deliverable and bounded; the agent writes the actual job prompt, but
+    # every job it creates must satisfy these rules.
+    _HERMES_BRIEF = (
+        "You are the background-task manager for a local OpenWebUI assistant. The user's request "
+        "was routed to you because it asks for a standing job (monitoring, scheduled checks, "
+        "reminders) or to manage existing ones. Use your cronjob tool.\n"
+        "Rules for every job you create:\n"
+        "1. The job must be BOUNDED: honour the user's duration (e.g. 'for 2 weeks' => an end "
+        "condition or repeat count). If no duration was given, default to 7 days and say so.\n"
+        "2. Pick a sensible interval if the user gave none (price checks: every 6 hours).\n"
+        "3. The job's prompt must be self-contained: exact URLs or curl commands to fetch (the "
+        "local SearXNG at http://127.0.0.1:8888/search?q=...&format=json is available for "
+        "searching), what to extract, and what counts as noteworthy.\n"
+        "4. State between runs lives in files under ~/.hermes/monitor-state/ — the job reads the "
+        "previous value, compares, and writes the new one.\n"
+        "5. Delivery: the job must ALWAYS post its result to the OpenWebUI background-tasks "
+        "channel by running: curl -s -X POST \"$(cat ~/.hermes/owui_webhook_url)\" -H 'Content-Type: "
+        "application/json' -d '{\"content\": \"<short summary>\"}' — one concise message per run, "
+        "leading with the key number/fact and flagging changes prominently.\n"
+        "6. Never create overlapping duplicates — check existing jobs first.\n"
+        "Reply to the user with plain-language confirmation: what will be checked, how often, "
+        "until when, and that results will appear in the background-tasks channel. Keep it short."
+    )
+
+    def _hermes_key(self):
+        try:
+            k = open(HERMES_KEY_FILE).read().strip()
+            return k or None
+        except Exception:
+            return None
+
+    async def _hermes_stream(self, text):
+        """Delegate a background-task request to the local hermes-agent API server.
+
+        A plain HTTP client, deliberately: hermes's API server is an agent runtime that streams
+        SSE chunks including inline tool-progress markers, so the user watches the agent work and
+        then gets its confirmation — inside the same single chat entry. No second model row, no
+        bypass of this pipe."""
+        key = self._hermes_key()
+        if not key:
+            yield ("⚠️ Background tasks are configured but the hermes-agent key is missing "
+                   f"({HERMES_KEY_FILE}). Is the hermes gateway set up on this host?")
+            return
+        payload = {"model": "hermes-agent", "stream": True,
+                   "messages": [{"role": "system", "content": self._HERMES_BRIEF},
+                                {"role": "user", "content": text}]}
+        timeout = aiohttp.ClientTimeout(total=None, sock_connect=15, sock_read=HERMES_TIMEOUT_S)
+        try:
+            async with aiohttp.ClientSession(timeout=timeout) as s:
+                async with s.post(f"{HERMES_URL}/chat/completions", json=payload,
+                                  headers={"Authorization": f"Bearer {key}"}) as r:
+                    if r.status != 200:
+                        body = (await r.text())[:300]
+                        yield f"⚠️ hermes-agent HTTP {r.status}: {body}"
+                        return
+                    async for line in r.content:
+                        line = line.strip()
+                        if not line or not line.startswith(b"data:"):
+                            continue
+                        data = line[5:].strip()
+                        if data == b"[DONE]":
+                            return
+                        try:
+                            d = json.loads(data)
+                        except Exception:
+                            continue
+                        tok = ((d.get("choices") or [{}])[0].get("delta") or {}).get("content", "")
+                        if tok:
+                            yield tok
+        except asyncio.TimeoutError:
+            yield ("\n\n⏳ hermes-agent did not finish within the window — the job may still have "
+                   "been created. Check the background-tasks channel, or ask me to list tasks.")
+        except aiohttp.ClientConnectorError:
+            yield ("⚠️ hermes-agent is not reachable on 127.0.0.1:8642. "
+                   "Start it with: `systemctl --user start hermes-gateway`")
+
     def _sampling(self, guard_text):
         """Sampling options for a chat turn, chosen by route.
 
@@ -1992,6 +2121,12 @@ class Pipe:
         # an image, because that has to go to the vision model — the coder is text-only.
         # `text` here is the clean routing prompt (metadata user_prompt, filter blocks stripped),
         # never the RAG blob, so a document about Python cannot pull the conversation to the coder.
+        # Background tasks go to the local hermes-agent. Checked AFTER every media branch (a
+        # request to render never becomes a job) and BEFORE coder routing ("track the price and
+        # alert me" contains no code but 'script-like' phrasing must not reach the coder either).
+        # `text` is the clean routing prompt, so RAG/search context cannot fabricate a job.
+        if BG_TASKS and not attached_img and not ref and self._is_bg_task_request(text):
+            return self._hermes_stream(text)
         if not attached_img and not ref and await asyncio.to_thread(self._is_code_request, text):
             return self._locked_stream(self._achat_stream(
                 omsgs, guard_text=self._CODER_GUARD, keep_system=AUTO_KEEP_SYSTEM,
