@@ -45,6 +45,22 @@ IMG_VERIFY = True   # vision-check the result against the request; one corrected
 # the container; MEDIA_METRICS lets the harnesses — which import this file on the host, where that
 # path does not exist — contribute rows too, since the eval runs are where slow cases surface.
 METRICS_PATH = os.environ.get("MEDIA_METRICS", "/app/backend/data/media_metrics.jsonl")
+
+# Sampling for the user-facing chat stream. Until now the pipe sent no `options` at all and the
+# model file carries no PARAMETER lines, so every chat, coding and vision turn inherited Ollama's
+# defaults — temperature 0.8, top_p 0.9, top_k 40. That is far too hot for instruction following:
+# QA_TEST_PLAN records CO01 at 4/6 with --repeat 6, "roughly one run in three the coder ignores the
+# 'without slicing' constraint". That is temperature, not capability. It also put a +/-2-3 case
+# noise floor on a 32-case suite, which made every other change unmeasurable.
+#
+# Split by route rather than by model tag: chat, code and vision all resolve to the SAME tag since
+# the 2026-07-26 consolidation, so the tag cannot discriminate. The coder guard can.
+CHAT_OPTIONS = {"temperature": 0.45, "top_p": 0.9}
+CODER_OPTIONS = {"temperature": 0.15, "top_p": 0.9, "top_k": 20, "repeat_penalty": 1.05}
+# The harness measures behaviour, not dice. With this set, both routes go fully greedy from a fixed
+# seed so a flipped case means the change flipped it. Mirrors the MEDIA_METRICS override above.
+EVAL_DETERMINISTIC = bool(os.environ.get("AA_EVAL_DETERMINISTIC"))
+EVAL_SEED = 20260728
 VID_ENHANCE = True  # expand terse video ideas ("guy shooting hoops") into detailed prompts — the
                     # single biggest quality lever for Wan; terse prompts produce broken scenes
 VID_VERIFY = True   # vision-check a mid frame of the clip against the request; one corrected retry
@@ -1576,6 +1592,17 @@ class Pipe:
                 f'style="max-width:100%;border-radius:8px">\n'
                 f'data:video/webm;base64,{b64}\n</video>\n\n*🎬 {prompt[:80]}*')
 
+    def _sampling(self, guard_text):
+        """Sampling options for a chat turn, chosen by route.
+
+        Keyed on the guard rather than the model tag because chat, code and vision all resolve to
+        the same tag now — the guard is the only thing that still records which branch was taken,
+        which is exactly how tests/eval/run_eval.py identifies the coder route on the wire."""
+        opts = dict(CODER_OPTIONS if guard_text is self._CODER_GUARD else CHAT_OPTIONS)
+        if EVAL_DETERMINISTIC:
+            opts.update(temperature=0, seed=EVAL_SEED)
+        return opts
+
     async def _achat_stream(self, messages, guard_text=None, keep_system=False, force_model=None):
         """Streamed Ollama chat.
 
@@ -1644,7 +1671,8 @@ class Pipe:
             async with aiohttp.ClientSession(timeout=timeout) as s:
                 async with s.post(f"{self.ollama}/api/chat",
                                   json={"model": model, "messages": messages,
-                                        "stream": True, "think": False}) as r:
+                                        "stream": True, "think": False,
+                                        "options": self._sampling(guard_text)}) as r:
                     if r.status != 200:
                         body = (await r.text())[:300]
                         yield f"⚠️ Ollama HTTP {r.status} from {model}: {body}"
