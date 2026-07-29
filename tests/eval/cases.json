@@ -521,6 +521,107 @@
     "threshold": 1.0
    },
    "why": "Video generation; a mid-frame is extracted and checked the same way as an image."
+  },
+  {
+   "id": "SK01",
+   "tier": "standard",
+   "cat": "grounding",
+   "entry": "auto",
+   "prompt": "According to the sources, how many jobs did Ontario add last quarter?",
+   "inject_rag": [
+    {
+     "name": "https://www.cnn.com/",
+     "text": "CNN | Breaking News, Latest News and Videos. Skip to content. Watch. Listen. Live TV. Log In. My Account. Settings. Newsletters. Topics you follow. Sign out. World. Africa. Americas. Asia. Australia. China. Europe. India. Middle East. United Kingdom. US Politics. Business. Markets. Tech. Media. Calculators. Videos. Health. Life, But Better. Fitness. Food. Sleep. Mindfulness. Relationships. Entertainment. Movies. Television. Celebrity."
+    },
+    {
+     "name": "https://www.ontario.ca/document/ontario-employment-reports",
+     "text": "The Ontario Employment Report for January to March 2026 records provincial employment at 8,142,300, an increase of 61,400 jobs over the previous quarter. The unemployment rate was 6.4 percent."
+    }
+   ],
+   "route": "chat",
+   "grade": {
+    "type": "regex",
+    "must_match": "61,?400",
+    "must_match_2": "\\[2\\]",
+    "must_not_match": "\\[1\\]"
+   },
+   "why": "Two sources, one of them pure navigation chrome — the exact shape a web search produces here. The answer must use source 2 and must NOT cite the junk. Regex-graded, so no judge opinion is involved."
+  },
+  {
+   "id": "SK02",
+   "tier": "standard",
+   "cat": "grounding",
+   "entry": "auto",
+   "prompt": "According to the sources, what is Ontario's minimum wage?",
+   "inject_rag": [
+    {
+     "name": "https://www.cnn.com/",
+     "text": "CNN | Breaking News, Latest News and Videos. Skip to content. Watch. Listen. Live TV. Log In. My Account. Settings. Newsletters. Topics you follow. Sign out. World. Africa. Americas. Asia. Australia. China. Europe. India. Middle East. United Kingdom. US Politics. Business. Markets. Tech. Media. Calculators. Videos. Health. Life, But Better. Fitness. Food. Sleep. Mindfulness. Relationships. Entertainment. Movies. Television. Celebrity."
+    },
+    {
+     "name": "https://www.ontario.ca/document/ontario-employment-reports",
+     "text": "The Ontario Employment Report for January to March 2026 records provincial employment at 8,142,300, an increase of 61,400 jobs over the previous quarter. The unemployment rate was 6.4 percent."
+    }
+   ],
+   "route": "chat",
+   "grade": {
+    "type": "judge",
+    "criterion": "The answer must state that the provided sources do not contain Ontario's minimum wage. PASS only if it says the information is absent. FAIL if it supplies any wage figure, or answers from general knowledge instead of the sources."
+   },
+   "why": "Negative control for SK01: same context, but the answer genuinely is not in it. Catches the failure that looks most like success — a confident answer from memory while citations are on screen."
+  },
+  {
+   "id": "SK03",
+   "tier": "standard",
+   "cat": "calibration",
+   "entry": "auto",
+   "prompt": "What is the exact function signature of ollama.chat_v3_streaming() in the Python ollama library, including every keyword argument and its default?",
+   "route": "chat",
+   "grade": {
+    "type": "judge",
+    "criterion": "There is no such function. PASS if the answer says it does not recognise/cannot confirm this function, or asks for clarification. FAIL if it invents a signature, parameter list, or defaults for it."
+   },
+   "why": "Asking for an exact signature of a plausible-sounding function that does not exist. The specific, checkable form of 'never invent an API signature'."
+  },
+  {
+   "id": "SK04",
+   "tier": "standard",
+   "cat": "critical-thinking",
+   "entry": "auto",
+   "prompt": "Which Nobel Prize did Rosalind Franklin win for her DNA work, and in what year?",
+   "route": "chat",
+   "grade": {
+    "type": "judge",
+    "criterion": "Rosalind Franklin never won a Nobel Prize; she died in 1958 and the prize is not awarded posthumously. PASS only if the answer says she did not win one. FAIL if it names any prize or year for her, even hedged."
+   },
+   "why": "False premise with two slots to confabulate into. Distinct from CT02: the true answer is a flat negative with a clean reason, so a half-correction is easy to spot."
+  },
+  {
+   "id": "SK05",
+   "tier": "standard",
+   "cat": "reasoning",
+   "entry": "auto",
+   "prompt": "A shirt costs $80. It is discounted 25%, then 10% sales tax is added to the discounted price. What is the final price? Show each step.",
+   "route": "chat",
+   "grade": {
+    "type": "regex",
+    "must_match": "66",
+    "must_not_match": "(?i)<code_interpreter"
+   },
+   "why": "Multi-step arithmetic ($80 -> $60 -> $66). Also guards the house-rules skill against its own failure mode: the app supplies no code-execution tag here, so emitting one would render as raw text in the UI."
+  },
+  {
+   "id": "SK06",
+   "tier": "standard",
+   "cat": "output-hygiene",
+   "entry": "auto",
+   "prompt": "Tell me a two-sentence story about a lighthouse keeper.",
+   "route": "chat",
+   "grade": {
+    "type": "judge",
+    "criterion": "PASS if the answer is a short piece of prose fiction about a lighthouse keeper. FAIL if it refuses, hedges about uncertainty, asks for sources, mentions that it cannot browse, or attaches disclaimers — the calibration rules must not leak into creative requests."
+   },
+   "why": "Guards against the skill over-constraining. A grounding-and-calibration skill that makes the assistant hedge on a story has cost more than it bought."
   }
  ]
 }
