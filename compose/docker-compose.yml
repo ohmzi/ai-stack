@@ -135,6 +135,12 @@ services:
       - NTFY_AUTH_DEFAULT_ACCESS=deny-all
       - NTFY_ENABLE_LOGIN=true
       - NTFY_ATTACHMENT_CACHE_DIR=/var/lib/ntfy/attachments
+      # iOS-only: APNs wake relay. iOS kills background sockets, so without this a
+      # self-hosted server cannot wake the phone — the app only shows messages when
+      # foregrounded. The relay sends a CONTENTLESS poll ping (message id + topic)
+      # through ntfy.sh; the phone then fetches the actual message from THIS server
+      # over the tailnet. Message content never leaves the box. Android ignores this.
+      - NTFY_UPSTREAM_BASE_URL=https://ntfy.sh
     volumes:
       - ./ntfy:/var/lib/ntfy
     healthcheck:
