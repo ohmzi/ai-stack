@@ -5,7 +5,7 @@ version: 0.5.0
 required_open_webui_version: 0.5.0
 description: One model that decides - chats (with vision), makes a Krea 2 image (text or gentle image-to-image edit), or a Wan video. Non-blocking (async). Never uses the uncensored model.
 """
-import asyncio, aiohttp, requests, time, base64, hashlib, random, re, json, threading
+import asyncio, aiohttp, requests, time, base64, hashlib, os, random, re, json, threading
 
 # Serialize the VRAM-manipulating generation section so two concurrent Assistant invocations
 # can't both free/reload models on the single 24 GB card and OOM each other.
@@ -38,6 +38,13 @@ IMG_T2I_W, IMG_T2I_H = 1024, 1024
 IMG_DENOISE = 0.30  # gentle Krea 2 img2img edit strength (lower = closer to the attached image)
 IMG_ENHANCE = True  # expand short prompts into richer ones via the local LLM (text-to-image only)
 IMG_VERIFY = True   # vision-check the result against the request; one corrected retry on mismatch
+# One JSON line per finished media job. The QA loop above can turn a 16 s render into a 3-minute one
+# (measured: a plain "make a picture" ran a 154.8 s Qwen-Image-Edit correction on an image that then
+# scored 4/4 on independent VQA), and nothing recorded whether it fired — so its cost could only be
+# argued about. Set to "" to disable. Read it with tests/media_metrics.py. The default path is inside
+# the container; MEDIA_METRICS lets the harnesses — which import this file on the host, where that
+# path does not exist — contribute rows too, since the eval runs are where slow cases surface.
+METRICS_PATH = os.environ.get("MEDIA_METRICS", "/app/backend/data/media_metrics.jsonl")
 VID_ENHANCE = True  # expand terse video ideas ("guy shooting hoops") into detailed prompts — the
                     # single biggest quality lever for Wan; terse prompts produce broken scenes
 VID_VERIFY = True   # vision-check a mid frame of the clip against the request; one corrected retry
@@ -1078,6 +1085,22 @@ class Pipe:
                     "model": model_ref, "positive": ["pos", 0], "negative": ["neg", 0], "latent_image": ["5", 0]}}
         return wf
 
+    def _metric(self, **fields):
+        """Append one JSON line describing a finished media job. Never raises, never blocks a reply.
+
+        Deliberately a flat file rather than a counter: the useful questions are "how often does QA
+        correct, and what did that cost" and "which requests does it keep flagging", and both need
+        the individual rows. OpenWebUI's data volume is the only writable persistent path the pipe
+        has inside its container."""
+        if not METRICS_PATH:
+            return
+        try:
+            fields["ts"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+            with open(METRICS_PATH, "a") as f:
+                f.write(json.dumps(fields, default=str) + "\n")
+        except Exception:
+            pass  # instrumentation must never cost a user their generation
+
     def _gen_image(self, prompt, ref_b64, msgs=None):
         # Free ComfyUI's VRAM up front so the dolphin/gemma prompt-rewrite helpers below don't load
         # into a card ComfyUI still occupies (~13.7 GB) and run partly on CPU.
@@ -1101,11 +1124,17 @@ class Pipe:
             except Exception as e:
                 return f"⚠️ Could not upload the image to edit: {e}"
             wf = self._build_edit_wf(instruction, name, random.randint(0, 2**31), cfg, steps, negative)
+            t_render = time.time()
             data, err, _ = self._submit_poll(wf, "s", "Edit", 1200)
             if err:
+                self._metric(job="edit", ok=False, render_s=round(time.time() - t_render, 1),
+                             err=err[:160])
                 return err
+            render_s = round(time.time() - t_render, 1)
             # Vision QA: did the edit deliver what was asked? Up to two harder retries if not.
             qa_note = ""
+            qa_rounds, first_fix = 0, None
+            t_qa = time.time()
             if IMG_VERIFY and prompt:
                 cur = instruction
                 for _round in (1, 2):
@@ -1113,6 +1142,7 @@ class Pipe:
                     ok, fix = self._verify_image(instruction, base64.b64encode(data).decode())
                     if ok or not fix:
                         break
+                    first_fix = first_fix or fix
                     cur = f"{cur} IMPORTANT correction: {fix}"
                     wf = self._build_edit_wf(cur, name, random.randint(0, 2**31), 6.0, 24, negative)
                     self._free_vram()
@@ -1121,7 +1151,11 @@ class Pipe:
                         qa_note = f"\n\n*⚠️ QA flagged: {fix} — automatic correction failed ({err2})*"
                         break
                     data = data2
+                    qa_rounds += 1
             self._comfy_free()  # idle ⇒ GPU empty for the next chat turn
+            self._metric(job="edit", ok=True, render_s=render_s,
+                         qa_s=round(time.time() - t_qa, 1), qa_rounds=qa_rounds,
+                         qa_fix=(first_fix or "")[:200], request=(prompt or "")[:160])
             return f"![{instruction[:50]}](data:image/png;base64,{base64.b64encode(data).decode()}){qa_note}"
 
         # No image → fresh Krea 2 Turbo text-to-image.
@@ -1132,20 +1166,27 @@ class Pipe:
             prompt = f"{IMG_T2I_TRIGGER.strip()}, {prompt}"
         self._free_vram()
         wf = self._build_t2i_wf(prompt, random.randint(0, 2**31))
+        t_render = time.time()
         data, err, _ = self._submit_poll(wf, "9", "Image", 360)
         if err:
+            self._metric(job="image", ok=False, render_s=round(time.time() - t_render, 1),
+                         err=err[:160])
             return err
+        render_s = round(time.time() - t_render, 1)
         # Vision QA against the user's ORIGINAL wording (the ground truth for hard constraints).
         # Up to two correction rounds: a fresh re-roll at cfg 1 usually repeats the mistake
         # (e.g. an extra child), so FIX the produced image with the instruction editor instead —
         # it is precisely good at "remove the extra X / add the missing Y" and keeps the scene.
         qa_note = ""
+        qa_rounds, first_fix = 0, None
+        t_qa = time.time()
         if IMG_VERIFY and raw:
             for _round in (1, 2):
                 self._comfy_free()
                 ok, fix = self._verify_image(raw, base64.b64encode(data).decode())
                 if ok or not fix:
                     break
+                first_fix = first_fix or fix
                 try:
                     fix_ref = self._upload(base64.b64encode(data).decode())
                 except Exception as e:
@@ -1159,7 +1200,13 @@ class Pipe:
                     qa_note = f"\n\n*⚠️ QA flagged: {fix} — automatic correction failed ({err2})*"
                     break
                 data = data2
+                qa_rounds += 1
         self._comfy_free()  # idle ⇒ GPU empty for the next chat turn
+        # A correction here costs a full Qwen-Image-Edit pass (~150 s) on top of a ~16 s Krea 2
+        # render, so qa_rounds is the field that explains a slow "make me a picture".
+        self._metric(job="image", ok=True, render_s=render_s,
+                     qa_s=round(time.time() - t_qa, 1), qa_rounds=qa_rounds,
+                     qa_fix=(first_fix or "")[:200], request=(raw or "")[:160])
         return f"![{prompt[:50]}](data:image/png;base64,{base64.b64encode(data).decode()}){qa_note}"
 
     # Standard Wan negative prompt (recommended by the model authors).
