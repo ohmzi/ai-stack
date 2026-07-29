@@ -99,6 +99,8 @@ def main():
     check("footer names alerts-alice", "`alerts-alice`" in foot)
     check("footer names the public server", "notify.ohmz.cloud" in foot)
     check("footer says OpenWebUI password", "OpenWebUI password" in foot)
+    check("footer warns: username, not email", "NOT your email" in foot)
+    check("footer warns: set the server first", "wrong server" in foot)
 
     fails = results.count(False)
     print(f"\n{len(results)} checks — {'ALL PASS' if not fails else str(fails) + ' FAILURE(S)'}")
