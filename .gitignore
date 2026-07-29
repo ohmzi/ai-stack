@@ -16,3 +16,6 @@ compose/infinity-cache/
 
 # searxng secret — rotated out of git 2026-07-29, lives here only
 compose/.env
+
+# ntfy runtime state — auth.db holds password/token hashes; never in git
+compose/ntfy/
