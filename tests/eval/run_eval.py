@@ -335,7 +335,12 @@ async def unload_all(mod):
 async def main(a):
     suite = json.load(open(CASES_FILE))
     models = suite["models"]
-    judge_model = a.judge or models["vision"]
+    # cases.json declares the judge explicitly so it can be a DIFFERENT family from the models under
+    # test — the cross-family control this suite's grading argument rests on. Falling back to
+    # models["vision"] silently ignored that declaration, and since the 2026-07-26 consolidation put
+    # chat, vision and coder on one tag, it meant the model under test graded its own answers on
+    # every judge case. The runner printed its own self-preference warning on each run and was right.
+    judge_model = a.judge or models.get("judge") or models["vision"]
 
     # An explicit --only/--cat selection overrides the tier filter: asking for a case by name and
     # silently getting nothing because it lives in a higher tier is a trap.
