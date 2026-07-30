@@ -47,6 +47,12 @@ A job that fires a condition emits `ALERT(<handle>): <message>`; the watcher rou
 (real text, real ringtone, no app, no OS notification settings involved); email is the record.
 `ALERT_CHANNELS` narrows it to one.
 
+**SMS has two methods** (`SMS_METHOD`): `gateway` (default when `SMS_GATEWAY` is set) emails the
+carrier's free email-to-SMS bridge — e.g. Telus `<10-digit>@msg.telus.com` — so a text is just an
+email and rides the same SMTP connection at zero cost; `twilio` uses the REST API (paid, and a
+**trial** account is blocked from sending custom text — error 572006 — so it needs a real
+upgrade). This box uses the gateway.
+
 Addresses come from where they actually live: **email is derived automatically** from the
 OpenWebUI user table by matching the handle against each account's email local part — no
 configuration, new users work immediately. **Phone numbers are opt-in** per handle in

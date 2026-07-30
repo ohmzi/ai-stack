@@ -63,6 +63,29 @@ def main():
         got = at.normalize_phone(raw)
         check(f"{raw!r} -> {want!r}", got == want, f"got {got!r}")
 
+    print("--- carrier email-to-SMS gateway address forming ---")
+    for e164, want in [
+        ("+15145579764", "5145579764"),
+        ("15145579764", "5145579764"),
+        ("5145579764", "5145579764"),
+        ("+447700900123", None),   # non-NANP -> refused
+        ("", None),
+    ]:
+        check(f"national_number({e164!r}) -> {want!r}", at.national_number(e164) == want)
+    check("carrier_sms_address builds <num>@gateway",
+          at.carrier_sms_address("+15145579764", "msg.telus.com") == "5145579764@msg.telus.com")
+    check("carrier_sms_address None when unformable",
+          at.carrier_sms_address("+447700900123", "msg.telus.com") is None)
+
+    print("--- send_sms dispatches to the gateway (an email), not Twilio ---")
+    sent = {}
+    at.send_email = lambda to, subj, body, conf: sent.update(to=to, subj=subj, body=body) or True
+    ref = at.send_sms("+15145579764", "target met at 51.77", {"SMS_GATEWAY": "msg.telus.com"})
+    check("gateway send returns gateway:<addr>", ref == "gateway:5145579764@msg.telus.com", repr(ref))
+    check("emailed the carrier address", sent.get("to") == "5145579764@msg.telus.com", repr(sent))
+    check("empty subject for gateway", sent.get("subj") == "", repr(sent.get("subj")))
+    check("body carried through", "51.77" in (sent.get("body") or ""), repr(sent.get("body")))
+
     print("--- unconfigured degrades, never raises ---")
     at.CONF = "/nonexistent/alert_transports.env"
     ok, notes = at.send_alert("ohmz", "hello")

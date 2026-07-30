@@ -113,6 +113,21 @@ def normalize_phone(raw, default_country="+1"):
     return None
 
 
+def national_number(e164):
+    """E.164 -> local 10-digit (North America). Carrier email-to-SMS gateways want the bare
+    number, no country code: +15145579764 -> 5145579764. None if not a 10/11-digit NANP number."""
+    digits = re.sub(r"\D", "", e164 or "")
+    if len(digits) == 11 and digits.startswith("1"):
+        digits = digits[1:]
+    return digits if len(digits) == 10 else None
+
+
+def carrier_sms_address(phone_e164, gateway):
+    """<local-number>@<gateway>, e.g. 5145579764@msg.telus.com. None if the number can't be formed."""
+    nn = national_number(phone_e164)
+    return f"{nn}@{gateway}" if (nn and gateway) else None
+
+
 def resolve(handle, conf=None, contacts=None):
     """(email, phone_e164) for a handle. Either may be None."""
     conf = conf if conf is not None else load_conf()
@@ -125,7 +140,19 @@ def resolve(handle, conf=None, contacts=None):
 
 
 def send_sms(to_e164, body, conf):
-    """Twilio REST. Raises on failure so the caller can log the reason."""
+    """One text. Two methods: 'gateway' emails the carrier's email-to-SMS bridge (free, rides the
+    SMTP transport); 'twilio' hits the REST API. Default is gateway when SMS_GATEWAY is set."""
+    gateway = conf.get("SMS_GATEWAY")
+    method = conf.get("SMS_METHOD", "gateway" if gateway else "twilio")
+
+    if method == "gateway":
+        addr = carrier_sms_address(to_e164, gateway)
+        if not addr:
+            raise RuntimeError(f"cannot form carrier address for {to_e164!r} / gateway {gateway!r}")
+        # Carrier gateways turn the email into a text: empty subject (some prepend it), short body.
+        send_email(addr, "", body[:300], conf)
+        return f"gateway:{addr}"
+
     sid, token, frm = (conf.get("TWILIO_ACCOUNT_SID"), conf.get("TWILIO_AUTH_TOKEN"),
                        conf.get("TWILIO_FROM"))
     if not (sid and token and frm):
@@ -140,7 +167,6 @@ def send_sms(to_e164, body, conf):
         with urllib.request.urlopen(req, timeout=TIMEOUT) as r:
             return json.load(r).get("sid")
     except urllib.error.HTTPError as e:
-        # Twilio puts the actionable reason in the body; a bare "400" is useless in a log.
         raise RuntimeError(f"twilio {e.code}: {e.read()[:200].decode(errors='replace')}") from None
 
 
@@ -209,8 +235,12 @@ def main():
     if a.status or not a.test:
         print(f"config   : {CONF} {'FOUND' if conf else 'MISSING'}")
         print(f"channels : {conf.get('ALERT_CHANNELS', 'sms,email (default)')}")
-        print(f"twilio   : {'configured' if conf.get('TWILIO_ACCOUNT_SID') else 'NOT configured'}"
-              f"  from={conf.get('TWILIO_FROM', '-')}")
+        _method = conf.get("SMS_METHOD", "gateway" if conf.get("SMS_GATEWAY") else "twilio")
+        if _method == "gateway":
+            print(f"sms      : carrier gateway  ->  <number>@{conf.get('SMS_GATEWAY', '(unset!)')}")
+        else:
+            print(f"sms      : twilio  {'configured' if conf.get('TWILIO_ACCOUNT_SID') else 'NOT configured'}"
+                  f"  from={conf.get('TWILIO_FROM', '-')}")
         print(f"smtp     : {'configured' if conf.get('SMTP_HOST') else 'NOT configured'}"
               f"  host={conf.get('SMTP_HOST', '-')} user={conf.get('SMTP_USER', '-')}")
         print(f"contacts : {CONTACTS} {'FOUND' if os.path.exists(CONTACTS) else 'MISSING'}")
