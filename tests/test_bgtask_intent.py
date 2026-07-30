@@ -112,12 +112,22 @@ def main():
 
     print("--- a FINISHED job must not block a new one (live failure 37d9907d5dfa) ---")
     brief = mod.Pipe._HERMES_BRIEF
-    for phrase in ("NEVER create a job with --no-agent", "never printed",
+    for phrase in ("NEVER write your own script into a job", "never printed",
                    "'every Nm'", "ONE-SHOT that runs once and deletes itself",
                    "repeat 4", "WITHOUT a fake browser User-Agent",
                    "ACTIVE and still has runs left", "completed, exhausted, disabled",
                    "create a NEW one instead", "already running"):
         check(f"rule 6 covers {phrase!r}", phrase in brief)
+
+    # The ban is on MODEL-AUTHORED scripts, not on script mode itself: the stack ships a tested
+    # extractor, and pointing a job at it is the whole reason hallucinated prices stopped. A brief
+    # that bans script mode outright would forbid the fix for the bug it was written about.
+    check("brief routes price monitoring to the vetted extractor",
+          "scripts/price_watch.py" in brief and "do NOT write your own scraper" in brief)
+    check("...and prints its output verbatim rather than summarising it",
+          "print its output verbatim" in brief)
+    check("brief no longer contradicts itself about alerts being configured",
+          "none is configured right now" not in brief)
     check("brief states alerts are configured (agent claimed otherwise)",
           "text message AND an email" in brief and "Never tell the user alerts are unconfigured" in brief)
 
