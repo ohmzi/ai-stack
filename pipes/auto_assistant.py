@@ -1678,6 +1678,9 @@ class Pipe:
         "was previously above X'). The only permitted dampening: skip the push when the value "
         "is identical to the one already pushed last run. Never push when the condition does "
         "not hold, and never more than once per run.\n"
+        "9. After creating a job, call cronjob(action='list') and copy the REAL job id and next "
+        "run time from the tool result into your reply. Describing a job is not creating it — if "
+        "the id is not in the list, you did not create it; say so plainly instead of confirming.\n"
         "Reply to the user with plain-language confirmation: what will be checked, how often, "
         "until when, and that results will appear in the background-tasks channel (plus a phone "
         "push if they asked to be alerted). Keep it short."
@@ -1718,7 +1721,23 @@ class Pipe:
             "buzzes only when a condition you asked about actually fires."
         )
 
-    async def _hermes_stream(self, text, uname="user"):
+    def _hermes_jobs(self):
+        """Job ids currently scheduled, straight from hermes's /api/jobs — deterministic ground
+        truth. None on any error (verification then reports 'could not verify', never a false
+        positive)."""
+        key = self._hermes_key()
+        if not key:
+            return None
+        try:
+            import urllib.request
+            req = urllib.request.Request(f"{HERMES_URL.rsplit('/v1', 1)[0]}/api/jobs",
+                                         headers={"Authorization": f"Bearer {key}"})
+            with urllib.request.urlopen(req, timeout=10) as r:
+                return {j.get("id"): j for j in json.load(r).get("jobs", [])}
+        except Exception:
+            return None
+
+    async def _hermes_stream(self, text, uname="user", verify_creation=False):
         """Delegate a background-task request to the local hermes-agent API server.
 
         A plain HTTP client, deliberately: hermes's API server is an agent runtime that streams
@@ -1733,6 +1752,7 @@ class Pipe:
         ctx = (f"Request context: the requesting user is '{uname}'. Their personal phone-alert "
                f"topic is 'alerts-{uname}' — rule 8's push URL for this user's jobs is "
                f"\"$(sed -n 1p ~/.hermes/ntfy_alert)/alerts-{uname}\".")
+        before = self._hermes_jobs() if verify_creation else None
         payload = {"model": "hermes-agent", "stream": True,
                    "messages": [{"role": "system", "content": self._HERMES_BRIEF + "\n" + ctx},
                                 {"role": "user", "content": text}]}
@@ -1751,6 +1771,22 @@ class Pipe:
                             continue
                         data = line[5:].strip()
                         if data == b"[DONE]":
+                            if verify_creation:
+                                after = self._hermes_jobs()
+                                new_jobs = ([j for i, j in after.items() if i not in before]
+                                            if (after is not None and before is not None) else None)
+                                if new_jobs:
+                                    j = new_jobs[0]
+                                    sched = j.get("schedule_display") or str(j.get("schedule", "?"))
+                                    yield (f"\n\n✅ **Verified scheduled**: job `{j.get('id')}` "
+                                           f"({sched}) — confirmed against the scheduler, not the "
+                                           f"agent's word.")
+                                elif new_jobs is not None:
+                                    yield ("\n\n⚠️ **Verification failed**: the agent described a "
+                                           "job but the scheduler has NO new entry — nothing was "
+                                           "actually created. Please resend the request.")
+                                else:
+                                    yield "\n\n(could not verify job creation — /api/jobs unreachable)"
                             yield self._ntfy_onboarding(uname)
                             return
                         try:
@@ -2172,7 +2208,9 @@ class Pipe:
         # alert me" contains no code but 'script-like' phrasing must not reach the coder either).
         # `text` is the clean routing prompt, so RAG/search context cannot fabricate a job.
         if BG_TASKS and not attached_img and not ref and self._is_bg_task_request(text):
-            return self._hermes_stream(text, self._ntfy_username(__user__))
+            is_manage = bool(self._BG_MANAGE.match((text or "").strip().lower()))
+            return self._hermes_stream(text, self._ntfy_username(__user__),
+                                       verify_creation=not is_manage)
         if not attached_img and not ref and await asyncio.to_thread(self._is_code_request, text):
             return self._locked_stream(self._achat_stream(
                 omsgs, guard_text=self._CODER_GUARD, keep_system=AUTO_KEEP_SYSTEM,

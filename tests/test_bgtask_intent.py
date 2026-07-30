@@ -97,7 +97,8 @@ def main():
     for phrase in ("LOG:", "ALERT(", "does NOT run any delivery commands",
                    "helper functions (they do not exist)",
                    "including the very first run",
-                   "Never add prior-state or transition requirements"):
+                   "Never add prior-state or transition requirements",
+                   "Describing a job is not creating it"):
         check(f"brief contains {phrase!r}", phrase in brief)
 
     fails = results.count(False)
