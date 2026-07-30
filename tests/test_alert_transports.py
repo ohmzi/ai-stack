@@ -93,7 +93,11 @@ def main():
     ref = at.send_sms("+15145579764", "target met at 51.77", {"SMS_GATEWAY": "msg.telus.com"})
     check("gateway send returns gateway:<addr>", ref == "gateway:5145579764@msg.telus.com", repr(ref))
     check("emailed the carrier address", sent.get("to") == "5145579764@msg.telus.com", repr(sent))
+    # Not cosmetic: Telus renders a subject into the text as "Subj: <subject>" ahead of the body,
+    # measured live. Anything put there is noise the user reads before the actual message.
     check("empty subject for gateway", sent.get("subj") == "", repr(sent.get("subj")))
+    check("the body leaves room for the sender address the gateway prepends",
+          at.sms_body("x" * 300).__len__() <= 140)
     check("body carried through", "51.77" in (sent.get("body") or ""), repr(sent.get("body")))
 
     print("--- SMS bodies carry no links (the gateway silently eats them) ---")
@@ -263,6 +267,62 @@ def main():
     ok, notes = at4.send_alert("ohmz", "target met")
     check("an implicit-MX domain IS still attempted", ok is True, repr(notes))
     check("...but the note marks it unverifiable", any("UNVERIFIABLE" in n for n in notes), repr(notes))
+
+    print("--- switching the sending account is verified before it is written ---")
+    # Both legs ride this one connection: the email leg IS SMTP, and a gateway text is an email to
+    # the carrier. A wrong password here does not degrade anything — it silences everything. So the
+    # credentials are proven against the server first, and a failure must leave the previous
+    # WORKING config byte-for-byte intact.
+    at6 = load()
+    with tempfile.TemporaryDirectory() as td:
+        cf = os.path.join(td, "t.env")
+        original = ("SMTP_HOST=smtp.gmail.com\nSMTP_PORT=587\n"
+                    "SMTP_USER=old@gmail.com\nSMTP_PASS=oldpass\nSMTP_FROM=old@gmail.com\n"
+                    "SMS_GATEWAY=msg.telus.com\n")
+        open(cf, "w").write(original)
+        at6.CONF = cf
+
+        class FakeSMTP:
+            def __init__(self, *a, **k):
+                pass
+            def __enter__(self):
+                return self
+            def __exit__(self, *a):
+                return False
+            def starttls(self):
+                pass
+            def login(self, u, p):
+                if p != "goodpass":
+                    raise at6.smtplib.SMTPAuthenticationError(535, b"Bad creds")
+        at6.smtplib.SMTP = FakeSMTP
+
+        ok, note = at6.set_sender("new@gmail.com", "wrongpass", cf)
+        check("a bad password is refused", ok is False, note)
+        check("...with the reason", "login refused" in note, note)
+        check("...and points at app passwords for gmail", "APP PASSWORD" in note, note)
+        check("the working config is left completely untouched",
+              open(cf).read() == original, open(cf).read())
+
+        ok, note = at6.set_sender("new@gmail.com", "goodpass", cf)
+        check("a verified password is accepted", ok is True, note)
+        written = at6.load_conf()
+        check("SMTP_USER switched", written["SMTP_USER"] == "new@gmail.com", written.get("SMTP_USER"))
+        check("SMTP_FROM switched too — the gateway shows this address in every text",
+              written["SMTP_FROM"] == "new@gmail.com", written.get("SMTP_FROM"))
+        check("the password was updated", written["SMTP_PASS"] == "goodpass")
+        check("unrelated settings survive the rewrite",
+              written["SMS_GATEWAY"] == "msg.telus.com" and written["SMTP_PORT"] == "587", written)
+        check("the file stays 0600 — it holds a live credential",
+              oct(os.stat(cf).st_mode)[-3:] == "600", oct(os.stat(cf).st_mode))
+
+        # A config that never had the keys must gain them rather than silently ignoring the switch.
+        cf2 = os.path.join(td, "bare.env")
+        open(cf2, "w").write("SMTP_HOST=smtp.gmail.com\n")
+        at6.CONF = cf2
+        ok, _ = at6.set_sender("new@gmail.com", "goodpass", cf2)
+        w2 = at6.load_conf()
+        check("missing keys are added, not dropped",
+              ok and w2["SMTP_USER"] == "new@gmail.com" and w2["SMTP_FROM"] == "new@gmail.com", w2)
 
     print("--- unconfigured degrades, never raises ---")
     at.CONF = "/nonexistent/alert_transports.env"

@@ -205,7 +205,10 @@ def send_sms(to_e164, body, conf):
         addr = carrier_sms_address(to_e164, gateway)
         if not addr:
             raise RuntimeError(f"cannot form carrier address for {to_e164!r} / gateway {gateway!r}")
-        # Carrier gateways turn the email into a text: empty subject (some prepend it), short body.
+        # Empty subject, always. Measured on Telus 2026-07-30: a subject is rendered into the text
+        # as "Subj: <subject>" ahead of the body, so anything there is visible noise the user has
+        # to read past. The same test proved a From DISPLAY NAME is ignored entirely — the gateway
+        # writes the raw sender address at the front of every message and no header changes that.
         send_email(addr, "", body[:300], conf)
         return f"gateway:{addr}"
 
@@ -338,6 +341,10 @@ URL_RE = re.compile(
     re.I)
 
 
+# 140, not 160, and the difference is the gateway's doing. A single GSM-7 segment holds 160 ASCII
+# characters, but the carrier prepends the sender address ("plexlaking@gmail.com ", ~21 chars) to
+# every email-originated text. Budgeting 140 for the body keeps the message the handset actually
+# assembles inside one segment. A longer sending address eats into this.
 def sms_body(message, job=None, limit=140):
     """The SMS form of an alert: names the monitor, no web addresses, one ASCII segment.
 
@@ -597,11 +604,75 @@ def send_alert(handle, message, subject=None, job=None, job_id=None, when=None, 
     return ok, notes
 
 
+def set_sender(address, app_password, conf_path=None):
+    """Point every outbound message at a new sending account — but only if it actually works.
+
+    Both legs ride this one connection: the email leg IS SMTP, and the SMS leg is an email to the
+    carrier gateway. So a wrong password here does not degrade anything, it silences everything.
+    The credentials are therefore tested against the live server BEFORE the file is written, and a
+    failure leaves the previous working config exactly as it was.
+
+    Returns (ok, note).
+    """
+    conf_path = conf_path or CONF
+    conf = load_conf()
+    host = conf.get("SMTP_HOST", "smtp.gmail.com")
+    port = int(conf.get("SMTP_PORT", "587"))
+    try:
+        if port == 465:
+            with smtplib.SMTP_SSL(host, port, timeout=TIMEOUT) as srv:
+                srv.login(address, app_password)
+        else:
+            with smtplib.SMTP(host, port, timeout=TIMEOUT) as srv:
+                srv.starttls()
+                srv.login(address, app_password)
+    except smtplib.SMTPAuthenticationError as e:
+        hint = (" — Gmail needs an APP PASSWORD (16 characters, from "
+                "myaccount.google.com/apppasswords), not the account password"
+                if "gmail" in host else "")
+        return False, f"login refused for {address}: {e.smtp_code} {e.smtp_error!r}{hint}"
+    except Exception as e:
+        return False, f"could not reach {host}:{port} — {type(e).__name__}: {e}"
+
+    try:
+        lines = open(conf_path).read().splitlines()
+    except Exception as e:
+        return False, f"cannot read {conf_path}: {e}"
+    wanted = {"SMTP_USER": address, "SMTP_FROM": address, "SMTP_PASS": app_password}
+    seen, out = set(), []
+    for line in lines:
+        key = line.split("=", 1)[0].strip() if "=" in line and not line.strip().startswith("#") \
+            else None
+        if key in wanted:
+            out.append(f"{key}={wanted[key]}")
+            seen.add(key)
+        else:
+            out.append(line)
+    out += [f"{k}={v}" for k, v in wanted.items() if k not in seen]
+    tmp = conf_path + ".tmp"
+    with open(tmp, "w") as f:
+        f.write("\n".join(out) + "\n")
+    os.chmod(tmp, 0o600)
+    os.replace(tmp, conf_path)
+    return True, f"sending account is now {address} (verified against {host})"
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--status", action="store_true")
     ap.add_argument("--test", nargs=2, metavar=("HANDLE", "MESSAGE"))
+    ap.add_argument("--set-sender", nargs=2, metavar=("ADDRESS", "APP_PASSWORD"),
+                    help="switch the sending account for BOTH email and gateway SMS; "
+                         "verified against the server before anything is written")
     a = ap.parse_args()
+
+    if a.set_sender:
+        ok, note = set_sender(*a.set_sender)
+        print(("OK  " if ok else "FAIL ") + note)
+        if ok:
+            publish_profile()
+        return 0 if ok else 1
+
     conf = load_conf()
 
     if a.status or not a.test:

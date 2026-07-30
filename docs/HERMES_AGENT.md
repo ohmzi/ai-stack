@@ -147,6 +147,37 @@ request and a **robot wall to a spoofed Chrome User-Agent**. Do not "fix" the fe
 python3 scripts/price_watch.py --selftest     # runs both live reference pages
 ```
 
+### The sending account, and the prefix you cannot remove
+
+Every text arrives with the sending address written in front of it:
+
+```
+plexlaking@gmail.com Hi ohmz, Ohmz AI here! Zakkart 2-Pack Cat Scratching Board is $46.99 ...
+```
+
+That is the **gateway**, not this stack. An email-originated SMS has no sender field, so the carrier
+writes the sender into the message body. Tested on Telus 2026-07-30 with four header variants: a
+`From` display name is ignored entirely, and an explicit `Sender` header changes nothing. A subject
+IS rendered, as `Subj: <subject>` ahead of the body — which is why gateway sends always use an empty
+one. **No header removes the prefix.** Only two things do: a paid SMS API (Twilio et al), or not
+using SMS.
+
+So the sending address is worth choosing deliberately — it is the assistant's visible identity on
+every text. Switching it changes BOTH legs, because the email leg *is* SMTP and a gateway text is an
+email to the carrier:
+
+```bash
+python3 scripts/alert_transports.py --set-sender you@gmail.com 'your-app-password'
+```
+
+The credentials are proven against the live server **before** anything is written, and a failure
+leaves the previous working config byte-for-byte intact. A wrong password here does not degrade one
+channel — it silences every alert on the box, which is not a thing to discover three days later.
+
+This also sets the SMS character budget. A single GSM-7 segment holds 160 ASCII characters and the
+prefix eats ~21 of them, which is why the body is capped at 140 rather than 160. **A longer sending
+address costs message length.**
+
 ### Texts must not contain links
 
 Carrier email-to-SMS gateways **silently drop messages containing URLs**. There is no bounce, no
