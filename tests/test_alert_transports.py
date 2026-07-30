@@ -324,6 +324,34 @@ def main():
         check("missing keys are added, not dropped",
               ok and w2["SMTP_USER"] == "new@gmail.com" and w2["SMTP_FROM"] == "new@gmail.com", w2)
 
+    print("--- the visible sender can change without changing the login ---")
+    # App passwords are hidden until 2-Step Verification is on, so a brand-new account often cannot
+    # issue one. Gmail's "Send mail as" lets the working account send under the new address, which
+    # gets the identity change without a credential on the new account.
+    at7 = load()
+    with tempfile.TemporaryDirectory() as td:
+        cf = os.path.join(td, "f.env")
+        open(cf, "w").write("SMTP_USER=old@gmail.com\nSMTP_PASS=secret\n"
+                            "SMTP_FROM=old@gmail.com\nSMS_GATEWAY=msg.telus.com\n")
+        at7.CONF = cf
+        ok, note = at7.set_from("new@gmail.com", cf)
+        w = at7.load_conf()
+        check("the visible sender changes", ok and w["SMTP_FROM"] == "new@gmail.com", w.get("SMTP_FROM"))
+        check("the login is left alone", w["SMTP_USER"] == "old@gmail.com", w.get("SMTP_USER"))
+        check("the password is untouched", w["SMTP_PASS"] == "secret")
+        check("other settings survive", w["SMS_GATEWAY"] == "msg.telus.com")
+        check("the file stays 0600", oct(os.stat(cf).st_mode)[-3:] == "600")
+        # An unverified alias is silently rewritten by Gmail back to the authenticated address, and
+        # nothing on this side can see that happen — so the note must send the user to look.
+        check("the note admits what cannot be verified from here",
+              "UNVERIFIED" in note and "check" in note, note)
+        cf2 = os.path.join(td, "bare2.env")
+        open(cf2, "w").write("SMTP_USER=old@gmail.com\n")
+        at7.CONF = cf2
+        ok, _ = at7.set_from("new@gmail.com", cf2)
+        check("a config with no SMTP_FROM gains one", ok and
+              at7.load_conf()["SMTP_FROM"] == "new@gmail.com")
+
     print("--- unconfigured degrades, never raises ---")
     at.CONF = "/nonexistent/alert_transports.env"
     ok, notes = at.send_alert("ohmz", "hello")

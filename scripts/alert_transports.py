@@ -604,6 +604,43 @@ def send_alert(handle, message, subject=None, job=None, job_id=None, when=None, 
     return ok, notes
 
 
+def set_from(address, conf_path=None):
+    """Change the visible sender WITHOUT changing which account authenticates.
+
+    Gmail lets one account send as another it has verified under "Send mail as", and preserves that
+    From header instead of rewriting it. So the assistant can appear as ohmz.ai.owui@gmail.com while
+    SMTP still logs in as the account that already has a working app password — useful when the new
+    account cannot issue one (App passwords are hidden until 2-Step Verification is on).
+
+    Not verifiable from here: whether the alias is actually verified inside Gmail is invisible to
+    SMTP, and an unverified one is silently rewritten back to the authenticated address. So this
+    only rewrites the file — send a test afterwards and look at what actually arrives.
+    """
+    conf_path = conf_path or CONF
+    try:
+        lines = open(conf_path).read().splitlines()
+    except Exception as e:
+        return False, f"cannot read {conf_path}: {e}"
+    out, seen = [], False
+    for line in lines:
+        if "=" in line and not line.strip().startswith("#") \
+                and line.split("=", 1)[0].strip() == "SMTP_FROM":
+            out.append(f"SMTP_FROM={address}")
+            seen = True
+        else:
+            out.append(line)
+    if not seen:
+        out.append(f"SMTP_FROM={address}")
+    tmp = conf_path + ".tmp"
+    with open(tmp, "w") as f:
+        f.write("\n".join(out) + "\n")
+    os.chmod(tmp, 0o600)
+    os.replace(tmp, conf_path)
+    return True, (f"visible sender is now {address} (login unchanged). Gmail silently rewrites an "
+                  f"UNVERIFIED alias back to the authenticated address — send a test and check "
+                  f"what actually arrives.")
+
+
 def set_sender(address, app_password, conf_path=None):
     """Point every outbound message at a new sending account — but only if it actually works.
 
@@ -664,7 +701,17 @@ def main():
     ap.add_argument("--set-sender", nargs=2, metavar=("ADDRESS", "APP_PASSWORD"),
                     help="switch the sending account for BOTH email and gateway SMS; "
                          "verified against the server before anything is written")
+    ap.add_argument("--set-from", metavar="ADDRESS",
+                    help="change only the visible sender, keeping the current login (needs the "
+                         "address verified under Gmail's 'Send mail as')")
     a = ap.parse_args()
+
+    if a.set_from:
+        ok, note = set_from(a.set_from)
+        print(("OK  " if ok else "FAIL ") + note)
+        if ok:
+            publish_profile()
+        return 0 if ok else 1
 
     if a.set_sender:
         ok, note = set_sender(*a.set_sender)
