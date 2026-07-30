@@ -61,16 +61,26 @@ def item_label(title, limit=52):
 
 
 def money(value, unit=None):
+    """A number formatted the way its unit is actually written.
+
+    Not everything watched is money: a CPU threshold rendered "91.00 %" reads like a machine wrote
+    it. Currency keeps two decimals because $46.9 is wrong; a percentage or a bare count does not.
+    """
     if value is None:
         return None
     try:
-        v = f"{float(value):,.2f}"
+        f = float(value)
     except (TypeError, ValueError):
         return str(value)
     u = (unit or "").strip()
+    plain = f"{f:,.0f}" if f == int(f) else f"{f:,.2f}".rstrip("0").rstrip(".")
+    if u == "%":
+        return f"{plain}%"
     if u in ("$", "£", "€", "¥"):
-        return f"{u}{v}"
-    return f"{v} {u}" if u else v
+        return f"{u}{f:,.2f}"
+    if len(u) == 3 and u.isalpha():          # CAD, USD, GBP
+        return f"{f:,.2f} {u}"
+    return f"{plain} {u}" if u else plain
 
 
 def _thing(p):
@@ -84,9 +94,27 @@ def _thing(p):
 
 
 def _noun(p):
-    """The word for what kind of thing this is, used in prose."""
+    """The word for what kind of thing this is, used in prose.
+
+    "listing" is wrong for half of what a person can ask to be watched, and a message that calls a
+    flight a listing reads like it was written by something that did not understand the request.
+    Anything genuinely generic falls back to "task you assigned me", which is true of everything.
+    """
     return {"fare": "fare", "inventory": "stock level", "availability": "availability",
-            "back_in_stock": "item", "out_of_stock": "item"}.get(p.get("kind"), "listing")
+            "back_in_stock": "item", "out_of_stock": "item", "price_drop": "listing",
+            "price_rise": "listing", "unreachable": "page", "blocked": "page",
+            "no_value": "page", "recovered": "page"}.get(p.get("kind"),
+                                                         "task you assigned me")
+
+
+def _phrase(noun):
+    """The noun as a sentence subject.
+
+    "task you assigned me" already contains its own clause, so the generic wrapper produced "the
+    task you assigned me you're tracking". A noun that already says what the user did to it does
+    not get told again.
+    """
+    return f"the {noun}" if "you" in noun else f"the {noun} you're tracking"
 
 
 def _conf_short(p):
@@ -260,12 +288,25 @@ def render_sms(payload, limit=140):
     # item name, which is the whole point of the message, into truncation.
     sentence = re.sub(r"\s*\(was [^)]*\)", "", sentence)
 
-    def build(name, greet=True):
+    # Who is texting? The message arrives from a mail-to-SMS gateway, so the handset shows an
+    # email address the user has no reason to recognise. Naming the assistant answers the first
+    # question a text from an unknown sender raises, which is worth its characters — and it is
+    # configured, not hard-coded, so renaming the assistant never means editing this file.
+    assistant = _ascii((payload.get("assistant") or "").strip())
+
+    def build(name, greet=True, ident=True):
         lead = f"Hi {who}, " if (greet and who) else ""
-        named = f" - {name} -" if name else ""
-        head = "heads up - " if problem else ""
+        if ident and assistant:
+            lead += f"{assistant} here! "
+        head = "Heads up - " if problem else ""
         conf = "" if problem else _conf_short(payload)
-        core = f"{head}the {noun} you're tracking{named} {sentence}{conf}."
+        # With a greeting and an identity in front, "the listing you're tracking" is ceremony the
+        # 140 characters cannot afford — the user knows why they are being texted. The item name
+        # carries the meaning on its own.
+        subject = name if name else _phrase(noun)
+        core = f"{head}{subject} {sentence}{conf}."
+        if lead.endswith("! ") or not lead:
+            core = core[:1].upper() + core[1:]
         return f"{lead}{core} {pointer}"
 
     name = thing or ""
@@ -276,11 +317,13 @@ def render_sms(payload, limit=140):
     over = len(out) - limit
     if len(name) - over > 16:
         return build(name[:len(name) - over - 3].rstrip(" ,-") + "...")
-    # 2. drop the greeting
     name = name[:22].rstrip(" ,-") + "..." if len(name) > 22 else name
-    out = build(name, greet=False)
-    if len(out) <= limit:
-        return out
+    # 2. drop the personal greeting before the identity: on a text from an address the user does
+    #    not recognise, "who is this" matters more than "hello by name".
+    for kw in ({"greet": False}, {"greet": False, "ident": False}):
+        out = build(name, **kw)
+        if len(out) <= limit:
+            return out
     # 3. last resort: keep the pointer, trim the middle
     return out[:limit - len(pointer) - 2].rstrip() + " " + pointer
 
@@ -304,8 +347,10 @@ def render_plain(payload):
     headline, sentence = describe(payload)
     thing, noun = _thing(payload), _noun(payload)
     problem = payload.get("kind") in PROBLEM_KINDS
-    lines = [f"Hi {who}," if who else "Hi,", ""]
-    lines.append(f"The {noun} you're tracking {sentence}." if not problem
+    assistant = (payload.get("assistant") or "").strip()
+    hello = f"Hi {who}," if who else "Hi,"
+    lines = [f"{hello} {assistant} here!" if assistant else hello, ""]
+    lines.append(f"{_phrase(noun).capitalize()} {sentence}." if not problem
                  else f"One of your monitors needs a look - the {noun} {sentence}.")
     lines[-1] = re.sub(r"\s{2,}", " ", lines[-1])
     if thing:
@@ -387,8 +432,9 @@ def render_html(payload):
     advice_html = (f'<div style="margin-top:16px;font-size:14px;color:#374151;">{e(advice)}</div>'
                    if advice else "")
 
-    lead = (f"One of your monitors needs a look." if problem
-            else f"The {e(noun)} you're tracking just hit your condition.")
+    assistant = (payload.get("assistant") or "").strip()
+    lead = ("One of your monitors needs a look." if problem
+            else f"{e(_phrase(noun)).capitalize()} just hit your condition.")
     footer = " ".join(_footer_lines(payload))
 
     return f"""<div style="margin:0;padding:0;background:#f3f4f6;">
@@ -397,7 +443,7 @@ def render_html(payload):
 <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="max-width:520px;background:#ffffff;border-radius:10px;padding:28px 26px;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Helvetica,Arial,sans-serif;color:#111827;">
 <tr><td>
 <div style="font-size:12px;letter-spacing:.08em;text-transform:uppercase;color:{accent};font-weight:700;">{e(headline)}</div>
-<div style="margin-top:14px;font-size:15px;color:#374151;">Hi {e(who) or 'there'} &mdash; {lead}</div>
+<div style="margin-top:14px;font-size:15px;color:#374151;">Hi {e(who) or 'there'}{f", {e(assistant)} here!" if assistant else ""} {lead}</div>
 {f'<div style="margin-top:14px;font-size:17px;font-weight:600;line-height:1.35;">{e(thing)}</div>' if thing else ''}
 {big}{conf_html}{btn}{advice_html}
 <div style="margin-top:26px;padding-top:16px;border-top:1px solid #e5e7eb;font-size:12px;color:#9ca3af;line-height:1.6;">{e(footer)}</div>

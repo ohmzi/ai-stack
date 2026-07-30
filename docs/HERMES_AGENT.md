@@ -201,6 +201,17 @@ plain one guarantees that a watcher which did not understand it still delivers s
 watcher drops the plain line for any recipient whose payload it did understand, so nothing arrives
 twice.
 
+**The assistant introduces itself.** `Hi ohmz, Ohmz AI here! …` — because these texts arrive from
+a mail-to-SMS gateway, so the handset shows an email address the user has no reason to recognise.
+Naming the assistant answers the first question a text from an unknown sender raises, which is what
+those characters buy. The name is configured (`ASSISTANT_NAME`, default "Ohmz AI") and injected at
+delivery, so renaming it never means editing a job. It is deliberately absent from the email
+subject: those first ~45 characters are the notification preview, and the sender is already shown
+there.
+
+When the 140 characters run out, the personal greeting is dropped **before** the identity — on a
+text from an address you don't recognise, "who is this" beats "hello by name".
+
 **The item names itself.** `item` comes from the page's own `<title>`, cut to its first clause and
 stripped of the site name — "Zakkart 2-Pack Cat Scratching Board, 65cm Tall Cardboard L Shape
 Vertical Cat Scratchers for Indoor Cats" becomes something a person recognises on a lock screen. It

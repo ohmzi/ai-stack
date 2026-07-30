@@ -73,6 +73,10 @@ CONTACTS = os.environ.get("ALERT_CONTACTS",
 LEGACY_CONTACTS = os.path.expanduser("~/.hermes/alert_contacts.json")
 OWUI_DB = os.environ.get("OWUI_DB", "/volume1/docker/openwebui/config/webui.db")
 TIMEOUT = 20
+# How the assistant introduces itself in an alert. Override with ASSISTANT_NAME in the env file.
+# It exists because these texts arrive from a mail-to-SMS gateway, so the handset shows an email
+# address rather than a name — an unintroduced message from an unknown address reads as spam.
+DEFAULT_ASSISTANT = "Ohmz AI"
 
 
 def load_conf():
@@ -459,6 +463,7 @@ def publish_profile(path=None):
         "email_from": conf.get("SMTP_FROM") or conf.get("SMTP_USER"),
         "sms_char_limit": 140,
         "sms_strips_links": True,
+        "assistant_name": conf.get("ASSISTANT_NAME", DEFAULT_ASSISTANT),
     }
     try:
         os.makedirs(os.path.dirname(path), exist_ok=True)
@@ -538,9 +543,13 @@ def send_alert(handle, message, subject=None, job=None, job_id=None, when=None, 
     email, phone = resolve(handle, conf)
     ok, notes = False, []
     tpl = _templates() if payload else None
-    if tpl and phone:
-        # So the email can say where the text went without the job having to know.
-        payload = dict(payload, texted_to=phone)
+    if tpl:
+        # Injected here rather than carried by the job: the assistant's name is a property of this
+        # deployment, not of any one monitor, so renaming it must not mean editing every job.
+        payload = dict(payload, assistant=conf.get("ASSISTANT_NAME", DEFAULT_ASSISTANT))
+        if phone:
+            # So the email can say where the text went without the job having to know.
+            payload["texted_to"] = phone
 
     if "sms" in channels:
         if not phone:

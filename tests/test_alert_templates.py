@@ -124,13 +124,69 @@ def main():
     for kind in ("unreachable", "blocked", "no_value"):
         p = dict(BASE, kind=kind, error="HTTP 500")
         sms, plain = t.render_sms(p), t.render_plain(p)
-        check(f"{kind}: sms flags it as needing attention", "heads up" in sms, sms)
+        check(f"{kind}: sms flags it as needing attention", "heads up" in sms.lower(), sms)
         check(f"{kind}: sms does not claim the condition was met",
-              "target" not in sms and "tracking -" in sms, sms)
+              "target" not in sms and "under your" not in sms, sms)
         check(f"{kind}: the email says what to do next",
               any(w in plain for w in ("Double-check", "Ask me")), plain)
     check("a result kind carries no error advice",
           "Double-check" not in t.render_plain(dict(BASE, kind="price_drop", value=1.0)))
+
+    print("--- the assistant introduces itself (the sender is an unrecognised address) ---")
+    # These texts arrive from a mail-to-SMS gateway, so the handset shows an email address the user
+    # has no reason to recognise. Naming the assistant answers the first question a text from an
+    # unknown sender raises, which is what those characters buy.
+    p = dict(BASE, kind="price_drop", value=46.99, target=50.0, assistant="Ohmz AI")
+    sms = at.sms_body(t.render_sms(p))
+    check("the text says who is speaking", "Ohmz AI here!" in sms, sms)
+    check("...after greeting the user by name", sms.startswith("Hi ohmz, Ohmz AI here!"), sms)
+    check("...and still fits one segment", len(sms) <= 140, f"{len(sms)}: {sms}")
+    check("the email says it too", "Ohmz AI here!" in t.render_plain(p), t.render_plain(p)[:60])
+    check("...and the html", "Ohmz AI here!" in t.render_html(p))
+    # The subject's first ~45 characters are the notification preview; an identity there would
+    # push the number out of the window for no gain, since the sender is already shown.
+    check("the subject spends no characters on it", "Ohmz AI" not in t.render_subject(p),
+          t.render_subject(p))
+    # Configured, not hard-coded.
+    p2 = dict(p, assistant="Homelab Bot")
+    check("the name is whatever the deployment configured",
+          "Homelab Bot here!" in t.render_sms(p2), t.render_sms(p2))
+    p3 = dict(p); p3.pop("assistant")
+    check("no name configured -> no identity clause, not an empty one",
+          "here!" not in t.render_sms(p3), t.render_sms(p3))
+    check("...and the greeting still works", t.render_sms(p3).startswith("Hi ohmz, "))
+
+    print("--- when space runs out, identity outranks the personal greeting ---")
+    # On a text from an address the user does not recognise, "who is this" beats "hello by name".
+    long_item = "Ultra Premium Extra Large Heavy Duty Stainless Steel Multi Function Kitchen Thing"
+    p = dict(BASE, kind="price_drop", item=long_item * 2, value=46.99, target=50.0,
+             assistant="Ohmz AI", confidence="unconfirmed")
+    sms = at.sms_body(t.render_sms(p))
+    check("fits one segment", len(sms) <= 140, f"{len(sms)}: {sms}")
+    check("the pointer to the email survives everything", sms.rstrip().endswith("in email."), sms)
+    check("the measurement survives", "46.99" in sms, sms)
+
+    print("--- the noun matches what is actually being watched ---")
+    # A message that calls a flight a "listing" reads like it did not understand the request.
+    for kind, want in [("fare", "fare"), ("inventory", "stock level"),
+                       ("availability", "availability"), ("price_drop", "listing"),
+                       ("unreachable", "page"), ("change", "task you assigned me"),
+                       ("threshold", "task you assigned me")]:
+        got = t._noun({"kind": kind})
+        check(f"{kind} -> {want!r}", got == want, got)
+    # With no item name the noun is what the user sees, so it has to read as a sentence.
+    sms = t.render_sms({"to": "ohmz", "kind": "change", "assistant": "Ohmz AI"})
+    check("a generic watch reads naturally", "task you assigned me has changed" in sms, sms)
+
+    print("--- numbers are formatted the way their unit is written ---")
+    for value, unit, want in [(46.99, "$", "$46.99"), (91, "%", "91%"), (91.5, "%", "91.5%"),
+                              (612.0, "$", "$612.00"), (46.99, "CAD", "46.99 CAD"),
+                              (3, None, "3"), (1234.5, "$", "$1,234.50")]:
+        check(f"money({value!r}, {unit!r}) -> {want!r}", t.money(value, unit) == want,
+              t.money(value, unit))
+    check("a CPU threshold does not read as currency",
+          "91%" in t.render_sms(dict(BASE, kind="threshold", value=91, target=85, unit="%",
+                                     op="over")))
 
     print("--- confidence is carried onto every surface ---")
     p = dict(BASE, kind="price_drop", value=46.99, target=50.0, confidence="unconfirmed",
