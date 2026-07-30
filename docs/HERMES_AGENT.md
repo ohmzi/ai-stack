@@ -188,6 +188,73 @@ and publishing the profile from the unprivileged delivery timer silently failed 
 
 ### What an alert actually says
 
+A job emits a **payload** describing what happened; `scripts/alert_templates.py` turns it into the
+three surfaces. The job no longer builds sentences, and the transports no longer slice log lines.
+
+```
+ALERT(ohmz): Hi ohmz, the listing you're tracking - Zakkart 2-Pack Cat Scratching Board - is $46.99, under your $50.00 target. Link in email.
+ALERT_DATA: {"kind":"price_drop","item":"Zakkart 2-Pack Cat Scratching Board","value":46.99,"prev":49.99,"target":50.0,...}
+```
+
+**Both lines, deliberately.** The structured one produces the good text and the laid-out email; the
+plain one guarantees that a watcher which did not understand it still delivers something. The
+watcher drops the plain line for any recipient whose payload it did understand, so nothing arrives
+twice.
+
+**The item names itself.** `item` comes from the page's own `<title>`, cut to its first clause and
+stripped of the site name — "Zakkart 2-Pack Cat Scratching Board, 65cm Tall Cardboard L Shape
+Vertical Cat Scratchers for Indoor Cats" becomes something a person recognises on a lock screen. It
+is remembered in the monitor's state, so a later *failure* alert can still say what it was watching.
+No model is involved: a generated product name is a fabrication with extra steps.
+
+Kinds: `price_drop` `price_rise` `back_in_stock` `out_of_stock` `fare` `inventory` `availability`
+`threshold` `change`, plus the problem kinds `unreachable` `blocked` `no_value` and the closing
+`recovered`. An **unknown kind renders generically rather than raising** — a future job type reaches
+the user before anyone updates the file.
+
+The kind is chosen by keyword rules on the user's own words ("back in stock", "fare", "under 50"),
+and only when the rules cannot tell does the agent pick one at job creation. That is the whole
+extent of the model's involvement: it labels a category, once, and never supplies a number.
+
+Decisions worth keeping:
+
+- **The monitor name leads the email; the item name leads the text.** With several jobs running,
+  *what* got cheap is the first question.
+- **Confidence is printed on every run, including good ones** — if it only appeared on doubtful
+  readings, its absence would need interpreting, and an omission would be indistinguishable from a
+  bug. The text shows `(unconfirmed)`; the email explains *why* in full, because a caveat on a lock
+  screen gets one glance and the measurement must not be pushed into truncation to make room.
+- **Degradation has a fixed order.** Over 140 characters: shorten the item name, then drop the
+  greeting, and never the pointer to the email — it is the only thing telling a first-time user
+  where the link went. Rendering folds to ASCII *before* measuring, because the transport folds on
+  the way out and measuring the prettier string let the transport's own truncation eat the pointer.
+- **A page title is untrusted input.** It is HTML-escaped into the email; markup in a product name
+  cannot inject.
+- **The ledger records the body that was SENT**, not the one that was meant.
+
+### When the monitor itself breaks
+
+A monitor that silently stops working is worse than one that never existed, because it is trusted.
+Three failure shapes each get their own message and their own advice:
+
+| shape | detected as | told after |
+|---|---|---|
+| dead URL | 4xx, or a host that no longer resolves | 2 consecutive |
+| site blocking checks | a robot wall instead of the page | 2 consecutive |
+| transient | 5xx, timeout, reset | 3 consecutive |
+| **loads, but no value readable** | page fetched, extractor finds nothing | 3 consecutive |
+
+A single failure never alerts — blips happen, and a system that texts about them gets muted. After
+the threshold it alerts **once per outage**, then stays quiet until it recovers; a broken URL texting
+every 6 hours for a week trains the user to ignore the channel. Recovery closes the loop, unless the
+condition also fired on that run — in which case one message covers both, since the target alert
+already proves the monitor works.
+
+Status alone cannot decide this: a dead amazon.ca product returns **HTTP 500**, not 404. So 4xx and
+an unresolvable host are permanent; everything else gets more patience.
+
+### What an alert actually says
+
 | surface | shape |
 |---|---|
 | text | `amazon B0DP6D3TRB price: 46.99, under your 50.00 target (unconfirmed) Link in email.` |
