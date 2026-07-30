@@ -112,7 +112,10 @@ def main():
 
     print("--- a FINISHED job must not block a new one (live failure 37d9907d5dfa) ---")
     brief = mod.Pipe._HERMES_BRIEF
-    for phrase in ("ACTIVE and still has runs left", "completed, exhausted, disabled",
+    for phrase in ("NEVER create a job with --no-agent", "never printed",
+                   "'every Nm'", "ONE-SHOT that runs once and deletes itself",
+                   "repeat 4", "WITHOUT a fake browser User-Agent",
+                   "ACTIVE and still has runs left", "completed, exhausted, disabled",
                    "create a NEW one instead", "already running"):
         check(f"rule 6 covers {phrase!r}", phrase in brief)
     check("brief states alerts are configured (agent claimed otherwise)",
