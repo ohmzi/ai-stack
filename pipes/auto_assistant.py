@@ -1731,6 +1731,10 @@ class Pipe:
             return
         ctx = (f"Request context: the requesting user is '{uname}'. If this job needs to "
                f"alert them, the ALERT line's recipient is '{uname}'.")
+        # Snapshot the scheduler BEFORE delegating, so creation can be verified against ground
+        # truth after the stream rather than trusting the agent's narration (it has claimed jobs
+        # it never created). None when verification is off — e.g. list/cancel requests.
+        before = self._hermes_jobs() if verify_creation else None
         payload = {"model": "hermes-agent", "stream": True,
                    "messages": [{"role": "system", "content": self._HERMES_BRIEF + "\n" + ctx},
                                 {"role": "user", "content": text}]}
@@ -1750,9 +1754,18 @@ class Pipe:
                         data = line[5:].strip()
                         if data == b"[DONE]":
                             if verify_creation:
-                                after = self._hermes_jobs()
-                                new_jobs = ([j for i, j in after.items() if i not in before]
-                                            if (after is not None and before is not None) else None)
+                                # The agent's cronjob write is not instantly visible in /api/jobs —
+                                # polling at [DONE] raced it and cried wolf on a job that DID exist.
+                                # Retry briefly: a real creation surfaces within a second or two, a
+                                # fabricated one never does.
+                                new_jobs = None
+                                for _ in range(6):
+                                    after = self._hermes_jobs()
+                                    if after is not None and before is not None:
+                                        new_jobs = [j for i, j in after.items() if i not in before]
+                                        if new_jobs:
+                                            break
+                                    await asyncio.sleep(1)
                                 if new_jobs:
                                     j = new_jobs[0]
                                     sched = j.get("schedule_display") or str(j.get("schedule", "?"))
