@@ -35,29 +35,29 @@ def check(label, ok, detail=""):
 
 def main():
     print("--- conforming output ---")
-    log, alerts = hd.parse_output(
+    log, alerts, _d = hd.parse_output(
         "# Job\nprompt says: LOG: <summary> and ALERT(x): <msg>\n"
         "## Response\nFetched fine.\nLOG: £51.77, unchanged\nALERT(ohmz2): below £60 — £51.77\n")
     check("LOG extracted", log == "£51.77, unchanged", repr(log))
     check("ALERT extracted with recipient", alerts == [("ohmz2", "below £60 — £51.77")], repr(alerts))
 
     print("--- the job's own prompt must not trigger deliveries ---")
-    log, alerts = hd.parse_output(
+    log, alerts, _d = hd.parse_output(
         "# Job\nALERT(evil): from the prompt section\nLOG: from the prompt\n"
         "## Response\nLOG: real one\n")
     check("prompt-section ALERT ignored", alerts == [], repr(alerts))
     check("prompt-section LOG ignored", log == "real one", repr(log))
 
     print("--- missing LOG falls back, visibly ---")
-    log, alerts = hd.parse_output("## Response\nThe price is £51.77 today.\nNothing else.\n")
+    log, alerts, _d = hd.parse_output("## Response\nThe price is £51.77 today.\nNothing else.\n")
     check("fallback still carries the run's first line", "The price is £51.77" in log, repr(log))
     check("fallback is marked as unverified, not presented as a result",
           "DID NOT FOLLOW THE OUTPUT PROTOCOL" in log and "unverified" in log, repr(log))
-    log, _ = hd.parse_output("## Response\n\n")
+    log, _, _d = hd.parse_output("## Response\n\n")
     check("empty response -> no log", log is None, repr(log))
 
     print("--- recipient validation, and back-compat with the legacy alerts- prefix ---")
-    _, alerts = hd.parse_output(
+    _, alerts, _d = hd.parse_output(
         "## Response\nALERT(ohmz2): bare handle\nALERT(UPPER): bad chars\n"
         "ALERT(alerts-ok_1): legacy prefix\n")
     check("bare handle accepted", ("ohmz2", "bare handle") in alerts, repr(alerts))
@@ -71,7 +71,7 @@ def main():
     # perfectly and a real phone received "<what happened, with the number>   (ONLY in a run
     # where the user's alert condition holds)". Syntax cannot distinguish this from a real
     # alert — only the placeholder can.
-    log, alerts = hd.parse_output(
+    log, alerts, _d = hd.parse_output(
         "## Response\nLOG: checked\n"
         "ALERT(ohmz): <what happened, with the number>   (ONLY in a run where the user's "
         "alert condition holds)\n")
@@ -129,10 +129,19 @@ def main():
 
     print("--- alert flood capped (injection hygiene) ---")
     body = "## Response\n" + "".join(f"ALERT(a): spam {i}\n" for i in range(10))
-    _, alerts = hd.parse_output(body)
+    _, alerts, _d = hd.parse_output(body)
     check("at most 3 alerts per run", len(alerts) == 3, str(len(alerts)))
 
     print("--- send_alert's real contract (a stub with the wrong shape hid a live crash) ---")
+    # Checked by inspection rather than by waiting for a TypeError mid-run: when a kwarg is added
+    # to the transport, every stub in this file must grow it too, and the failure should say so in
+    # one line instead of surfacing as an unrelated crash three sections later. It has drifted
+    # three times in one day.
+    import inspect
+    _real = inspect.signature(hd.send_alert).parameters
+    check("send_alert's parameters are the ones the stubs mimic",
+          list(_real) == ["recipient", "message", "job", "job_id", "when", "payload"],
+          list(_real))
     # 2026-07-30: the retry queue did `ok, notes = send_alert(...)` while the real wrapper returned
     # a bare bool. Every test passed, because the tests replaced send_alert with a 2-tuple version —
     # the double was more correct than the code. The SMS went out and the watcher then died with
@@ -142,13 +151,13 @@ def main():
     fake = types.ModuleType("alert_transports")
     # Signature mirrors production exactly — kwargs included. This stub going stale is precisely
     # what these checks exist to catch, and it caught itself when job/job_id/when were added.
-    fake.send_alert = lambda r, m, job=None, job_id=None, when=None: (True, ["sms sent", "email sent"])
+    fake.send_alert = lambda r, m, job=None, job_id=None, when=None, payload=None: (True, ["sms sent", "email sent"])
     sys.modules["alert_transports"] = fake
     got = hd.send_alert("ohmz", "target met")
     check("returns a 2-tuple, not a bool", isinstance(got, tuple) and len(got) == 2, repr(got))
     check("unpacks the way attempt_alert calls it", got[0] is True and "sms sent" in got[1], repr(got))
 
-    fake.send_alert = lambda r, m, job=None, job_id=None, when=None: (
+    fake.send_alert = lambda r, m, job=None, job_id=None, when=None, payload=None: (
         (_ for _ in ()).throw(RuntimeError("smtp down")))
     got = hd.send_alert("ohmz", "target met")
     check("a raising transport still returns the pair", isinstance(got, tuple) and len(got) == 2, repr(got))
@@ -163,7 +172,7 @@ def main():
         hd.ALERT_LEDGER = os.path.join(td, "ledger.jsonl")
         calls = {"n": 0}
 
-        def failing(recipient, message, job=None, job_id=None, when=None):
+        def failing(recipient, message, job=None, job_id=None, when=None, payload=None):
             calls["n"] += 1
             return False, [f"sms FAILED: simulated #{calls['n']}"]
         hd.send_alert = failing
@@ -202,7 +211,7 @@ def main():
               str([r["attempt"] for r in rows]))
 
         # Success path: delivered stops the queue immediately.
-        hd.send_alert = lambda r, m, job=None, job_id=None, when=None: (True, ["sms sent"])
+        hd.send_alert = lambda r, m, job=None, job_id=None, when=None, payload=None: (True, ["sms sent"])
         e2 = {"job": "j2", "recipient": "ohmz", "message": "m", "created": "now",
               "attempts": [], "status": "pending", "next_attempt": 0}
         hd.process_alert_queue({"k2": e2})

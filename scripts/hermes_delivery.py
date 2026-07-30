@@ -56,10 +56,18 @@ RETRY_AFTER_S = 300       # 5 minutes between attempts
 
 ALERT_RE = re.compile(r"^ALERT\((?:alerts-)?([a-z0-9_-]+)\):\s*(.+)$", re.M)
 LOG_RE = re.compile(r"^LOG:\s*(.+)$", re.M)
+# A structured alert. Jobs that can describe WHAT happened emit this alongside the plain sentence,
+# and it is what produces a well-written text and a laid-out email instead of a sliced-up log line.
+# Both forms are emitted so that a watcher which did not understand this line would still deliver
+# something — the plain line is dropped below whenever the structured one was understood.
+ALERT_DATA_RE = re.compile(r"^ALERT_DATA:\s*(\{.*\})\s*$", re.M)
+
+
+RECIPIENT_RE = re.compile(r"^[a-z0-9_-]+$")
 
 
 def parse_output(text):
-    """(log_line, [(topic, message), ...]) from one run's markdown output."""
+    """(log_line, [(who, message), ...], [(who, payload), ...]) from one run's markdown output."""
     body = text.split("## Response", 1)[-1]
     m = LOG_RE.search(body)
     if m:
@@ -73,7 +81,20 @@ def parse_output(text):
         log = (("⚠️ RUN DID NOT FOLLOW THE OUTPUT PROTOCOL (no LOG line) — treat the text below as "
                 "unverified model output, not a measurement: " + lines[0][:160])
                if lines else None)
+    payloads = []
+    for raw in ALERT_DATA_RE.findall(body)[:3]:      # cap: injection
+        try:
+            d = json.loads(raw)
+        except Exception:
+            continue
+        who = str(d.get("to") or "").strip().lower()
+        if RECIPIENT_RE.match(who):
+            payloads.append((who, d))
+    structured = {who for who, _ in payloads}
     found = [(who, msg.strip()) for who, msg in ALERT_RE.findall(body)][:3]  # cap: injection
+    # Drop the plain line for any recipient whose structured payload was understood — otherwise the
+    # same event is delivered twice, seconds apart.
+    found = [(who, msg) for who, msg in found if who not in structured]
     alerts = [a for a in found if not is_template(a[1])]
     if len(alerts) < len(found):
         # Never drop it quietly — a suppressed alert must be as visible as a delivered one, or a
@@ -81,7 +102,7 @@ def parse_output(text):
         note = ("⚠️ suppressed %d un-substituted ALERT template(s) — the run echoed the protocol "
                 "instead of filling it in; NOT sent" % (len(found) - len(alerts)))
         log = f"{log} | {note}" if log else note
-    return log, alerts
+    return log, alerts, payloads
 
 
 # A model that echoes the protocol template instead of filling it in produces a syntactically
@@ -128,7 +149,18 @@ def post_channel(summary, job_name):
         return r.status == 200
 
 
-def send_alert(recipient, message, job=None, job_id=None, when=None):
+def _plain(payload):
+    """A readable one-liner for a structured payload — the channel log and the ledger both want a
+    sentence, not JSON, and it is the fallback if template rendering ever fails."""
+    try:
+        sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+        import alert_templates
+        return alert_templates.render_sms(payload, limit=10_000)
+    except Exception:
+        return f"{payload.get('kind', 'alert')} on {payload.get('url') or 'your monitor'}"
+
+
+def send_alert(recipient, message, job=None, job_id=None, when=None, payload=None):
     """Deliver a personal alert via the configured transports (SMS + SMTP email).
 
     Returns ``(ok, notes)`` — ok is True if ANY channel delivered, notes are the per-channel
@@ -142,7 +174,7 @@ def send_alert(recipient, message, job=None, job_id=None, when=None):
     try:
         sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
         from alert_transports import send_alert as _send
-        ok, notes = _send(recipient, message, job=job, job_id=job_id, when=when)
+        ok, notes = _send(recipient, message, job=job, job_id=job_id, when=when, payload=payload)
         return bool(ok), list(notes)
     except Exception as e:
         print(f"  alert[{recipient}] transport error: {e}", file=sys.stderr)
@@ -192,7 +224,7 @@ def attempt_alert(key, entry):
     n = len(entry["attempts"]) + 1
     ok, notes = send_alert(entry["recipient"], entry["message"],
                            job=entry.get("job"), job_id=entry.get("job_id"),
-                           when=entry.get("created"))
+                           when=entry.get("created"), payload=entry.get("payload"))
     rec = {"at": _iso(_now()), "attempt": n, "of": MAX_ATTEMPTS, "job": entry["job"],
            "recipient": entry["recipient"], "ok": bool(ok), "notes": notes,
            "message": entry["message"][:200]}
@@ -284,9 +316,9 @@ def main():
     for f in pending:
         job_id = os.path.basename(os.path.dirname(f))
         job_name = titles.get(job_id, job_id)
-        log, alerts = parse_output(open(f).read())
+        log, alerts, payloads = parse_output(open(f).read())
         if a.dry_run:
-            print(f"{f}: LOG={log!r} ALERTS={alerts}")
+            print(f"{f}: LOG={log!r} ALERTS={alerts} DATA={[p for _, p in payloads]}")
             continue
         st = state.setdefault(f, {"log": False, "alerts": False})
         # Each leg retries independently — a failed push must never re-post the channel log.
@@ -304,6 +336,16 @@ def main():
                 if k not in alert_state:
                     alert_state[k] = {"job": job_name, "job_id": job_id, "recipient": who,
                                       "message": msg, "created": _iso(_now()), "attempts": [],
+                                      "status": "pending", "next_attempt": 0}
+            for who, data in payloads:
+                k = alert_key(f, who, json.dumps(data, sort_keys=True))
+                if k not in alert_state:
+                    # Fill in what the job could not know about delivery itself, so the rendered
+                    # email can say "a text went to ..." truthfully.
+                    data.setdefault("monitor", job_name)
+                    alert_state[k] = {"job": job_name, "job_id": job_id, "recipient": who,
+                                      "message": _plain(data), "payload": data,
+                                      "created": _iso(_now()), "attempts": [],
                                       "status": "pending", "next_attempt": 0}
             st["alerts"] = True
         print(f"{os.path.basename(f)}: log={'y' if st['log'] else 'RETRY'} "

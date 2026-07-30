@@ -276,7 +276,7 @@ def mail_domain_status(addr, timeout=6):
     return "dead", "domain has no MX and no A record — mail cannot be delivered"
 
 
-def send_email(to_addr, subject, body, conf):
+def send_email(to_addr, subject, body, conf, html=None):
     host, user, pw = conf.get("SMTP_HOST"), conf.get("SMTP_USER"), conf.get("SMTP_PASS")
     if not (host and user and pw):
         raise RuntimeError("smtp not configured")
@@ -286,6 +286,11 @@ def send_email(to_addr, subject, body, conf):
     msg["To"] = to_addr
     msg["Subject"] = subject
     msg.set_content(body)
+    # multipart/alternative: the plain part is what a carrier gateway and a text-only client read,
+    # the HTML part is what a normal mail client shows. Plain is set FIRST so it stays the
+    # fallback rather than the payload.
+    if html:
+        msg.add_alternative(html, subtype="html")
     # send_message returns {recipient: (code, reason)} for anyone the server REFUSED. An empty
     # dict is the only proof of acceptance we can get; treat a refusal as a failure so the retry
     # queue sees it rather than logging a success the server never granted.
@@ -507,14 +512,35 @@ def alert_email_body(message, job=None, job_id=None, when=None, phone=None):
     return "\n".join(lines)
 
 
-def send_alert(handle, message, subject=None, job=None, job_id=None, when=None):
-    """Fan out one alert. Returns (ok, [notes]) — ok is True if ANY channel delivered."""
+def _templates():
+    """alert_templates, imported lazily and guarded — a broken template module must degrade to the
+    plain sentence, not stop the alert. Delivery outranks presentation."""
+    try:
+        sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+        import alert_templates
+        return alert_templates
+    except Exception:
+        return None
+
+
+def send_alert(handle, message, subject=None, job=None, job_id=None, when=None, payload=None):
+    """Fan out one alert. Returns (ok, [notes]) — ok is True if ANY channel delivered.
+
+    With a `payload` the three surfaces are rendered from structured data by alert_templates, which
+    is what makes a text read "Hi ohmz, the listing you're tracking - Zakkart Cat Scratching Board
+    - is $46.99, under your $50.00 target" instead of a sliced-up log line. Without one, the plain
+    `message` is used exactly as before, so jobs that emit only a sentence keep working.
+    """
     conf = load_conf()
     if not conf:
         return False, ["no transport configured (~/.hermes/alert_transports.env missing)"]
     channels = [c.strip() for c in conf.get("ALERT_CHANNELS", "sms,email").split(",") if c.strip()]
     email, phone = resolve(handle, conf)
     ok, notes = False, []
+    tpl = _templates() if payload else None
+    if tpl and phone:
+        # So the email can say where the text went without the job having to know.
+        payload = dict(payload, texted_to=phone)
 
     if "sms" in channels:
         if not phone:
@@ -524,7 +550,8 @@ def send_alert(handle, message, subject=None, job=None, job_id=None, when=None):
                 # The ledger recorded the ORIGINAL alert text, so a text that arrived mangled by
                 # link-stripping looked flawless in the record. Log the body that actually went
                 # out — it is the only copy of what the handset received.
-                body = sms_body(message, job)
+                body = sms_body(tpl.render_sms(payload) if tpl else message,
+                                None if tpl else job)
                 ref = send_sms(phone, body, conf)
                 notes.append(f"sms sent to {phone} ({ref}) body={body!r}")
                 ok = True
@@ -543,8 +570,13 @@ def send_alert(handle, message, subject=None, job=None, job_id=None, when=None):
                 notes.append(f"email NOT SENT to {email}: {detail}")
             else:
                 try:
-                    send_email(email, subject or alert_subject(message, job),
-                               alert_email_body(message, job, job_id, when, phone), conf)
+                    if tpl:
+                        send_email(email, subject or tpl.render_subject(payload),
+                                   tpl.render_plain(payload), conf,
+                                   html=tpl.render_html(payload))
+                    else:
+                        send_email(email, subject or alert_subject(message, job),
+                                   alert_email_body(message, job, job_id, when, phone), conf)
                     if status == "implicit":
                         notes.append(f"email sent to {email} — ⚠️ UNVERIFIABLE: {detail}")
                     else:
