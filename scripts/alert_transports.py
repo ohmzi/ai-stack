@@ -185,15 +185,20 @@ def send_email(to_addr, subject, body, conf):
     msg["To"] = to_addr
     msg["Subject"] = subject
     msg.set_content(body)
+    # send_message returns {recipient: (code, reason)} for anyone the server REFUSED. An empty
+    # dict is the only proof of acceptance we can get; treat a refusal as a failure so the retry
+    # queue sees it rather than logging a success the server never granted.
     if port == 465:
         with smtplib.SMTP_SSL(host, port, timeout=TIMEOUT) as s:
             s.login(user, pw)
-            s.send_message(msg)
+            refused = s.send_message(msg)
     else:
         with smtplib.SMTP(host, port, timeout=TIMEOUT) as s:
             s.starttls()
             s.login(user, pw)
-            s.send_message(msg)
+            refused = s.send_message(msg)
+    if refused:
+        raise RuntimeError(f"server refused recipient(s): {refused}")
     return True
 
 

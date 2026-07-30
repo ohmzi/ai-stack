@@ -86,6 +86,28 @@ priority and a settings audit. The failure lived in a layer this stack cannot in
 equivalent layer: the carrier either delivers a text or returns an error code.
 
 
+
+### Alert delivery is verified, retried, and recorded
+
+Every alert goes through a queue rather than a single fire-and-forget send:
+
+- **Verified** — SMTP `send_message` returns the recipients the server *refused*; a non-empty
+  result is treated as a failure, so a "sent" is only logged when the server actually accepted it.
+  (Beyond that hop — carrier to handset — nothing is verifiable by anyone; that limit is real.)
+- **Retried** — up to `MAX_ATTEMPTS` (4: the first try plus 3 retries) spaced `RETRY_AFTER_S`
+  (5 minutes) apart, drained by the same 1-minute watcher tick. Backoff is honoured; a delivered
+  alert stops immediately; a failed one is never retried forever.
+- **Recorded** — every attempt appends to `~/.hermes/cron/output/alert_ledger.jsonl`
+  (append-only, never rewritten) with timestamp, attempt number, recipient, per-channel result and
+  the exact error. The live queue is `.alerts.json` beside it.
+
+```bash
+python3 scripts/hermes_delivery.py --ledger   # history + what is still pending
+```
+
+When an alert exhausts its attempts, a loud notice goes to the background-tasks channel with the
+last error — an undeliverable alert is never silent.
+
 ### Follow-ups in a task conversation
 
 Every hermes reply ends with an invisible `<!--bg-task-->` marker. A short next message ("yes
