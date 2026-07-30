@@ -108,6 +108,67 @@ python3 scripts/hermes_delivery.py --ledger   # history + what is still pending
 When an alert exhausts its attempts, a loud notice goes to the background-tasks channel with the
 last error — an undeliverable alert is never silent.
 
+### Price monitoring is deterministic code, not a per-run scraper
+
+`scripts/price_watch.py` fetches, extracts, compares against saved state and prints the LOG/ALERT
+lines itself. Jobs run it via `--script <name>.py --no-agent`, so **no model runs at all** — there is
+no step at which a price can be invented.
+
+It replaced the model-writes-a-scraper approach after that approach failed three separate ways in
+production: a crash inside its own regex, an ALERT assigned to a variable it never printed, and
+finally a run on a 1.5 MB Amazon page that abandoned the output protocol entirely and emitted
+marketing prose containing an **invented promo code** beside a price it had never read. A price check
+is arithmetic on a fetched string; giving it a 34B model added a hallucination surface and nothing
+else.
+
+Extraction is confidence-ranked and says which rank it used:
+
+| Rank | Source |
+|---|---|
+| high | JSON-LD `price`, `og:price:amount`, `itemprop="price"`, known per-site containers |
+| low | a bare currency match in visible text, or a marketplace-offer price |
+
+A low-confidence reading is reported with its caveat inline; `--require-confidence` refuses to alert
+on one at all. `--selector '<regex with one group>'` pins an exact element when a site needs it.
+
+**Amazon serves rotating page variants, and honesty about which one you got is the whole game.**
+On the common variant `corePrice_feature_div` ships **empty** — the buy box is written in by
+JavaScript — leaving only the "New (N) from $X" marketplace offer, a real number but not the buy-box
+price, reported as `amazon-offer-listing` / **low**. On other fetches of the *same URL* Amazon embeds
+`"price"` and `"priceAmount"` as JSON, which reads **high**. So `best_candidates()` retries a few
+times and takes a high-confidence variant when one appears, rather than reporting whichever variant
+luck supplied. Both variants agreed on $46.99; the model that originally "read" this page had
+reported $49.99, a number present in neither.
+
+Counter-intuitive and verified twice on this host: amazon.ca serves the full page to a plain urllib
+request and a **robot wall to a spoofed Chrome User-Agent**. Do not "fix" the fetch by adding one.
+
+```bash
+python3 scripts/price_watch.py --selftest     # runs both live reference pages
+```
+
+### Texts must not contain links
+
+Carrier email-to-SMS gateways **silently drop messages containing URLs**. There is no bounce, no
+error code, and SMTP reports success — the text simply never arrives. Measured 2026-07-30: two price
+alerts carrying an amazon.ca link were accepted by Gmail and never delivered, while a link-free test
+sent minutes later arrived immediately.
+
+Because the failure is invisible, it cannot be retried into working; it has to be avoided.
+`sms_body()` reduces any URL to its bare host and caps the message at one segment. **Email always
+carries the full text with the link intact** — which is the division of labour the two channels
+already had: SMS is the buzz, email is the record.
+
+### Un-substituted alert templates are never delivered
+
+A model that echoes the protocol example instead of filling it in produces a syntactically perfect
+ALERT line. One reached a real phone as
+`<what happened, with the number>   (ONLY in a run where the user's alert condition holds)`.
+Nothing downstream can distinguish that from a genuine alert, so the watcher drops any alert body
+still carrying an angle-bracket placeholder — and says so in the channel log, because a silently
+suppressed alert would make a broken job look like a calm one. Arithmetic (`price < 50`) is not
+mistaken for a placeholder; `tests/test_hermes_delivery.py` pins both directions.
+
 ### Follow-ups in a task conversation
 
 Every hermes reply ends with an invisible `<!--bg-task-->` marker. A short next message ("yes
