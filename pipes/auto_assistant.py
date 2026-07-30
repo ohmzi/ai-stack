@@ -539,6 +539,30 @@ class Pipe:
     _PHONE_DECLINE = re.compile(
         r"^\s*(?:no|nope|skip|later|don'?t|do not|email only|just email|no thanks?)\b", re.I)
 
+    # What kind of thing is being watched, decided from the user's own words. Rules first because
+    # they are instant, testable and right on the phrasings people actually use; anything they do
+    # not recognise is left to the agent, which picks from the same list at creation time. The
+    # model never supplies a NUMBER — only a category — so the hallucination surface stays closed.
+    _KIND_RULES = [
+        ("back_in_stock", r"\bback in stock\b|\bin stock\b|\brestock|\bavailable again\b"),
+        ("out_of_stock",  r"\bout of stock\b|\bsold out\b|\bruns out\b"),
+        ("fare",          r"\bfare\b|\bflight\b|\bairfare\b|\bticket price\b|\bround.?trip\b"),
+        ("inventory",     r"\binventory\b|\bhow many\b|\bunits? left\b|\bstock level\b|\bquantity\b"),
+        ("availability",  r"\bappointment\b|\breservation\b|\bslot\b|\bbooking\b|\bavailability\b"),
+        ("price_rise",    r"\b(?:goes?|rise|rises|climbs?|above|over|exceeds?)\s+(?:above|over|past)?\s*\$?\d"),
+        ("price_drop",    r"\bprice\b|\bcheaper\b|\bdiscount\b|\bdeal\b|\bon sale\b|"
+                          r"\b(?:below|under|less than|drops? to|drops? below)\b"),
+    ]
+
+    @classmethod
+    def _guess_kind(cls, text):
+        """The alert kind implied by a request, or None to let the agent decide."""
+        t = (text or "").lower()
+        for kind, pat in cls._KIND_RULES:
+            if re.search(pat, t):
+                return kind
+        return None
+
     @staticmethod
     def _norm_phone(raw, default_country="+1"):
         """-> E.164 or None. Mirrors scripts/alert_transports.normalize_phone; the pipe runs in a
@@ -1904,14 +1928,21 @@ class Pipe:
         "    ALERT(<username>): <what happened, with the number>   (ONLY in a run where the user's alert condition holds)\n"
         "Alerts ARE configured on this host: an ALERT line is delivered to the user as a text message AND an email, automatically. Never tell the user alerts are unconfigured.\n"
         "The LOG line is posted to the background-tasks channel automatically. A run with no ALERT line raises no alert.\n"
-        "5d. PRICE MONITORING — do NOT write your own scraper. This host ships a tested extractor; "
-        "make the job's prompt exactly:\n"
+        "5d. WATCHING A PAGE (price, stock, fare, availability) — do NOT write your own scraper. "
+        "This host ships a tested extractor; make the job's prompt exactly:\n"
         "    Run this terminal command and print its output verbatim as your entire response. Add nothing.\n"
-        "    python3 /home/ohmz/ai-stack/scripts/price_watch.py --url '<URL>' --state '<short_name>' --below <N> --alert-to <username>\n"
-        "The script fetches, extracts, compares against saved state and prints the LOG/ALERT lines "
-        "itself, so the run cannot invent a number. Use --above instead of --below for a rise. "
+        "    python3 /home/ohmz/ai-stack/scripts/price_watch.py --url '<URL>' --state '<short_name>' --below <N> --alert-to <username> --kind <kind> --monitor '<job name>' --schedule '<schedule>'\n"
+        "The script fetches, extracts, names the item from the page's own title, compares against "
+        "saved state and prints the alert lines itself, so the run cannot invent a number. Use "
+        "--above instead of --below for a rise. --kind sets how the message is worded (see the "
+        "request context for which to use). --monitor and --schedule only appear in the email, so "
+        "pass the job's real name and its human schedule. Add --unit for a non-dollar currency. "
         "This is still normal agent mode (rule 6b holds) — the agent runs a vetted command rather "
         "than generating extraction code per run.\n"
+        "5e. The extractor also reports its OWN failures: a dead URL, a site blocking automated "
+        "checks, and a page that still loads but no longer shows a value. Never add your own "
+        "error handling or retry logic around it — it already confirms a failure across runs "
+        "before telling the user, and alerts once per outage rather than every run.\n"
         "6. Before creating, call cronjob(action='list') and look at STATE, not just names. Only a job that is ACTIVE and still has runs left counts as a duplicate — say so and stop. A job that is completed, exhausted, disabled or has no next run is FINISHED: it will never run again, so create a NEW one instead of pointing at it. Never describe a finished job as 'already running'.\n"
         "6b. NEVER write your own script into a job and run it with --no-agent. A script YOU "
        "generate has no reasoning to recover when markup shifts, and its bugs fail silently — one "
@@ -1991,6 +2022,12 @@ class Pipe:
             return
         ctx = (f"Request context: the requesting user is '{uname}'. If this job needs to "
                f"alert them, the ALERT line's recipient is '{uname}'.")
+        kind = self._guess_kind(text)
+        ctx += (f" The request is a '{kind}' watch — pass --kind {kind}."
+                if kind else
+                " Choose --kind yourself from: price_drop, price_rise, back_in_stock, "
+                "out_of_stock, fare, inventory, availability, threshold, change — whichever "
+                "best describes what the user is watching for.")
         # Snapshot the scheduler BEFORE delegating, so creation can be verified against ground
         # truth after the stream rather than trusting the agent's narration (it has claimed jobs
         # it never created). None when verification is off — e.g. list/cancel requests.
