@@ -40,22 +40,44 @@ Proven end-to-end 2026-07-29 with a bounded demo (books.toscrape.com, every 2 m,
 posted "£51.77 (first run)", run 2 read the state file and posted "£51.77 (unchanged)", job then
 retired itself.
 
-## Personal alerts — transport slot, currently empty
+## Personal alerts — Twilio SMS + SMTP email
 
-Jobs already emit `ALERT(<username>): <message>` when a user's condition fires; the watcher parses
-and validates it. What is missing is a transport. **ntfy was built, verified, and removed on
-2026-07-30**: every server-side leg was proven working — publish, per-user auth, the APNs wake
-relay, and debug logs showing the phone fetching the message within one second of publish — yet iOS
-never rendered a banner, only silent list entries. A last hop nobody can own is not a notification
-system. SMS and email are being evaluated; whichever wins implements `send_alert()` in
-`scripts/hermes_delivery.py` and nothing else changes.
+A job that fires a condition emits `ALERT(<handle>): <message>`; the watcher routes it through
+`scripts/alert_transports.py`, which sends **both** a text and an email by default. SMS is the buzz
+(real text, real ringtone, no app, no OS notification settings involved); email is the record.
+`ALERT_CHANNELS` narrows it to one.
 
-Until then ALERT lines ride the channel post, flagged `⚠️ [alert]`, so a fired condition is visible
-rather than lost.
+Addresses come from where they actually live: **email is derived automatically** from the
+OpenWebUI user table by matching the handle against each account's email local part — no
+configuration, new users work immediately. **Phone numbers are opt-in** per handle in
+`~/.hermes/alert_contacts.json`, because OpenWebUI has no phone field and not everyone in a
+household wants texts; a handle with no phone entry quietly gets email only.
 
-Multi-user identity survives the removal transport-neutrally: `Pipe._alert_username()` derives a
-stable handle from the OpenWebUI account (email local part, sanitized), the pipe passes it to
-hermes, and job ALERT lines address it. Whatever transport arrives keys on that handle.
+Secrets live in `~/.hermes/alert_transports.env` (0600, never in git; a `.template` sits beside it).
+Gmail needs an **app password**, not the account password. A Twilio **trial** account can only text
+numbers verified in its console — the first thing to check if SMS 400s.
+
+Design decisions worth keeping:
+
+- **Partial success is success.** SMS delivered + email failed returns delivered, so the watcher
+  never re-sends the text every minute to fix a mail problem. Failures are logged per leg.
+- **E.164 or refuse.** Numbers are normalized locally and an unnormalizable one is skipped with a
+  log line, rather than handed to Twilio to reject with a 400 nobody reads.
+- **Unconfigured is not an error.** Missing config, missing phone, or every channel failing folds
+  the alert text into the channel post flagged `⚠️ [alert]` — a fired condition is never lost.
+
+Covered by `tests/test_alert_transports.py` (27 checks: normalization, resolution precedence,
+fan-out semantics, channel selection, and the Twilio request shape against the documented API).
+Everything verifiable offline is pinned there, so a live failure has exactly one unknown left.
+
+### Why ntfy is gone (2026-07-30)
+
+It was built, multi-user, and every server-side leg verified — per-user accounts provisioned by
+bcrypt-hash mirroring from OpenWebUI, deny-all ACLs, the APNs wake relay, and debug logs showing the
+phone authenticate and fetch each message **within one second of publish**. Alerts reached the app
+every time; iOS refused to render a banner, through re-subscribes, base_url alignment, urgent
+priority and a settings audit. The failure lived in a layer this stack cannot instrument. SMS has no
+equivalent layer: the carrier either delivers a text or returns an error code.
 
 ## Rollback
 

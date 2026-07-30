@@ -17,10 +17,9 @@ once across every incident):
     LOG: <one-line summary>                     -> posted to the background-tasks channel, always
     ALERT(<user>): <message>                    -> routed to that user's personal alert transport
 
-The personal-alert transport is currently UNCONFIGURED (ntfy was removed 2026-07-30 after its iOS
-banner path proved unreliable; SMS/email are being evaluated). ALERT lines are parsed, recorded in
-the channel post as "[alert] ", and otherwise held — nothing is silently dropped, and adding a
-transport means implementing send_alert() alone.
+ALERT lines route to scripts/alert_transports.py (Twilio SMS + SMTP email, both by default). If no
+transport is configured or every channel fails, the alert text is folded into the channel post
+flagged "[alert]" — a fired condition is never silently dropped.
 
 This watcher (systemd user timer, every minute) scans for new output files and executes the
 delivery itself: webhook POST from ~/.hermes/owui_webhook_url for the LOG line, and send_alert()
@@ -72,15 +71,22 @@ def post_channel(summary, job_name):
 
 
 def send_alert(recipient, message):
-    """Deliver a personal alert. NO TRANSPORT CONFIGURED — returns False so the caller folds the
-    alert into the channel post instead of losing it.
+    """Deliver a personal alert via the configured transports (Twilio SMS + SMTP email).
 
-    ntfy filled this role until 2026-07-30 and was removed: every server-side leg was verified
-    working (publish, auth, APNs wake ping, sub-second app fetch) yet iOS never rendered a banner,
-    which made the last hop unownable. SMS and email are being evaluated as replacements. Whatever
-    wins implements exactly this function.
+    Returns True if ANY channel delivered. Import is local and guarded so a missing or broken
+    transport module degrades to "fold the alert into the channel post" instead of taking the whole
+    delivery tick down — the LOG line must always get through.
     """
-    return False
+    try:
+        sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+        from alert_transports import send_alert as _send
+        ok, notes = _send(recipient, message)
+        for n in notes:
+            print(f"  alert[{recipient}]: {n}")
+        return ok
+    except Exception as e:
+        print(f"  alert[{recipient}] transport error: {e}", file=sys.stderr)
+        return False
 
 
 def main():
