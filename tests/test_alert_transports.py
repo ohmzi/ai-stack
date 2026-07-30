@@ -96,6 +96,35 @@ def main():
     check("empty subject for gateway", sent.get("subj") == "", repr(sent.get("subj")))
     check("body carried through", "51.77" in (sent.get("body") or ""), repr(sent.get("body")))
 
+    print("--- SMS bodies carry no links (the gateway silently eats them) ---")
+    # Measured 2026-07-30: two price alerts containing an amazon.ca URL were accepted by Gmail's
+    # SMTP server and never arrived; a link-free test sent minutes later arrived at once. The
+    # gateway gives no bounce and no error code, so this failure is undetectable downstream — the
+    # only defence is not to send a link. Email always carries the full text, link intact.
+    at3 = load()
+    check("http link reduced to its bare host",
+          at3.sms_body("46.99 below target — https://www.amazon.ca/dp/B0DP6D3TRB")
+          == "46.99 below target — www.amazon.ca")
+    check("https + path + query all stripped",
+          "?" not in at3.sms_body("see https://x.com/a/b?c=1&d=2 now"))
+    check("a message with no link is untouched",
+          at3.sms_body("CPU at 91 percent") == "CPU at 91 percent")
+    check("over-long body is truncated to one segment",
+          len(at3.sms_body("x" * 400)) <= 140)
+    check("truncation is marked, not silent", at3.sms_body("x" * 400).endswith("\u2026"))
+
+    print("--- the fan-out sends the SMS form to sms and the full text to email ---")
+    at3.load_conf = lambda: {"SMS_GATEWAY": "msg.telus.com", "SMTP_HOST": "h",
+                             "SMTP_USER": "u", "SMTP_PASS": "p"}
+    at3.resolve = lambda h, c=None, k=None: ("to@test", "+15145579764")
+    seen = {}
+    at3.send_sms = lambda phone, msg, conf: seen.__setitem__("sms", msg) or "gateway:x"
+    at3.send_email = lambda to, subj, body, conf: seen.__setitem__("email", body) or True
+    at3.send_alert("ohmz", "46.99 below target — https://www.amazon.ca/dp/B0DP6D3TRB")
+    check("sms leg got the link-free form", seen["sms"].endswith("www.amazon.ca"), repr(seen.get("sms")))
+    check("email leg kept the full URL", "https://www.amazon.ca/dp/B0DP6D3TRB" in seen["email"],
+          repr(seen.get("email")))
+
     print("--- unconfigured degrades, never raises ---")
     at.CONF = "/nonexistent/alert_transports.env"
     ok, notes = at.send_alert("ohmz", "hello")

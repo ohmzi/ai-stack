@@ -202,6 +202,28 @@ def send_email(to_addr, subject, body, conf):
     return True
 
 
+URL_RE = re.compile(r"https?://\S+|\bwww\.\S+", re.I)
+
+
+def sms_body(message, limit=140):
+    """The SMS form of an alert: no links, one segment.
+
+    Carrier email-to-SMS gateways silently drop messages containing URLs — the message is accepted
+    by SMTP, never bounces, and simply never arrives. Measured on this host 2026-07-30: two price
+    alerts carrying an amazon.ca link were accepted by Gmail and never delivered, while an
+    otherwise-identical link-free test arrived immediately.
+
+    Since the gateway gives no failure signal, this cannot be detected and retried — it has to be
+    avoided. A link is replaced by its bare host, which survives and still says where to look. The
+    full text, link intact, always goes out by email; that is what the email leg is for.
+    """
+    def host(m):
+        return re.sub(r"^https?://", "", m.group(0)).split("/")[0]
+    out = URL_RE.sub(host, message)
+    out = re.sub(r"\s{2,}", " ", out).strip()
+    return out[:limit - 1] + "\u2026" if len(out) > limit else out
+
+
 def send_alert(handle, message, subject="Alert from your assistant"):
     """Fan out one alert. Returns (ok, [notes]) — ok is True if ANY channel delivered."""
     conf = load_conf()
@@ -216,7 +238,7 @@ def send_alert(handle, message, subject="Alert from your assistant"):
             notes.append(f"sms skipped: no phone for {handle!r} in alert_contacts.json")
         else:
             try:
-                notes.append(f"sms sent to {phone} ({send_sms(phone, message, conf)})")
+                notes.append(f"sms sent to {phone} ({send_sms(phone, sms_body(message), conf)})")
                 ok = True
             except Exception as e:
                 notes.append(f"sms FAILED: {e}")
