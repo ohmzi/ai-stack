@@ -1662,7 +1662,8 @@ class Pipe:
         "job must fetch with the execute_code tool (Python urllib) instead of curl.\n"
         "4. State between runs lives in files under ~/.hermes/monitor-state/ — the job reads the "
         "previous value, compares, and writes the new one.\n"
-        "5. Set every job's delivery to LOCAL (deliver='local'). The job does NOT run any delivery commands itself — no curl, no webhooks, no helper functions (they do not exist). Delivery is handled by infrastructure that reads the run's output.\n"
+        "5. Set every job's delivery to EXACTLY 'local' — one word, no usernames, no platforms "
+        "appended (deliver='local,<name>' makes every run end in a delivery error). The job does NOT run any delivery commands itself — no curl, no webhooks, no helper functions (they do not exist). Delivery is handled by infrastructure that reads the run's output.\n"
         "5b. OUTPUT PROTOCOL — every job's prompt MUST end by instructing: finish your response with these lines, exactly this shape:\n"
         "    LOG: <one-line summary of this run, leading with the key number>   (always)\n"
         "    ALERT(<their alerts topic>): <what happened, with the number>   (ONLY in a run where the user's alert condition holds)\n"
@@ -1749,9 +1750,9 @@ class Pipe:
             yield ("⚠️ Background tasks are configured but the hermes-agent key is missing "
                    f"({HERMES_KEY_FILE}). Is the hermes gateway set up on this host?")
             return
-        ctx = (f"Request context: the requesting user is '{uname}'. Their personal phone-alert "
-               f"topic is 'alerts-{uname}' — rule 8's push URL for this user's jobs is "
-               f"\"$(sed -n 1p ~/.hermes/ntfy_alert)/alerts-{uname}\".")
+        ctx = (f"Request context: the requesting user is '{uname}'. In job prompts, the ALERT "
+               f"line for this user must be spelled EXACTLY: ALERT(alerts-{uname}): <message> — "
+               f"the full topic 'alerts-{uname}' inside the parentheses, never just '{uname}'.")
         before = self._hermes_jobs() if verify_creation else None
         payload = {"model": "hermes-agent", "stream": True,
                    "messages": [{"role": "system", "content": self._HERMES_BRIEF + "\n" + ctx},

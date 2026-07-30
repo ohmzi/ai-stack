@@ -54,11 +54,14 @@ def main():
     log, _ = hd.parse_output("## Response\n\n")
     check("empty response -> no log", log is None, repr(log))
 
-    print("--- topic validation: only alerts-* can be pushed ---")
+    print("--- topic normalization: bare usernames land in the alerts- namespace ---")
     _, alerts = hd.parse_output(
-        "## Response\nALERT(random-topic): nope\nALERT(alerts-UPPER): nope\n"
-        "ALERT(alerts-ok_1): yes\n")
-    check("invalid topics dropped, valid kept", alerts == [("alerts-ok_1", "yes")], repr(alerts))
+        "## Response\nALERT(ohmz2): bare username\nALERT(alerts-UPPER): bad chars\n"
+        "ALERT(alerts-ok_1): prefixed\n")
+    check("bare username normalized (live failure 7f0b1c921896)",
+          ("alerts-ohmz2", "bare username") in alerts, repr(alerts))
+    check("invalid chars still dropped", all(t != "alerts-UPPER" for t, _ in alerts), repr(alerts))
+    check("prefixed form still works", ("alerts-ok_1", "prefixed") in alerts, repr(alerts))
 
     print("--- alert flood capped (injection hygiene) ---")
     body = "## Response\n" + "".join(f"ALERT(alerts-a): spam {i}\n" for i in range(10))

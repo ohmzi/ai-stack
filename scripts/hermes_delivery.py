@@ -39,7 +39,10 @@ OUT_DIR = os.path.expanduser("~/.hermes/cron/output")
 STATE = os.path.join(OUT_DIR, ".delivered.json")
 WEBHOOK_FILE = os.path.expanduser("~/.hermes/owui_webhook_url")
 ALERT_FILE = os.path.expanduser("~/.hermes/ntfy_alert")
-ALERT_RE = re.compile(r"^ALERT\((alerts-[a-z0-9_-]+)\):\s*(.+)$", re.M)
+# The topic may arrive with or without the alerts- prefix: an agent writing job prompts dropped
+# the prefix in the wild (ALERT(ohmz2): ...) and a valid alert died on the allowlist. Normalizing
+# a bare name INTO the alerts- namespace cannot escape the namespace, so tolerance is free.
+ALERT_RE = re.compile(r"^ALERT\(((?:alerts-)?[a-z0-9_-]+)\):\s*(.+)$", re.M)
 LOG_RE = re.compile(r"^LOG:\s*(.+)$", re.M)
 
 
@@ -53,7 +56,8 @@ def parse_output(text):
         lines = [l.strip() for l in body.splitlines()
                  if l.strip() and not l.strip().startswith("#")]
         log = (lines[0][:200] + " (job wrote no LOG line)") if lines else None
-    alerts = [(t, msg.strip()) for t, msg in ALERT_RE.findall(body)][:3]  # cap: injection hygiene
+    alerts = [(t if t.startswith("alerts-") else f"alerts-{t}", msg.strip())
+              for t, msg in ALERT_RE.findall(body)][:3]  # cap: injection hygiene
     return log, alerts
 
 
