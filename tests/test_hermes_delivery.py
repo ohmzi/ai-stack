@@ -8,9 +8,10 @@ claimed deliveries which never happened. The watcher executes delivery from the 
 
   * LOG: line -> channel summary; a missing LOG still logs the first response line, marked
     unformatted, so a non-conforming job is visible instead of silent;
-  * ALERT(topic): -> phone push, but ONLY to topics matching ^alerts-[a-z0-9_-]+$ — a
-    prompt-injected page cannot make a job exfiltrate to an arbitrary topic, and alerts are
-    capped at 3 per run;
+  * ALERT(recipient): -> the personal-alert transport, but ONLY for recipients matching
+    ^[a-z0-9_-]+$ — a prompt-injected page cannot make a job address an arbitrary destination,
+    and alerts are capped at 3 per run. The transport is unconfigured since ntfy's removal
+    (2026-07-30), so alerts currently ride the channel post flagged rather than vanishing;
   * everything before "## Response" (the job's own prompt, which CONTAINS the protocol examples)
     is ignored — else every run would false-positive on its own instructions.
 
@@ -35,14 +36,14 @@ def check(label, ok, detail=""):
 def main():
     print("--- conforming output ---")
     log, alerts = hd.parse_output(
-        "# Job\nprompt says: LOG: <summary> and ALERT(alerts-x): <msg>\n"
-        "## Response\nFetched fine.\nLOG: £51.77, unchanged\nALERT(alerts-ohmz2): below £60 — £51.77\n")
+        "# Job\nprompt says: LOG: <summary> and ALERT(x): <msg>\n"
+        "## Response\nFetched fine.\nLOG: £51.77, unchanged\nALERT(ohmz2): below £60 — £51.77\n")
     check("LOG extracted", log == "£51.77, unchanged", repr(log))
-    check("ALERT extracted with topic", alerts == [("alerts-ohmz2", "below £60 — £51.77")], repr(alerts))
+    check("ALERT extracted with recipient", alerts == [("ohmz2", "below £60 — £51.77")], repr(alerts))
 
     print("--- the job's own prompt must not trigger deliveries ---")
     log, alerts = hd.parse_output(
-        "# Job\nALERT(alerts-evil): from the prompt section\nLOG: from the prompt\n"
+        "# Job\nALERT(evil): from the prompt section\nLOG: from the prompt\n"
         "## Response\nLOG: real one\n")
     check("prompt-section ALERT ignored", alerts == [], repr(alerts))
     check("prompt-section LOG ignored", log == "real one", repr(log))
@@ -54,17 +55,21 @@ def main():
     log, _ = hd.parse_output("## Response\n\n")
     check("empty response -> no log", log is None, repr(log))
 
-    print("--- topic normalization: bare usernames land in the alerts- namespace ---")
+    print("--- recipient validation, and back-compat with the legacy alerts- prefix ---")
     _, alerts = hd.parse_output(
-        "## Response\nALERT(ohmz2): bare username\nALERT(alerts-UPPER): bad chars\n"
-        "ALERT(alerts-ok_1): prefixed\n")
-    check("bare username normalized (live failure 7f0b1c921896)",
-          ("alerts-ohmz2", "bare username") in alerts, repr(alerts))
-    check("invalid chars still dropped", all(t != "alerts-UPPER" for t, _ in alerts), repr(alerts))
-    check("prefixed form still works", ("alerts-ok_1", "prefixed") in alerts, repr(alerts))
+        "## Response\nALERT(ohmz2): bare handle\nALERT(UPPER): bad chars\n"
+        "ALERT(alerts-ok_1): legacy prefix\n")
+    check("bare handle accepted", ("ohmz2", "bare handle") in alerts, repr(alerts))
+    check("invalid chars dropped", all(w != "UPPER" for w, _ in alerts), repr(alerts))
+    check("legacy alerts- prefix stripped (pre-2026-07-30 jobs keep working)",
+          ("ok_1", "legacy prefix") in alerts, repr(alerts))
+
+    print("--- no transport configured: send_alert is an honest no-op ---")
+    check("send_alert returns False (caller folds the alert into the channel post)",
+          hd.send_alert("ohmz2", "anything") is False)
 
     print("--- alert flood capped (injection hygiene) ---")
-    body = "## Response\n" + "".join(f"ALERT(alerts-a): spam {i}\n" for i in range(10))
+    body = "## Response\n" + "".join(f"ALERT(a): spam {i}\n" for i in range(10))
     _, alerts = hd.parse_output(body)
     check("at most 3 alerts per run", len(alerts) == 3, str(len(alerts)))
 

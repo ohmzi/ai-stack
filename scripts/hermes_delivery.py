@@ -15,12 +15,17 @@ hermes already persists to ~/.hermes/cron/output/<job>/<timestamp>.md, and which
 once across every incident):
 
     LOG: <one-line summary>                     -> posted to the background-tasks channel, always
-    ALERT(alerts-<user>): <message>             -> pushed to that user's phone topic, only if present
+    ALERT(<user>): <message>                    -> routed to that user's personal alert transport
+
+The personal-alert transport is currently UNCONFIGURED (ntfy was removed 2026-07-30 after its iOS
+banner path proved unreliable; SMS/email are being evaluated). ALERT lines are parsed, recorded in
+the channel post as "[alert] ", and otherwise held — nothing is silently dropped, and adding a
+transport means implementing send_alert() alone.
 
 This watcher (systemd user timer, every minute) scans for new output files and executes the
-delivery itself: webhook POST from ~/.hermes/owui_webhook_url, ntfy push via the bot token in
-~/.hermes/ntfy_alert. Topics are validated against ^alerts-[a-z0-9_-]+$ — a prompt-injected job
-cannot exfiltrate to an arbitrary topic, and the bot token never appears in any prompt. A file
+delivery itself: webhook POST from ~/.hermes/owui_webhook_url for the LOG line, and send_alert()
+for ALERT lines. Recipients are validated against ^[a-z0-9_-]+$ so a prompt-injected job cannot
+address an arbitrary destination, and alerts are capped at 3 per run. A file
 with no LOG line still gets logged (first response line, marked unformatted) so a non-conforming
 job is visible rather than silent. Files are processed exactly once, tracked in
 ~/.hermes/cron/output/.delivered.json.
@@ -38,11 +43,9 @@ import urllib.request
 OUT_DIR = os.path.expanduser("~/.hermes/cron/output")
 STATE = os.path.join(OUT_DIR, ".delivered.json")
 WEBHOOK_FILE = os.path.expanduser("~/.hermes/owui_webhook_url")
-ALERT_FILE = os.path.expanduser("~/.hermes/ntfy_alert")
-# The topic may arrive with or without the alerts- prefix: an agent writing job prompts dropped
-# the prefix in the wild (ALERT(ohmz2): ...) and a valid alert died on the allowlist. Normalizing
-# a bare name INTO the alerts- namespace cannot escape the namespace, so tolerance is free.
-ALERT_RE = re.compile(r"^ALERT\(((?:alerts-)?[a-z0-9_-]+)\):\s*(.+)$", re.M)
+# Recipient is a bare handle; the legacy alerts- prefix is still accepted and stripped, because
+# jobs created before 2026-07-30 spell it that way and must keep working.
+ALERT_RE = re.compile(r"^ALERT\((?:alerts-)?([a-z0-9_-]+)\):\s*(.+)$", re.M)
 LOG_RE = re.compile(r"^LOG:\s*(.+)$", re.M)
 
 
@@ -56,8 +59,7 @@ def parse_output(text):
         lines = [l.strip() for l in body.splitlines()
                  if l.strip() and not l.strip().startswith("#")]
         log = (lines[0][:200] + " (job wrote no LOG line)") if lines else None
-    alerts = [(t if t.startswith("alerts-") else f"alerts-{t}", msg.strip())
-              for t, msg in ALERT_RE.findall(body)][:3]  # cap: injection hygiene
+    alerts = [(who, msg.strip()) for who, msg in ALERT_RE.findall(body)][:3]  # cap: injection
     return log, alerts
 
 
@@ -69,17 +71,16 @@ def post_channel(summary, job_name):
         return r.status == 200
 
 
-def push_phone(topic, message):
-    base, token = open(ALERT_FILE).read().split()
-    req = urllib.request.Request(
-        f"{base}/{topic}", data=message.encode(),
-        # HTTP headers are latin-1; an emoji title raises UnicodeEncodeError inside urllib —
-        # observed live: the push died after the channel post, and the retry loop then
-        # duplicated the channel line every tick. ASCII title; the emoji rides as a ntfy tag.
-        headers={"Authorization": f"Bearer {token}", "Title": "Alert",
-                 "Tags": "dart", "Priority": "high"})
-    with urllib.request.urlopen(req, timeout=15) as r:
-        return r.status == 200
+def send_alert(recipient, message):
+    """Deliver a personal alert. NO TRANSPORT CONFIGURED — returns False so the caller folds the
+    alert into the channel post instead of losing it.
+
+    ntfy filled this role until 2026-07-30 and was removed: every server-side leg was verified
+    working (publish, auth, APNs wake ping, sub-second app fetch) yet iOS never rendered a banner,
+    which made the last hop unownable. SMS and email are being evaluated as replacements. Whatever
+    wins implements exactly this function.
+    """
+    return False
 
 
 def main():
@@ -109,18 +110,19 @@ def main():
         # Each leg retries independently — a failed push must never re-post the channel log.
         if not st["log"]:
             try:
-                if log:
-                    post_channel(log, job_name)
+                # With no alert transport, an ALERT line still has to reach the user somehow — it
+                # rides the channel post, flagged, rather than vanishing.
+                undelivered = [m for who, m in alerts if not send_alert(who, m)]
+                line = log or ""
+                if undelivered:
+                    line = (line + "  ⚠️ [alert] " + " | ".join(undelivered)).strip()
+                if line:
+                    post_channel(line, job_name)
                 st["log"] = True
             except Exception as e:
                 print(f"channel retry later {f}: {e}", file=sys.stderr)
-        if not st["alerts"]:
-            try:
-                for topic, msg in alerts:
-                    push_phone(topic, msg)
-                st["alerts"] = True
-            except Exception as e:
-                print(f"push retry later {f}: {e}", file=sys.stderr)
+        # Alerts are handled inside the channel leg while no transport exists.
+        st["alerts"] = True
         print(f"{os.path.basename(f)}: log={'y' if st['log'] else 'RETRY'} "
               f"alerts={'y' if st['alerts'] else 'RETRY'} ({len(alerts)})")
 

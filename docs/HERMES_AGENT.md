@@ -11,7 +11,7 @@ bounded, GPU-safe scheduled job, executed by a local agent and reported back int
 | Model | `hermes-genesis:agent` — a second Ollama tag of the SAME weights as the chat model (`ollama create` from `apex-compact` + `PARAMETER num_ctx 65536`; shares blobs, ~0 extra disk). Exists because hermes hard-requires a 64 K context window, and raising the global `OLLAMA_CONTEXT_LENGTH=32768` would tax every OpenWebUI chat turn instead. |
 | Service | `hermes-gateway` systemd **user** service (linger enabled). Hosts the cron scheduler and the API server on `127.0.0.1:8642` (key in `~/.hermes/.env`, a copy staged at `/volume1/docker/openwebui/config/hermes_api_key` so the pipe can read it in-container). |
 | GPU guard | `~/.hermes/plugins/gpuguard/` — a cron scheduler provider (config `cron.provider: gpuguard`) that defers ticks while ComfyUI's `/queue` shows anything running or pending. Due jobs are never lost, only deferred to the next 60 s tick. Covered by `tests/test_gpuguard.py` (9 checks). **Caveat:** a hand-run `hermes cron tick` bypasses the provider; the gateway path — the only unattended path — is guarded. |
-| Delivery | **Deterministic since 2026-07-30**: jobs run NO delivery commands — they end their response with `LOG: <summary>` (always) and `ALERT(alerts-<user>): <msg>` (only when the user's condition holds). `scripts/hermes_delivery.py` (user timer, 1 min) parses each new output under `~/.hermes/cron/output/<job>/` and does the delivery itself: LOG → background-tasks channel webhook, ALERT → per-user ntfy push via the bot token. Topics validated against `^alerts-[a-z0-9_-]+$`, 3 alerts/run cap, per-leg retry (a failed push never re-posts the channel log). Born from two live failures: an agent-authored job that invented `send_webhook_post()` helpers and delivered nothing, then an agent that *claimed* deliveries which never happened. The LLM writes text; infrastructure delivers. Covered by `tests/test_hermes_delivery.py` (9 checks). |
+| Delivery | **Deterministic since 2026-07-30**: jobs run NO delivery commands — they end their response with `LOG: <summary>` (always) and `ALERT(alerts-<user>): <msg>` (only when the user's condition holds). `scripts/hermes_delivery.py` (user timer, 1 min) parses each new output under `~/.hermes/cron/output/<job>/` and does the delivery itself: LOG → background-tasks channel webhook, ALERT → `send_alert()` (no transport configured since ntfy's removal — alerts ride the channel post flagged). Recipients validated against `^[a-z0-9_-]+$`, 3 alerts/run cap, per-leg retry (a failed push never re-posts the channel log). Born from two live failures: an agent-authored job that invented `send_webhook_post()` helpers and delivered nothing, then an agent that *claimed* deliveries which never happened. The LLM writes text; infrastructure delivers. Covered by `tests/test_hermes_delivery.py` (9 checks). |
 | Entry point | The `auto_assistant` pipe routes background-task intent (`tests/test_bgtask_intent.py`, 30 checks, default-deny) to `POST 127.0.0.1:8642/v1/chat/completions` — an agent runtime, not an LLM proxy. The agent creates/manages its own cron jobs via its `cronjob` tool and streams confirmation back into the same chat. **No second model row in the picker; the single-pipe architecture holds.** |
 
 ## Config decisions that are deliberate
@@ -40,50 +40,22 @@ Proven end-to-end 2026-07-29 with a bounded demo (books.toscrape.com, every 2 m,
 posted "£51.77 (first run)", run 2 read the state file and posted "£51.77 (unchanged)", job then
 retired itself.
 
-## Phone notifications (added 2026-07-29, verified end to end)
+## Personal alerts — transport slot, currently empty
 
-Condition alerts ("alert me when it drops below X") reach the phone through **self-hosted ntfy
-v2.26.3** (pinned, in `compose/docker-compose.yml`): deny-all auth, bound to loopback + the
-Tailscale interface, and fronted by the user's own cloudflared tunnel at `https://notify.ohmz.cloud`
-(anonymous publish verified 403 on the public endpoint). Jobs push only in a run where the condition
-fires — rule 8 of the delegation brief — reading the URL+token from `~/.hermes/ntfy_alert`; the
-phone app logs in with `~/.hermes/ntfy_credentials`, topic `hermes-alerts`.
+Jobs already emit `ALERT(<username>): <message>` when a user's condition fires; the watcher parses
+and validates it. What is missing is a transport. **ntfy was built, verified, and removed on
+2026-07-30**: every server-side leg was proven working — publish, per-user auth, the APNs wake
+relay, and debug logs showing the phone fetching the message within one second of publish — yet iOS
+never rendered a banner, only silent list entries. A last hop nobody can own is not a notification
+system. SMS and email are being evaluated; whichever wins implements `send_alert()` in
+`scripts/hermes_delivery.py` and nothing else changes.
 
-Two iOS facts that cost an afternoon, recorded so they never cost another:
+Until then ALERT lines ride the channel post, flagged `⚠️ [alert]`, so a fired condition is visible
+rather than lost.
 
-- iOS cannot hold background sockets, so a self-hosted server needs `NTFY_UPSTREAM_BASE_URL=
-  https://ntfy.sh` — a CONTENTLESS wake ping (message id + topic) goes upstream, then the app
-  fetches the real message from this server. Content never leaves the box; ntfy.sh sees topic name
-  and timing. Android needs none of this.
-- **`NTFY_BASE_URL` must match the URL the app subscribes with** (here: the tunnel domain, not the
-  tailscale IP), and Apple's registration is created AT SUBSCRIBE TIME — after changing base_url,
-  every existing subscription must be deleted and re-added or banners silently never arrive while
-  in-app messages work. Both failure modes were observed live before the two-test protocol
-  (immediate + delayed after re-subscribe) confirmed banners on a locked phone.
-
-## Multi-user (added 2026-07-29)
-
-Accounts self-provision: `scripts/ntfy_sync.py` (systemd **user** timer `ntfy-sync.timer`, every
-2 min) mirrors every active, approved OpenWebUI account into ntfy — **same username, same
-password, zero plaintext**: OpenWebUI's bcrypt hash is copied verbatim into ntfy's declarative
-provisioning (`compose/ntfy/provision.env`, generated — gitignored, do not edit), and ntfy
-reconciles on a container recreate that happens only when something actually changed. Password
-changes propagate within 2 min; removed users are reconciled away; `pending` users are excluded.
-
-Usernames are the email local part, sanitized (`derive_username`, duplicated in the pipe as
-`_ntfy_username` — `tests/test_ntfy_sync.py` asserts the two stay identical, since a drift means
-pushes to a topic nobody subscribes to). Each user gets READ-ONLY access to their own topic
-`alerts-<username>`; only the `hermes-bot` service account (write-only on `alerts-*`, static
-provisioned token in `~/.hermes/ntfy_alert`: line 1 base URL, line 2 token) can publish. The pipe
-threads `__user__` through to hermes so each job pushes to the requester's topic, and appends
-one-time setup instructions (app, server, username, topic) to every task confirmation.
-
-Hard-won detail: **docker compose interpolates `$` inside env_file values** — it ate the third `$`
-of a bcrypt hash and ntfy crash-looped on "hashedSecret too short". `render()` escapes `$` as `$$`.
-
-Privacy note: the background-tasks channel is shared — all users' job logs are visible to anyone
-with channel access. Phone pushes are per-user. If untrusted users ever join, per-user channels
-are the next step.
+Multi-user identity survives the removal transport-neutrally: `Pipe._alert_username()` derives a
+stable handle from the OpenWebUI account (email local part, sanitized), the pipe passes it to
+hermes, and job ALERT lines address it. Whatever transport arrives keys on that handle.
 
 ## Rollback
 
@@ -94,3 +66,4 @@ ollama rm hermes-genesis:agent                    # drop the 64K tag (weights st
 Set `BG_TASKS = False` in the pipe to disconnect the route without touching hermes. Channels off:
 `channels.enable=false` in the OWUI config table (webhook rows in `channel`/`channel_webhook` are
 inert while disabled; DB backup at `webui.db.bak-channels`). Full uninstall: `hermes uninstall`.
+The delivery watcher is its own timer: `systemctl --user disable --now hermes-delivery.timer`.

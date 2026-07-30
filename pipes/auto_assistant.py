@@ -1666,20 +1666,18 @@ class Pipe:
         "appended (deliver='local,<name>' makes every run end in a delivery error). The job does NOT run any delivery commands itself — no curl, no webhooks, no helper functions (they do not exist). Delivery is handled by infrastructure that reads the run's output.\n"
         "5b. OUTPUT PROTOCOL — every job's prompt MUST end by instructing: finish your response with these lines, exactly this shape:\n"
         "    LOG: <one-line summary of this run, leading with the key number>   (always)\n"
-        "    ALERT(<their alerts topic>): <what happened, with the number>   (ONLY in a run where the user's alert condition holds)\n"
-        "The LOG line is posted to the background-tasks channel automatically; an ALERT line becomes a phone push automatically. A run with no ALERT line sends no push.\n"
+        "    ALERT(<username>): <what happened, with the number>   (ONLY in a run where the user's alert condition holds)\n"
+        "The LOG line is posted to the background-tasks channel automatically. An ALERT line is routed to whatever personal-alert transport is configured for that user (none is configured right now — the LOG line is what reaches the user). A run with no ALERT line raises no alert.\n"
         "6. Never create overlapping duplicates — check existing jobs first.\n"
         "7. A one-off request ('check once', 'right now') is STILL a job: schedule it as a "
         "one-shot in 1 minute. This session cannot fetch pages itself — do not try to do the "
         "check directly here. A one-shot removes itself after running; that is success, not a "
         "lost job — do not re-query it afterwards.\n"
         "8. Alert conditions are LITERAL and state-based. 'Alert me if it is below X' means: "
-        "push in every run where the value IS below X — including the very first run. Never "
-        "add prior-state or transition requirements the user did not ask for (no 'only if it "
-        "was previously above X'). The only permitted dampening: skip the push when the value "
-        "is identical to the one already pushed last run. Never push when the condition does "
-        "not hold, and never more than once per run.\n"
-        "9. After creating a job, call cronjob(action='list') and copy the REAL job id and next "
+        "emit the ALERT line in every run where the value IS below X — including the very "
+        "first run. Never add prior-state or transition requirements the user did not ask "
+        "for (no 'only if it was previously above X'). The only permitted dampening: skip "
+        "the ALERT when the value is identical to the one already alerted last run.\n"        "9. After creating a job, call cronjob(action='list') and copy the REAL job id and next "
         "run time from the tool result into your reply. Describing a job is not creating it — if "
         "the id is not in the list, you did not create it; say so plainly instead of confirming.\n"
         "Reply to the user with plain-language confirmation: what will be checked, how often, "
@@ -1693,34 +1691,6 @@ class Pipe:
             return k or None
         except Exception:
             return None
-
-    @staticmethod
-    def _ntfy_username(user):
-        """OpenWebUI identity -> ntfy username. MUST stay in lockstep with derive_username in
-        scripts/ntfy_sync.py — tests/test_ntfy_sync.py asserts the two are identical, because a
-        drift here means jobs push to a topic nobody is subscribed to."""
-        u = user or {}
-        local = (u.get("email") or "").split("@")[0] or (u.get("name") or "")
-        uname = re.sub(r"[^a-z0-9_-]", "", local.lower())
-        return uname or "user"
-
-    @staticmethod
-    def _ntfy_onboarding(uname):
-        """Appended to every background-task confirmation. Accounts are auto-provisioned from
-        OpenWebUI (same username, same password — the bcrypt hash is mirrored by
-        scripts/ntfy_sync.py), so these instructions are complete for any user, first task or
-        fiftieth."""
-        return (
-            "\n\n---\n"
-            "📲 **Get alerts on your phone** (one-time setup):\n"
-            "1. Install the **ntfy** app — App Store or Play Store.\n"
-            "2. In the app, set the server to `https://notify.ohmz.cloud` FIRST (logins are "
-            "per-server — the default ntfy.sh is the wrong server), then sign in as "
-            f"**{uname}** — just the username, NOT your email — with your OpenWebUI password.\n"
-            f"3. Subscribe to the topic **`alerts-{uname}`**.\n"
-            "Job results always appear in the *background-tasks* channel here; your phone "
-            "buzzes only when a condition you asked about actually fires."
-        )
 
     def _hermes_jobs(self):
         """Job ids currently scheduled, straight from hermes's /api/jobs — deterministic ground
@@ -1738,6 +1708,15 @@ class Pipe:
         except Exception:
             return None
 
+    @staticmethod
+    def _alert_username(user):
+        """OpenWebUI identity -> a short stable handle for addressing alerts. Transport-neutral:
+        whatever carries personal alerts (SMS, email, push) is keyed on this, not on the email."""
+        u = user or {}
+        local = (u.get("email") or "").split("@")[0] or (u.get("name") or "")
+        handle = re.sub(r"[^a-z0-9_-]", "", local.lower())
+        return handle or "user"
+
     async def _hermes_stream(self, text, uname="user", verify_creation=False):
         """Delegate a background-task request to the local hermes-agent API server.
 
@@ -1750,10 +1729,8 @@ class Pipe:
             yield ("⚠️ Background tasks are configured but the hermes-agent key is missing "
                    f"({HERMES_KEY_FILE}). Is the hermes gateway set up on this host?")
             return
-        ctx = (f"Request context: the requesting user is '{uname}'. In job prompts, the ALERT "
-               f"line for this user must be spelled EXACTLY: ALERT(alerts-{uname}): <message> — "
-               f"the full topic 'alerts-{uname}' inside the parentheses, never just '{uname}'.")
-        before = self._hermes_jobs() if verify_creation else None
+        ctx = (f"Request context: the requesting user is '{uname}'. If this job needs to "
+               f"alert them, the ALERT line's recipient is '{uname}'.")
         payload = {"model": "hermes-agent", "stream": True,
                    "messages": [{"role": "system", "content": self._HERMES_BRIEF + "\n" + ctx},
                                 {"role": "user", "content": text}]}
@@ -1788,7 +1765,6 @@ class Pipe:
                                            "actually created. Please resend the request.")
                                 else:
                                     yield "\n\n(could not verify job creation — /api/jobs unreachable)"
-                            yield self._ntfy_onboarding(uname)
                             return
                         try:
                             d = json.loads(data)
@@ -2210,7 +2186,7 @@ class Pipe:
         # `text` is the clean routing prompt, so RAG/search context cannot fabricate a job.
         if BG_TASKS and not attached_img and not ref and self._is_bg_task_request(text):
             is_manage = bool(self._BG_MANAGE.match((text or "").strip().lower()))
-            return self._hermes_stream(text, self._ntfy_username(__user__),
+            return self._hermes_stream(text, self._alert_username(__user__),
                                        verify_creation=not is_manage)
         if not attached_img and not ref and await asyncio.to_thread(self._is_code_request, text):
             return self._locked_stream(self._achat_stream(
