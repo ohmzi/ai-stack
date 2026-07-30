@@ -159,6 +159,60 @@ Because the failure is invisible, it cannot be retried into working; it has to b
 carries the full text with the link intact** — which is the division of labour the two channels
 already had: SMS is the buzz, email is the record.
 
+### Setup happens before scheduling, not after the first miss
+
+Asking for a task that should text you, with no number on file, used to produce a perfectly
+scheduled job that ran, met its condition, and skipped the alert with `no phone for 'ohmz'` in a log
+nobody reads. The user believes they are being watched and hears nothing — the same silent-loss
+shape as everything else on this page, arriving one layer earlier.
+
+The pipe now checks first. `_WANTS_ALERT` recognises alert intent ("text me", "notify me when",
+"let me know if"), and if the handle has no number the request is **parked** rather than scheduled:
+the original wording is base64'd into an invisible `<!--bg-need-phone:…-->` marker, so answering
+with a number saves it and runs the original request in one turn — no retyping. A bare
+`514-555-0123` matches no task predicate and would otherwise reach the chat model, which would
+cheerfully claim to have saved it; the marker is what routes it correctly. A junk number is refused
+where it was typed rather than silently at send time. `email only` proceeds without one. Managing or
+following up on an existing task is never interrupted by the prompt.
+
+On a verified creation the reply states the delivery setup outright — the number, the address the
+text will arrive **from** (an email-to-SMS gateway shows as an address, not a number, which reads as
+spam unannounced), the email destination, and that only a check meeting the condition texts you.
+That last line pre-empts the most common first-week misdiagnosis: a channel post arrives, no text
+does, and the user concludes alerting is broken when the condition simply was not met.
+
+Contacts and the display profile live in `/volume1/docker/openwebui/config/alerts/`, the only path
+both sides reach — the pipe runs inside the container, the transports on the host. The directory is
+owned by the host user, not root: an atomic `tmp+rename` needs write permission on the DIRECTORY,
+and publishing the profile from the unprivileged delivery timer silently failed until it had one.
+
+### What an alert actually says
+
+| surface | shape |
+|---|---|
+| text | `amazon B0DP6D3TRB price: 46.99, under your 50.00 target (unconfirmed) Link in email.` |
+| subject | `amazon B0DP6D3TRB price: 46.99, under your 50.00 target (unconfirmed - read from the offer listing, not the main price)` |
+| body | the message with its link intact, monitor, job id, fire time, and where the text went |
+
+Decisions worth keeping:
+
+- **The monitor name leads.** With several jobs running, *which one fired* is the first question, and
+  it has to be answered before the reader stops looking.
+- **Confidence is printed on every run, including good ones.** If it only appeared on doubtful
+  readings, its absence would need interpreting — and an omission would be indistinguishable from a
+  bug that stopped emitting it.
+- **The source ID is translated.** `amazon-offer-listing` is precise and means nothing to a person
+  who will never open the source. The email says "read from the offer listing, not the main price";
+  the text says `(unconfirmed)`, because a caveat on a lock screen gets one glance and the
+  measurement must not be pushed into truncation to make room for it.
+- **Degradation has a fixed order.** Over 140 characters, the monitor name is shortened before the
+  measurement, and the pointer to the email is never dropped — it is the only thing telling a
+  first-time user where the link went.
+- **Everything is folded to ASCII.** A carrier gateway is a mail bridge with no promise of UTF-8; a
+  mangled em dash undoes the link-stripping work by making the text look broken anyway.
+- **The ledger records the body that was SENT.** It used to record the original alert text, so a
+  text mangled in transit looked flawless in the one place an operator would check.
+
 ### SMTP acceptance is not deliverability
 
 The relay accepting a message says nothing about whether a mailbox exists. Alerts were addressed to

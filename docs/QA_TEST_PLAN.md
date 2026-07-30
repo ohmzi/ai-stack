@@ -251,6 +251,7 @@ Some checks are standalone harnesses rather than `cases.json` cases:
 | `tests/test_websearch.py` | Live SearXNG round trip, grounded answer, `[id]` citations preserved |
 | `tests/test_gpu_diagnosis.py` | A revoked GPU is reported as such, not as a wedged allocator (see `TROUBLESHOOTING.md`) |
 | `tests/test_deployed.py` | **OpenWebUI is running the code in this repo** — see below |
+| `tests/test_alert_setup.py` | The alert setup gate: phone asked for before scheduling, parked request survives the turn, E.164 rule identical on both sides of the container boundary |
 | `tests/test_price_watch.py` | Price extraction: confidence ranking, Amazon's JS-rendered buy box, first-run alerts, repeat dampening, fetch failure as a reported outcome |
 | `tests/test_retrieval_quality.py` | Which sources survive `rag.relevance_threshold`, scored on real stored chunks |
 | `tests/test_bgtask_intent.py` | Background-task requests reach hermes-agent; ordinary conversation never does (default-deny) |
