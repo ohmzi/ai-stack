@@ -159,6 +159,32 @@ Because the failure is invisible, it cannot be retried into working; it has to b
 carries the full text with the link intact** — which is the division of labour the two channels
 already had: SMS is the buzz, email is the record.
 
+### SMTP acceptance is not deliverability
+
+The relay accepting a message says nothing about whether a mailbox exists. Alerts were addressed to
+`ohmz@ohmz.com` — the OpenWebUI login domain, which **has no MX record**. Gmail accepted every one,
+discovered there was nowhere to deliver it, and bounced asynchronously to the sending account, where
+nothing is watching. The ledger recorded "email sent" every time.
+
+This is the same silent-loss shape as the SMS gateway eating links, and it became load-bearing the
+moment texts started dropping URLs and saying "(link in email)": an undeliverable email leg leaves
+the user holding a pointer to nothing.
+
+`mail_domain_status()` classifies the domain before sending:
+
+| | meaning | behaviour |
+|---|---|---|
+| `ok` | has MX records | send normally |
+| `implicit` | no MX, but an A record | send, and mark the note **UNVERIFIABLE** — RFC 5321 sends mail to that host, which for a parked domain speaks no SMTP |
+| `dead` | no MX, no A | refuse; record the reason instead of spending an "ok" on it |
+| `unknown` | no resolver available | send — a missing `dig` must never stop an alert |
+
+Addresses are per-handle in `~/.hermes/alert_contacts.json`, which overrides the OpenWebUI lookup:
+
+```bash
+python3 -c "import json,os;p=os.path.expanduser('~/.hermes/alert_contacts.json');print(open(p).read())"
+```
+
 ### Un-substituted alert templates are never delivered
 
 A model that echoes the protocol example instead of filling it in produces a syntactically perfect

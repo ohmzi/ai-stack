@@ -175,6 +175,49 @@ def send_sms(to_e164, body, conf):
         raise RuntimeError(f"twilio {e.code}: {e.read()[:200].decode(errors='replace')}") from None
 
 
+def mail_domain_status(addr, timeout=6):
+    """('ok'|'implicit'|'dead'|'unknown', detail) for an address's domain.
+
+    SMTP acceptance by the RELAY says nothing about deliverability. Gmail accepts a message for
+    ohmz@ohmz.com, then discovers the domain has no MX, then bounces asynchronously to the sending
+    mailbox — where nothing in this system is watching. The ledger says "email sent" forever.
+
+    This is the same silent-loss shape as the SMS gateway eating links, and it now matters more:
+    texts deliberately drop URLs and say "(link in email)", so an undeliverable email leg leaves the
+    user with a pointer to nothing.
+
+    'implicit' means no MX but an A record exists. RFC 5321 says mail then goes to that host, which
+    for a parked domain is a web server that speaks no SMTP — technically valid, practically dead.
+    Worth flagging loudly, not worth refusing outright.
+
+    Fails OPEN ('unknown') if no resolver is available: a missing `dig` must never stop an alert.
+    """
+    import shutil, subprocess
+    domain = (addr or "").rsplit("@", 1)[-1].strip().lower()
+    if not domain or "." not in domain:
+        return "dead", f"{addr!r} has no usable domain"
+    dig = shutil.which("dig")
+    if not dig:
+        return "unknown", "no resolver available to check"
+    def q(rr):
+        try:
+            r = subprocess.run([dig, "+short", "+time=3", "+tries=1", rr, domain],
+                               capture_output=True, text=True, timeout=timeout)
+            return [x for x in r.stdout.split("\n") if x.strip()]
+        except Exception:
+            return None
+    mx = q("MX")
+    if mx is None:
+        return "unknown", "resolver error"
+    if mx:
+        return "ok", f"{len(mx)} MX record(s)"
+    a = q("A") or []
+    if a:
+        return "implicit", (f"no MX; mail would fall back to A record {a[0]} (RFC 5321 implicit MX) "
+                            f"— for a parked domain that host speaks no SMTP and mail is lost")
+    return "dead", "domain has no MX and no A record — mail cannot be delivered"
+
+
 def send_email(to_addr, subject, body, conf):
     host, user, pw = conf.get("SMTP_HOST"), conf.get("SMTP_USER"), conf.get("SMTP_PASS")
     if not (host and user and pw):
@@ -258,12 +301,22 @@ def send_alert(handle, message, subject="Alert from your assistant"):
         if not email:
             notes.append(f"email skipped: no address for {handle!r}")
         else:
-            try:
-                send_email(email, subject, message, conf)
-                notes.append(f"email sent to {email}")
-                ok = True
-            except Exception as e:
-                notes.append(f"email FAILED: {e}")
+            status, detail = mail_domain_status(email)
+            if status == "dead":
+                # Do not spend an "ok" on a mailbox that provably cannot receive. Recording the
+                # refusal is the whole point: the alternative is a ledger full of green "sent"
+                # lines for mail that evaporated.
+                notes.append(f"email NOT SENT to {email}: {detail}")
+            else:
+                try:
+                    send_email(email, subject, message, conf)
+                    if status == "implicit":
+                        notes.append(f"email sent to {email} — ⚠️ UNVERIFIABLE: {detail}")
+                    else:
+                        notes.append(f"email sent to {email}")
+                    ok = True
+                except Exception as e:
+                    notes.append(f"email FAILED: {e}")
 
     return ok, notes
 

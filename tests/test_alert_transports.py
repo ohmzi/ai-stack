@@ -130,6 +130,9 @@ def main():
     at3.load_conf = lambda: {"SMS_GATEWAY": "msg.telus.com", "SMTP_HOST": "h",
                              "SMTP_USER": "u", "SMTP_PASS": "p"}
     at3.resolve = lambda h, c=None, k=None: ("to@test", "+15145579764")
+    # Stub the DNS probe with its real (status, detail) shape — "to@test" is not a real domain and
+    # this section is about fan-out, not deliverability.
+    at3.mail_domain_status = lambda addr, timeout=6: ("ok", "stubbed")
     seen = {}
     at3.send_sms = lambda phone, msg, conf: seen.__setitem__("sms", msg) or "gateway:x"
     at3.send_email = lambda to, subj, body, conf: seen.__setitem__("email", body) or True
@@ -138,6 +141,40 @@ def main():
           "amazon" not in seen["sms"] and "46.99" in seen["sms"], repr(seen.get("sms")))
     check("email leg kept the full URL", "https://www.amazon.ca/dp/B0DP6D3TRB" in seen["email"],
           repr(seen.get("email")))
+
+    print("--- SMTP acceptance is not deliverability (ohmz.com has no MX) ---")
+    # The relay accepting a message says nothing about whether a mailbox exists. Gmail accepted
+    # every alert addressed to ohmz@ohmz.com, then bounced asynchronously to the sending account
+    # where nothing is watching, and the ledger recorded "email sent" each time. Same silent-loss
+    # shape as the SMS gateway eating links — and it matters more now that texts drop the URL and
+    # say "(link in email)".
+    at4 = load()
+    check("a domain with real MX is ok", at4.mail_domain_status("x@gmail.com")[0] == "ok")
+    check("no MX + no A is dead",
+          at4.mail_domain_status("x@nonexistent-zzz-domain-9987.com")[0] == "dead")
+    check("an address with no domain is dead", at4.mail_domain_status("bogus")[0] == "dead")
+    check("empty address is dead, not a crash", at4.mail_domain_status("")[0] == "dead")
+    st, detail = at4.mail_domain_status("ohmz@ohmz.com")
+    check("no MX but an A record is flagged 'implicit', not silently trusted",
+          st == "implicit", f"{st} / {detail}")
+    check("...and the note explains why that is not deliverable", "implicit MX" in detail, detail)
+
+    print("--- a dead domain is refused and recorded, never counted as delivered ---")
+    at4.load_conf = lambda: {"SMTP_HOST": "h", "SMTP_USER": "u", "SMTP_PASS": "p",
+                             "ALERT_CHANNELS": "email"}
+    at4.resolve = lambda h, c=None, k=None: ("x@nonexistent-zzz-domain-9987.com", None)
+    sent = []
+    at4.send_email = lambda *a, **k: sent.append(a) or True
+    ok, notes = at4.send_alert("ohmz", "target met")
+    check("no send is even attempted", sent == [], repr(sent))
+    check("not reported as delivered", ok is False, repr(notes))
+    check("the reason is in the notes for the ledger",
+          any("NOT SENT" in n and "cannot be delivered" in n for n in notes), repr(notes))
+
+    at4.resolve = lambda h, c=None, k=None: ("ohmz@ohmz.com", None)
+    ok, notes = at4.send_alert("ohmz", "target met")
+    check("an implicit-MX domain IS still attempted", ok is True, repr(notes))
+    check("...but the note marks it unverifiable", any("UNVERIFIABLE" in n for n in notes), repr(notes))
 
     print("--- unconfigured degrades, never raises ---")
     at.CONF = "/nonexistent/alert_transports.env"
@@ -163,6 +200,7 @@ def main():
             "SMTP_HOST": "smtp.test", "SMTP_USER": "u@test", "SMTP_PASS": "p"}
     at.load_conf = lambda: conf
     at.resolve = lambda h, c=None, k=None: ("to@test", "+15551234567")
+    at.mail_domain_status = lambda addr, timeout=6: ("ok", "stubbed")
 
     at.send_sms = lambda *a, **k: "SM123"
     at.send_email = lambda *a, **k: (_ for _ in ()).throw(RuntimeError("mailbox full"))
