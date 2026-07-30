@@ -202,25 +202,36 @@ def send_email(to_addr, subject, body, conf):
     return True
 
 
-URL_RE = re.compile(r"https?://\S+|\bwww\.\S+", re.I)
+# Anything a spam filter reads as a web address: full URLs, and bare hostnames like
+# "www.amazon.ca" or "amazon.ca" — the second form was measured to be dropped just like the first.
+URL_RE = re.compile(r"https?://\S+|\b(?:www\.)?[a-z0-9-]+(?:\.[a-z0-9-]+)*\.[a-z]{2,}\b(?:/\S*)?",
+                    re.I)
 
 
 def sms_body(message, limit=140):
-    """The SMS form of an alert: no links, one segment.
+    """The SMS form of an alert: no web addresses at all, one segment.
 
-    Carrier email-to-SMS gateways silently drop messages containing URLs — the message is accepted
-    by SMTP, never bounces, and simply never arrives. Measured on this host 2026-07-30: two price
-    alerts carrying an amazon.ca link were accepted by Gmail and never delivered, while an
-    otherwise-identical link-free test arrived immediately.
+    Carrier email-to-SMS gateways silently drop messages containing links. The message is accepted
+    by SMTP, never bounces, and never arrives — so this cannot be detected downstream or fixed by
+    retrying. It has to be avoided.
 
-    Since the gateway gives no failure signal, this cannot be detected and retried — it has to be
-    avoided. A link is replaced by its bare host, which survives and still says where to look. The
-    full text, link intact, always goes out by email; that is what the email leg is for.
+    Measured on this host 2026-07-30, three otherwise-identical texts sent seconds apart:
+
+        "TESTA plain no link 46.99 below 50.00"              -> arrived
+        "TESTB ... https://www.amazon.ca/dp/B0DP6D3TRB"      -> never arrived
+        "TESTC ... www.amazon.ca"                            -> never arrived
+
+    TESTC is why addresses are removed rather than shortened to their host: a BARE DOMAIN is
+    filtered exactly like a full URL. An earlier version of this function replaced links with their
+    hostname and would have been dropped just the same.
+
+    The full text, links intact, always goes out by email — that is what the email leg is for, and
+    the SMS says so.
     """
-    def host(m):
-        return re.sub(r"^https?://", "", m.group(0)).split("/")[0]
-    out = URL_RE.sub(host, message)
-    out = re.sub(r"\s{2,}", " ", out).strip()
+    out = URL_RE.sub("", message)
+    out = re.sub(r"[\s\u2014-]+$", "", re.sub(r"\s{2,}", " ", out)).strip(" -\u2014")
+    if out != message.strip():
+        out += " (link in email)"
     return out[:limit - 1] + "\u2026" if len(out) > limit else out
 
 

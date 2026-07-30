@@ -102,13 +102,26 @@ def main():
     # gateway gives no bounce and no error code, so this failure is undetectable downstream — the
     # only defence is not to send a link. Email always carries the full text, link intact.
     at3 = load()
-    check("http link reduced to its bare host",
-          at3.sms_body("46.99 below target — https://www.amazon.ca/dp/B0DP6D3TRB")
-          == "46.99 below target — www.amazon.ca")
-    check("https + path + query all stripped",
-          "?" not in at3.sms_body("see https://x.com/a/b?c=1&d=2 now"))
+    body = at3.sms_body("46.99 is below your 50.00 target — https://www.amazon.ca/dp/B0DP6D3TRB")
+    check("the URL is gone entirely", "amazon" not in body and "http" not in body, repr(body))
+    check("the alert still says the thing that matters", "46.99" in body and "50.00" in body, repr(body))
+    check("and points at where the link went", body.endswith("(link in email)"), repr(body))
+    # TESTC is why hosts are removed rather than kept: a BARE DOMAIN was filtered exactly like a
+    # full URL, so an earlier version that shortened links to their hostname would have been
+    # dropped identically.
+    check("a bare domain is stripped too (TESTC never arrived)",
+          "amazon.ca" not in at3.sms_body("check www.amazon.ca now"),
+          repr(at3.sms_body("check www.amazon.ca now")))
+    check("...including one with no www.",
+          "amazon.ca" not in at3.sms_body("price at amazon.ca dropped"))
     check("a message with no link is untouched",
           at3.sms_body("CPU at 91 percent") == "CPU at 91 percent")
+    check("no '(link in email)' is bolted onto a link-free message",
+          "link in email" not in at3.sms_body("CPU at 91 percent"))
+    # Decimals, version numbers and the confidence caveat must not read as hostnames.
+    for keep in ("46.99 below 50.00", "python 3.11 vs 3.12",
+                 "46.99 (confidence: low, source: amazon-offer-listing)"):
+        check(f"{keep[:34]!r} survives intact", at3.sms_body(keep) == keep, repr(at3.sms_body(keep)))
     check("over-long body is truncated to one segment",
           len(at3.sms_body("x" * 400)) <= 140)
     check("truncation is marked, not silent", at3.sms_body("x" * 400).endswith("\u2026"))
@@ -121,7 +134,8 @@ def main():
     at3.send_sms = lambda phone, msg, conf: seen.__setitem__("sms", msg) or "gateway:x"
     at3.send_email = lambda to, subj, body, conf: seen.__setitem__("email", body) or True
     at3.send_alert("ohmz", "46.99 below target — https://www.amazon.ca/dp/B0DP6D3TRB")
-    check("sms leg got the link-free form", seen["sms"].endswith("www.amazon.ca"), repr(seen.get("sms")))
+    check("sms leg got the link-free form",
+          "amazon" not in seen["sms"] and "46.99" in seen["sms"], repr(seen.get("sms")))
     check("email leg kept the full URL", "https://www.amazon.ca/dp/B0DP6D3TRB" in seen["email"],
           repr(seen.get("email")))
 
