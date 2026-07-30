@@ -102,6 +102,23 @@ def candidates(html):
     return out
 
 
+# What a source ID means to a person. "amazon-offer-listing" is precise and tells the user nothing;
+# they will never read this file to find out what it refers to. The phrase has to survive being
+# read once, on a lock screen, at 7am — so it says which number on the page was read, in the words
+# the page itself uses.
+CONFIDENCE_PHRASE = {
+    "json-ld/price":        "high confidence",
+    "priceAmount":          "high confidence",
+    "og:price":             "high confidence",
+    "itemprop":             "high confidence",
+    "price_color":          "high confidence",
+    "selector":             "high confidence",
+    "amazon-offer-listing": "unconfirmed - read from the offer listing, not the main price",
+    "amazon-a-offscreen":   "unconfirmed - read from a secondary price on the page",
+    "visible-text":         "unconfirmed - read from page text, not a price field",
+}
+
+
 def read_state(name):
     try:
         return json.load(open(os.path.join(STATE_DIR, f"{name}.json")))
@@ -167,7 +184,11 @@ def run(a):
     # the cron venv is Python 3.11 and its urllib User-Agent draws the page variant that embeds the
     # JSON price, while the 3.12 shell here draws the one that does not. No output was ever
     # altered in transit. Left here because "delivery mangled it" was the wrong suspect twice.)
-    note = "" if conf == "high" else f" (confidence: {conf}, source: {source})"
+    # Confidence is printed on EVERY run, including good ones. If it only appeared on doubtful
+    # readings, its absence would have to be interpreted — and an omission would be
+    # indistinguishable from a bug that stopped emitting it. Always-present means a missing
+    # confidence tag is itself the signal that something is wrong.
+    note = f" ({CONFIDENCE_PHRASE.get(source) or conf + ' confidence'})"
 
     fires = a.below is not None and price < a.below
     # Dampening: never repeat an identical alert. This is the only suppression allowed — the
@@ -180,7 +201,7 @@ def run(a):
             print(f"LOG: alert SUPPRESSED — only a {conf}-confidence price ({source}) was "
                   f"readable; refusing to alert on a guess")
         else:
-            print(f"ALERT({a.alert_to}): {price:.2f} is below your {a.below:.2f} target"
+            print(f"ALERT({a.alert_to}): {price:.2f}, under your {a.below:.2f} target"
                   f"{note} — {a.url}")
             state["alerted_price"] = price
     state["price"] = price

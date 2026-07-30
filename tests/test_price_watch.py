@@ -135,7 +135,17 @@ def main():
     pw.fetch = lambda url: FIX_AMAZON
     out = run(state="s3", below=50)
     check("alerts, but the message carries the caveat",
-          "ALERT(ohmz):" in out and "confidence: low" in out, out)
+          "ALERT(ohmz):" in out and "unconfirmed" in out, out)
+
+    print("--- confidence is stated on GOOD runs too, never merely omitted ---")
+    # If the tag only appeared on doubtful readings, a run that stopped emitting it would be
+    # indistinguishable from a clean measurement. Always-present makes its absence a signal.
+    pw.fetch = lambda url: FIX_JSONLD
+    good = run(state="s8", below=50)
+    check("a high-confidence LOG says so explicitly", "(high confidence)" in good, good)
+    check("...and so does its ALERT line",
+          "(high confidence)" in [l for l in good.splitlines() if l.startswith("ALERT")][0], good)
+    pw.fetch = lambda url: FIX_AMAZON   # restore: the checks below need the low-confidence page
     out = run(state="s4", below=50, require_confidence=True)
     check("--require-confidence suppresses it", "ALERT(" not in out, out)
     check("...loudly, with the reason", "SUPPRESSED" in out and "guess" in out, out)
@@ -161,9 +171,24 @@ def main():
     out = run(state="s7", below=50)
     check("no markdown link grammar in the output", "[" not in out and "]" not in out, out)
     check("the caveat is still there, in parentheses",
-          "(confidence: low, source: amazon-offer-listing)" in out, out)
+          "(unconfirmed - read from the offer listing" in out, out)
     check("and it survives into the ALERT line too",
-          "confidence: low" in [l for l in out.splitlines() if l.startswith("ALERT")][0], out)
+          "unconfirmed" in [l for l in out.splitlines() if l.startswith("ALERT")][0], out)
+
+    print("--- the source ID is translated into something a person can read ---")
+    # "amazon-offer-listing" is precise and tells the user nothing; they will never open this file
+    # to find out what it refers to. The caveat has to survive being read once, on a lock screen.
+    for src in ("amazon-offer-listing", "amazon-a-offscreen", "visible-text"):
+        phrase = pw.CONFIDENCE_PHRASE[src]
+        check(f"{src!r} has a plain-English phrase", phrase.startswith("unconfirmed"), phrase)
+        check(f"...that says which number was read ({src})", " - read from" in phrase, phrase)
+    for src in ("json-ld/price", "priceAmount", "og:price", "itemprop", "price_color", "selector"):
+        check(f"{src!r} reads as high confidence",
+              pw.CONFIDENCE_PHRASE[src] == "high confidence")
+    check("every source the extractor can emit has a phrase",
+          all(s in pw.CONFIDENCE_PHRASE
+              for s in ("json-ld/price", "priceAmount", "og:price", "itemprop", "price_color",
+                        "amazon-offer-listing", "amazon-a-offscreen", "visible-text", "selector")))
 
     print("--- alert text is parseable by the delivery watcher ---")
     spec = importlib.util.spec_from_file_location(
