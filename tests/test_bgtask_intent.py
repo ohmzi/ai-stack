@@ -92,6 +92,14 @@ def main():
         # to the render path. Assert the predicate itself stays quiet so ordering never matters.
         check(t, (p._is_image_request(t) or p._is_video_request(t)) and not p._is_bg_task_request(t))
 
+    print("--- the delegation brief stays paraphrase-proof (learned from job dc1230a29d82) ---")
+    brief = mod.Pipe._HERMES_BRIEF
+    for phrase in ("LOG:", "ALERT(", "does NOT run any delivery commands",
+                   "helper functions (they do not exist)",
+                   "including the very first run",
+                   "Never add prior-state or transition requirements"):
+        check(f"brief contains {phrase!r}", phrase in brief)
+
     fails = results.count(False)
     n_yes, n_no = len(YES), len(NO) + len(MEDIA_FIRST)
     print(f"\n{len(results)} checks ({n_yes} positive, {n_no} negative) — "
