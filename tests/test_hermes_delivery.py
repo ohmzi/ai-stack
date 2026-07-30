@@ -66,10 +66,51 @@ def main():
           ("ok_1", "legacy prefix") in alerts, repr(alerts))
 
 
+    print("--- un-substituted protocol templates are never delivered ---")
+    # Live failure 2026-07-30: a run emitted the brief's own example line verbatim. It parsed
+    # perfectly and a real phone received "<what happened, with the number>   (ONLY in a run
+    # where the user's alert condition holds)". Syntax cannot distinguish this from a real
+    # alert — only the placeholder can.
+    log, alerts = hd.parse_output(
+        "## Response\nLOG: checked\n"
+        "ALERT(ohmz): <what happened, with the number>   (ONLY in a run where the user's "
+        "alert condition holds)\n")
+    check("template alert is dropped, not sent", alerts == [], repr(alerts))
+    check("suppression is announced in the channel log", "suppressed 1" in (log or ""), repr(log))
+    check("the real LOG survives alongside the notice", "checked" in (log or ""), repr(log))
+    for bad in ("<msg>", "<summary of the run>", "ALERT text here (ONLY in a run where it holds)"):
+        check(f"placeholder {bad!r} rejected", hd.is_template(bad))
+    for good in ("46.99 is below your 50.00 target — https://x.com/dp/B0",
+                 "CPU at 91% (was 40%)", "price dropped to $12.34"):
+        check(f"real message {good[:28]!r}... delivered", not hd.is_template(good))
+    # A "<" that is arithmetic, not a placeholder, must still get through.
+    check("'price < 50 now' is not a template", not hd.is_template("price < 50 now, at 46.99"))
+
     print("--- alert flood capped (injection hygiene) ---")
     body = "## Response\n" + "".join(f"ALERT(a): spam {i}\n" for i in range(10))
     _, alerts = hd.parse_output(body)
     check("at most 3 alerts per run", len(alerts) == 3, str(len(alerts)))
+
+    print("--- send_alert's real contract (a stub with the wrong shape hid a live crash) ---")
+    # 2026-07-30: the retry queue did `ok, notes = send_alert(...)` while the real wrapper returned
+    # a bare bool. Every test passed, because the tests replaced send_alert with a 2-tuple version —
+    # the double was more correct than the code. The SMS went out and the watcher then died with
+    # "cannot unpack non-iterable bool object", taking the rest of the tick with it. So exercise the
+    # REAL wrapper here, stubbing only the transport beneath it.
+    import types
+    fake = types.ModuleType("alert_transports")
+    fake.send_alert = lambda r, m: (True, ["sms sent", "email sent"])
+    sys.modules["alert_transports"] = fake
+    got = hd.send_alert("ohmz", "target met")
+    check("returns a 2-tuple, not a bool", isinstance(got, tuple) and len(got) == 2, repr(got))
+    check("unpacks the way attempt_alert calls it", got[0] is True and "sms sent" in got[1], repr(got))
+
+    fake.send_alert = lambda r, m: (_ for _ in ()).throw(RuntimeError("smtp down"))
+    got = hd.send_alert("ohmz", "target met")
+    check("a raising transport still returns the pair", isinstance(got, tuple) and len(got) == 2, repr(got))
+    check("...reporting failure", got[0] is False, repr(got))
+    check("...and carrying the cause into the ledger", any("smtp down" in n for n in got[1]), repr(got))
+    del sys.modules["alert_transports"]
 
     print("--- alert retry queue: verified sends, 3 retries at 5-min spacing, full record ---")
     import tempfile as _tf, time as _t

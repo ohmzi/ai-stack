@@ -73,8 +73,27 @@ def parse_output(text):
         log = (("⚠️ RUN DID NOT FOLLOW THE OUTPUT PROTOCOL (no LOG line) — treat the text below as "
                 "unverified model output, not a measurement: " + lines[0][:160])
                if lines else None)
-    alerts = [(who, msg.strip()) for who, msg in ALERT_RE.findall(body)][:3]  # cap: injection
+    found = [(who, msg.strip()) for who, msg in ALERT_RE.findall(body)][:3]  # cap: injection
+    alerts = [a for a in found if not is_template(a[1])]
+    if len(alerts) < len(found):
+        # Never drop it quietly — a suppressed alert must be as visible as a delivered one, or a
+        # broken job looks like a calm one.
+        note = ("⚠️ suppressed %d un-substituted ALERT template(s) — the run echoed the protocol "
+                "instead of filling it in; NOT sent" % (len(found) - len(alerts)))
+        log = f"{log} | {note}" if log else note
     return log, alerts
+
+
+# A model that echoes the protocol template instead of filling it in produces a syntactically
+# perfect ALERT line whose body is the instruction text. One reached a real phone as
+# "<what happened, with the number>   (ONLY in a run where the user's alert condition holds)".
+# Nothing downstream can tell that from a real alert, so it has to die here: an alert body still
+# carrying an angle-bracket placeholder, or the brief's own parenthetical, was never substituted.
+TEMPLATE_RE = re.compile(r"<[a-z][a-z ,'-]{2,}>|ONLY in a run where|<username>|<msg>", re.I)
+
+
+def is_template(msg):
+    return bool(TEMPLATE_RE.search(msg))
 
 
 def post_channel(summary, job_name):
@@ -86,22 +105,24 @@ def post_channel(summary, job_name):
 
 
 def send_alert(recipient, message):
-    """Deliver a personal alert via the configured transports (Twilio SMS + SMTP email).
+    """Deliver a personal alert via the configured transports (SMS + SMTP email).
 
-    Returns True if ANY channel delivered. Import is local and guarded so a missing or broken
-    transport module degrades to "fold the alert into the channel post" instead of taking the whole
-    delivery tick down — the LOG line must always get through.
+    Returns ``(ok, notes)`` — ok is True if ANY channel delivered, notes are the per-channel
+    results. Returning the notes (rather than only printing them) is what puts the real reason a
+    send failed into the ledger; a bare bool made every failed attempt read "failed" with no cause.
+
+    Import is local and guarded so a missing or broken transport module degrades to "fold the alert
+    into the channel post" instead of taking the whole delivery tick down — the LOG line must always
+    get through.
     """
     try:
         sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
         from alert_transports import send_alert as _send
         ok, notes = _send(recipient, message)
-        for n in notes:
-            print(f"  alert[{recipient}]: {n}")
-        return ok
+        return bool(ok), list(notes)
     except Exception as e:
         print(f"  alert[{recipient}] transport error: {e}", file=sys.stderr)
-        return False
+        return False, [f"transport error: {e}"]
 
 
 def _now():
