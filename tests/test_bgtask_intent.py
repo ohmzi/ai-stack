@@ -110,6 +110,14 @@ def main():
                                 "systems and their history in computing", after_task))
     check("hermes replies carry the invisible marker", MARK.startswith("<!--") and MARK.endswith("-->"))
 
+    print("--- a FINISHED job must not block a new one (live failure 37d9907d5dfa) ---")
+    brief = mod.Pipe._HERMES_BRIEF
+    for phrase in ("ACTIVE and still has runs left", "completed, exhausted, disabled",
+                   "create a NEW one instead", "already running"):
+        check(f"rule 6 covers {phrase!r}", phrase in brief)
+    check("brief states alerts are configured (agent claimed otherwise)",
+          "text message AND an email" in brief and "Never tell the user alerts are unconfigured" in brief)
+
     print("--- the delegation brief stays paraphrase-proof (learned from job dc1230a29d82) ---")
     brief = mod.Pipe._HERMES_BRIEF
     for phrase in ("LOG:", "ALERT(", "does NOT run any delivery commands",

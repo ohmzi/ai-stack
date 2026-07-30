@@ -1691,8 +1691,9 @@ class Pipe:
         "5b. OUTPUT PROTOCOL — every job's prompt MUST end by instructing: finish your response with these lines, exactly this shape:\n"
         "    LOG: <one-line summary of this run, leading with the key number>   (always)\n"
         "    ALERT(<username>): <what happened, with the number>   (ONLY in a run where the user's alert condition holds)\n"
+        "Alerts ARE configured on this host: an ALERT line is delivered to the user as a text message AND an email, automatically. Never tell the user alerts are unconfigured.\n"
         "The LOG line is posted to the background-tasks channel automatically. An ALERT line is routed to whatever personal-alert transport is configured for that user (none is configured right now — the LOG line is what reaches the user). A run with no ALERT line raises no alert.\n"
-        "6. Never create overlapping duplicates — check existing jobs first.\n"
+        "6. Before creating, call cronjob(action='list') and look at STATE, not just names. Only a job that is ACTIVE and still has runs left counts as a duplicate — say so and stop. A job that is completed, exhausted, disabled or has no next run is FINISHED: it will never run again, so create a NEW one instead of pointing at it. Never describe a finished job as 'already running'.\n"
         "7. A one-off request ('check once', 'right now') is STILL a job: schedule it as a "
         "one-shot in 1 minute. This session cannot fetch pages itself — do not try to do the "
         "check directly here. A one-shot removes itself after running; that is success, not a "
@@ -1725,8 +1726,12 @@ class Pipe:
             return None
         try:
             import urllib.request
-            req = urllib.request.Request(f"{HERMES_URL.rsplit('/v1', 1)[0]}/api/jobs",
-                                         headers={"Authorization": f"Bearer {key}"})
+            # include_disabled=true is REQUIRED: the plain endpoint omits completed/exhausted
+            # jobs, so a cited id could not be resolved and a finished job looked like a
+            # fabrication. Verification needs the full picture to tell those apart.
+            req = urllib.request.Request(
+                f"{HERMES_URL.rsplit('/v1', 1)[0]}/api/jobs?include_disabled=true",
+                headers={"Authorization": f"Bearer {key}"})
             with urllib.request.urlopen(req, timeout=10) as r:
                 return {j.get("id"): j for j in json.load(r).get("jobs", [])}
         except Exception:
@@ -1784,11 +1789,16 @@ class Pipe:
                                 # polling at [DONE] raced it and cried wolf on a job that DID exist.
                                 # Retry briefly: a real creation surfaces within a second or two, a
                                 # fabricated one never does.
+                                def _runnable(j):
+                                    return (j.get("enabled", True)
+                                            and (j.get("state") or "").lower() != "completed")
+
                                 new_jobs = None
                                 for _ in range(6):
                                     after = self._hermes_jobs()
                                     if after is not None and before is not None:
-                                        new_jobs = [j for i, j in after.items() if i not in before]
+                                        new_jobs = [j for i, j in after.items()
+                                                    if i not in before and _runnable(j)]
                                         if new_jobs:
                                             break
                                     await asyncio.sleep(1)
@@ -1807,16 +1817,24 @@ class Pipe:
                                     # the scheduler.
                                     cited = [i for i in set(re.findall(r"\b[0-9a-f]{12}\b", reply))
                                              if i in (after or {})]
-                                    if cited:
-                                        j = after[cited[0]]
-                                        state = j.get("state") or ("active" if j.get("enabled", True)
-                                                                   else "paused")
+                                    live = [i for i in cited if _runnable(after[i])]
+                                    if live:
+                                        j = after[live[0]]
                                         sched = (j.get("schedule_display")
                                                  or str(j.get("schedule", "?")))
-                                        yield (f"\n\nℹ️ **No new job created** — the agent referred "
-                                               f"to an existing one: `{cited[0]}` ({sched}, "
-                                               f"{state}). That is a real job; nothing was "
-                                               f"fabricated.")
+                                        yield (f"\n\nℹ️ **No new job created** — the agent pointed "
+                                               f"at an existing ACTIVE job: `{live[0]}` ({sched}). "
+                                               f"Nothing was fabricated and it is still scheduled.")
+                                    elif cited:
+                                        # The failure this catches: the agent finds a FINISHED job
+                                        # of the same name, calls it "already running", and creates
+                                        # nothing — so the user's monitor silently does not exist.
+                                        j = after[cited[0]]
+                                        yield (f"\n\n⚠️ **Nothing is scheduled**: the agent pointed "
+                                               f"at job `{cited[0]}`, which has already FINISHED "
+                                               f"({j.get('state', 'completed')}, next run: none). "
+                                               f"No new job was created. Reply "
+                                               f"**\"create a new one\"** to schedule it properly.")
                                     else:
                                         yield ("\n\n⚠️ **Verification failed**: the agent described "
                                                "a job but the scheduler has NO matching entry — "
