@@ -78,6 +78,14 @@ HERMES_URL = "http://127.0.0.1:8642/v1"
 # Env override for the host-side harnesses, same pattern as MEDIA_METRICS.
 HERMES_KEY_FILE = os.environ.get("HERMES_KEY_FILE", "/app/backend/data/hermes_api_key")
 HERMES_TIMEOUT_S = 300  # an agent turn can run several tool calls before answering
+# Alert wiring the pipe can see from inside the container. Both live in the OpenWebUI config
+# directory because that is the only path shared with the host, where the transports run:
+#   contacts — read AND written here, so a phone number the user types in chat is usable at once
+#   profile  — non-secret display facts (sender address, channels), refreshed by the delivery
+#              watcher every minute so this can never describe a setup that is no longer true
+ALERT_CONTACTS_FILE = os.environ.get("ALERT_CONTACTS",
+                                     "/app/backend/data/alerts/contacts.json")
+ALERT_PROFILE_FILE = os.environ.get("ALERT_PROFILE", "/app/backend/data/alerts/profile.json")
 VID_ENHANCE = True  # expand terse video ideas ("guy shooting hoops") into detailed prompts — the
                     # single biggest quality lever for Wan; terse prompts produce broken scenes
 VID_VERIFY = True   # vision-check a mid frame of the clip against the request; one corrected retry
@@ -514,6 +522,194 @@ class Pipe:
         r"(?:re-?)?enable|(?:re-?)?activate|resume|restart|re-?run|run it|"
         r"the first|the second|that one|this one|both|neither|new one|a new one|"
         r"cancel|stop|pause|remove|delete|no)\b[\s\S]{0,80}$", re.I)
+
+    # A task that should TEXT the user needs a number on file. Without this check the job is
+    # created, runs, fires, and the alert is skipped with "no phone for 'ohmz'" in a log nobody
+    # reads — the user believes they are being watched and hears nothing.
+    _WANTS_ALERT = re.compile(
+        r"\b(?:text|sms|message)\s+me\b|\bnotify\s+me\b|\balert\s+me\b|\bping\s+me\b|"
+        r"\blet\s+me\s+know\b|\btell\s+me\s+(?:when|if|as soon as)\b|"
+        r"\bsend\s+(?:me\s+)?a\s+(?:text|sms|message)\b|\b(?:text|sms)\s+(?:alert|me)\b",
+        re.I)
+    # Carries the pending request across the "what is your number?" turn. Base64 so the original
+    # wording (which may contain quotes, newlines or --) cannot break the HTML comment or leak into
+    # the rendered chat.
+    _PHONE_MARK_RE = re.compile(r"<!--bg-need-phone:([A-Za-z0-9+/=]*)-->")
+    _PHONE_RE = re.compile(r"(\+?\d[\d\s().-]{7,}\d)")
+    _PHONE_DECLINE = re.compile(
+        r"^\s*(?:no|nope|skip|later|don'?t|do not|email only|just email|no thanks?)\b", re.I)
+
+    @staticmethod
+    def _norm_phone(raw, default_country="+1"):
+        """-> E.164 or None. Mirrors scripts/alert_transports.normalize_phone; the pipe runs in a
+        container and cannot import it, so the rule is duplicated and pinned by tests on both
+        sides — a number accepted here and rejected there would fail silently at 3am."""
+        if not raw:
+            return None
+        s = re.sub(r"[^\d+]", "", str(raw))
+        digits = re.sub(r"\D", "", s)
+        if s.startswith("+"):
+            return "+" + digits if 8 <= len(digits) <= 15 else None
+        if len(digits) == 10:
+            return f"{default_country}{digits}"
+        if len(digits) == 11 and digits.startswith("1"):
+            return f"+{digits}"
+        return None
+
+    @staticmethod
+    def _read_json(path, default):
+        try:
+            with open(path) as f:
+                return json.load(f)
+        except Exception:
+            return default
+
+    def _contact(self, handle):
+        return (self._read_json(ALERT_CONTACTS_FILE, {}) or {}).get(handle) or {}
+
+    def _save_phone(self, handle, e164):
+        """Persist a number for this handle. Returns True on success.
+
+        Written atomically to the shared file so the host-side transports see it on the very next
+        delivery tick — the user should not have to re-schedule the task they just asked for."""
+        contacts = self._read_json(ALERT_CONTACTS_FILE, {}) or {}
+        entry = dict(contacts.get(handle) or {})
+        entry["phone"] = e164
+        contacts[handle] = entry
+        try:
+            tmp = ALERT_CONTACTS_FILE + ".tmp"
+            with open(tmp, "w") as f:
+                json.dump(contacts, f, indent=2)
+            os.replace(tmp, ALERT_CONTACTS_FILE)
+            return True
+        except Exception:
+            return False
+
+    @staticmethod
+    def _pretty_phone(e164):
+        d = re.sub(r"\D", "", e164 or "")
+        if len(d) == 11 and d.startswith("1"):
+            return f"+1 {d[1:4]}-{d[4:7]}-{d[7:]}"
+        return e164 or "—"
+
+    def _alert_setup_block(self, handle):
+        """Exactly how an alert for this user will be delivered, shown when a task is scheduled.
+
+        The user should never have to discover their alert setup by waiting for one to fire (or
+        not). Every line here is something they can check at a glance and correct now: a wrong
+        number, an address they do not read, a sender their phone will show as unknown.
+        """
+        prof = self._read_json(ALERT_PROFILE_FILE, {}) or {}
+        c = self._contact(handle)
+        phone = c.get("phone")
+        email = c.get("email")
+        chans = prof.get("channels") or ["sms", "email"]
+        rows = []
+        if "sms" in chans:
+            if phone:
+                frm = prof.get("sms_from")
+                via = f" · shows as **{frm}**" if frm else ""
+                rows.append(f"| 📱 Text | `{self._pretty_phone(phone)}`{via} |")
+            else:
+                rows.append("| 📱 Text | *no number on file — say “text me at …” to add one* |")
+        if "email" in chans:
+            rows.append(f"| ✉️ Email | `{email}` |" if email
+                        else "| ✉️ Email | *no address on file* |")
+        rows.append("| 📋 Every run | one line in **background-tasks** |")
+        if not rows:
+            return ""
+        notes = [
+            # The single most common first-week misdiagnosis: a channel post arrives, no text does,
+            # and the user concludes the alerting is broken. It is not — the condition simply was
+            # not met. Say so before it happens.
+            "Every check posts a line to the channel; only a check that **meets your condition** "
+            "texts you.",
+        ]
+        if phone and prof.get("sms_strips_links", True):
+            notes.append("Texts arrive without links — carriers drop any message containing one — "
+                         "so the link is in the email.")
+        return ("\n\n**How you'll be alerted**\n\n"
+                "| | |\n|---|---|\n" + "\n".join(rows) + "\n\n" + " ".join(notes))
+
+    def _phone_prompt(self, handle, pending_request):
+        """Ask for a number BEFORE scheduling, and carry the request across the turn."""
+        blob = base64.b64encode((pending_request or "").encode()).decode()
+        prof = self._read_json(ALERT_PROFILE_FILE, {}) or {}
+        email = self._contact(handle).get("email")
+        alt = (f"Or reply **email only** — alerts still go to `{email}`."
+               if email else "Or reply **email only** to skip texts.")
+        # Set the expectation about the sender BEFORE the number is handed over. These texts arrive
+        # from an email-to-SMS gateway, so the sender shows as an address rather than a number —
+        # which reads as spam if it turns up unannounced.
+        frm = prof.get("sms_from")
+        heads_up = (f"\n\nHeads up: texts arrive from **{frm}**, not a phone number — that's how "
+                    f"the free carrier gateway works. Save it as a contact so it doesn't read as "
+                    f"spam." if frm else "")
+        return (f"📱 **What number should I text?**\n\n"
+                f"You asked to be alerted, but there's no number saved for `{handle}` — so the task "
+                f"would run, meet your condition, and text nobody.\n\n"
+                f"Reply with your mobile number and I'll save it and schedule the task in one go. "
+                f"Any of these work:\n"
+                f"`5145550123` · `514-555-0123` · `+1 514 555 0123`\n\n"
+                f"{alt}{heads_up}\n"
+                f"<!--bg-need-phone:{blob}-->")
+
+    @staticmethod
+    async def _say(text):
+        yield text
+
+    async def _phone_then_task(self, e164, handle, pending):
+        """Save the number, then run the request the user made a turn ago."""
+        if not self._save_phone(handle, e164):
+            yield (f"⚠️ Couldn't save `{self._pretty_phone(e164)}` — `{ALERT_CONTACTS_FILE}` is "
+                   f"not writable. The task was NOT scheduled; alerts would have gone nowhere.")
+            return
+        yield f"✅ Saved `{self._pretty_phone(e164)}` for texts.\n\n"
+        if not pending:
+            yield ("Now tell me what to watch and I'll set it up." + self._BG_MARK)
+            return
+        async for chunk in self._hermes_stream(pending, handle, verify_creation=True):
+            yield chunk
+
+    def _phone_reply(self, text, handle, pending):
+        """Handle the turn AFTER a phone prompt. None => not a phone answer, route normally."""
+        t = (text or "").strip()
+        if self._PHONE_DECLINE.match(t):
+            if not pending:
+                return self._say("No problem — no number saved." + self._BG_MARK)
+            return self._hermes_stream(pending, handle, verify_creation=True)
+        m = self._PHONE_RE.search(t)
+        if not m:
+            # A short, digit-heavy reply to "what is your number?" IS a phone attempt even when it
+            # is too mangled to match the pattern. Letting "12345" fall through sends it to the
+            # chat model, which has no idea a number was requested and will answer as if it were
+            # small talk. Anything else (a real question, a change of subject) routes normally.
+            digits = len(re.sub(r"\D", "", t))
+            if not (len(t) <= 40 and digits >= 4 and digits >= len(re.sub(r"\s", "", t)) // 2):
+                return None
+            attempt = t
+        else:
+            attempt = m.group(1)
+        e164 = self._norm_phone(attempt)
+        if not e164:
+            # Reject at the point they typed it, not silently at send time three days later.
+            return self._say(
+                f"`{attempt.strip()}` doesn't look like a mobile number I can text — I need "
+                f"10 digits (or +country code). Try again, or reply **email only**.\n"
+                f"<!--bg-need-phone:{base64.b64encode((pending or '').encode()).decode()}-->")
+        return self._phone_then_task(e164, handle, pending)
+
+    def _pending_phone_request(self, messages):
+        """The request parked by a previous _phone_prompt, or None."""
+        prev = next((m.get("content") or "" for m in reversed(messages or [])
+                     if m.get("role") == "assistant"), "")
+        m = self._PHONE_MARK_RE.search(prev)
+        if not m:
+            return None
+        try:
+            return base64.b64decode(m.group(1)).decode() or ""
+        except Exception:
+            return ""
 
     def _is_bg_followup(self, text, messages):
         """True when this short message continues the previous hermes exchange in THIS chat."""
@@ -1843,6 +2039,7 @@ class Pipe:
                                     yield (f"\n\n✅ **Verified scheduled**: job `{j.get('id')}` "
                                            f"({sched}) — confirmed against the scheduler, not the "
                                            f"agent's word.")
+                                    yield self._alert_setup_block(uname)
                                 elif new_jobs is not None:
                                     # No NEW job is not the same as a fabrication. The agent may
                                     # legitimately have found an existing match and asked what to
@@ -2298,9 +2495,26 @@ class Pipe:
         # alert me" contains no code but 'script-like' phrasing must not reach the coder either).
         # `text` is the clean routing prompt, so RAG/search context cannot fabricate a job.
         if BG_TASKS and not attached_img and not ref:
+            handle = self._alert_username(__user__)
+            # A turn that answers "what number should I text?" is handled before anything else —
+            # a bare "514-555-0123" matches no task predicate and would otherwise reach the chat
+            # model, which would cheerfully claim to have saved it.
+            pending = self._pending_phone_request(omsgs)
+            if pending is not None:
+                answered = self._phone_reply(text, handle, pending)
+                if answered is not None:
+                    return answered
             followup = self._is_bg_followup(text, omsgs)
             if followup or self._is_bg_task_request(text):
                 is_manage = bool(self._BG_MANAGE.match((text or "").strip().lower()))
+                # Ask for a number BEFORE scheduling anything. Creating the job first would leave
+                # a monitor that runs, fires, and texts nobody — the user believing they are
+                # covered. Only for genuinely new alerting requests: managing or continuing an
+                # existing task must never be interrupted by a form.
+                if (not followup and not is_manage
+                        and self._WANTS_ALERT.search(text or "")
+                        and not self._contact(handle).get("phone")):
+                    return self._say(self._phone_prompt(handle, text))
                 sent = text
                 if followup:
                     # "yes reenable" is meaningless alone — hand hermes what it just asked.
@@ -2311,7 +2525,7 @@ class Pipe:
                             f"The user now replies: {text}\n"
                             f"Act on it against the REAL scheduler state — call "
                             f"cronjob(action='list') first and work from what is actually there.")
-                return self._hermes_stream(sent, self._alert_username(__user__),
+                return self._hermes_stream(sent, handle,
                                            verify_creation=not (is_manage or followup))
         if not attached_img and not ref and await asyncio.to_thread(self._is_code_request, text):
             return self._locked_stream(self._achat_stream(

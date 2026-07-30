@@ -1,0 +1,170 @@
+#!/usr/bin/env python3
+"""The alert SETUP path: ask for a number before scheduling, and say exactly what will happen.
+
+Why this file exists. A task that should text you needs a number on file. Without that check the
+job is created, runs, fires its condition, and the alert is skipped with "no phone for 'ohmz'" in a
+log nobody reads — the user believes they are being watched and hears nothing. That is the same
+silent-loss shape as the gateway eating links and the MX-less mail domain, arriving one layer
+earlier.
+
+Pinned here:
+
+  * **The gate fires before creation, not after.** Scheduling first and asking later leaves a live
+    monitor that texts nobody.
+  * **It does not fire on management or follow-ups.** "cancel the price monitor" must never be
+    interrupted by a form, and neither must "yes, reenable" mid-conversation.
+  * **The parked request survives the turn.** The user asked for something; making them retype it
+    after handing over a number is how a request gets lost.
+  * **A bare phone number routes correctly.** "514-555-0123" matches no task predicate; without the
+    marker check it reaches the chat model, which will happily claim to have saved it.
+  * **Normalization agrees with the transports.** The pipe runs in a container and cannot import
+    alert_transports, so the E.164 rule is duplicated. A number accepted by one and rejected by the
+    other fails silently at 3am. Both implementations are run against the same table here.
+
+Usage:  python3 tests/test_alert_setup.py
+"""
+import asyncio
+import base64
+import importlib.util
+import json
+import os
+import sys
+import tempfile
+
+results = []
+
+
+def check(label, ok, detail=""):
+    results.append(ok)
+    print(f"  [{'PASS' if ok else 'FAIL'}] {label}" + (f"   {detail}" if detail and not ok else ""))
+
+
+def load(path, name, **env):
+    for k, v in env.items():
+        os.environ[k] = v
+    spec = importlib.util.spec_from_file_location(name, path)
+    m = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(m)
+    return m
+
+
+def drain(agen):
+    async def go():
+        return "".join([c async for c in agen])
+    return asyncio.run(go())
+
+
+def main():
+    tmp = tempfile.mkdtemp()
+    contacts = os.path.join(tmp, "alert_contacts.json")
+    profile = os.path.join(tmp, "alert_profile.json")
+    json.dump({"ohmz": {"email": "o@gmail.com"}}, open(contacts, "w"))
+    json.dump({"channels": ["sms", "email"], "sms_from": "relay@gmail.com",
+               "sms_gateway": "msg.telus.com"}, open(profile, "w"))
+
+    mod = load("/home/ohmz/ai-stack/pipes/live/auto_assistant.py", "aa",
+               ALERT_CONTACTS=contacts, ALERT_PROFILE=profile)
+    at = load("/home/ohmz/ai-stack/scripts/alert_transports.py", "at")
+    p = mod.Pipe()
+
+    print("--- alert intent is detected, ordinary tasks are not gated ---")
+    for t in ["monitor the price and text me when it drops below 50",
+              "watch this page and notify me if it changes",
+              "check the price every 6h and alert me under 50",
+              "let me know when it goes on sale",
+              "ping me if the server goes down",
+              "tell me when the price drops"]:
+        check(f"alert intent: {t[:38]!r}", bool(p._WANTS_ALERT.search(t)))
+    for t in ["monitor the price every 6 hours",
+              "check this page daily and log the result",
+              "list my background tasks",
+              "write me a python script that texts people"]:
+        check(f"NOT an alert request: {t[:38]!r}", not p._WANTS_ALERT.search(t))
+
+    print("--- E.164 rule is identical on both sides of the container boundary ---")
+    for raw in ["+15145579764", "5145579764", "(514) 557-9764", "514-557-9764", "15145579764",
+                "+44 7700 900123", "123", "not a phone", "", None, "555 12", "1 514 557 9764"]:
+        a, b = p._norm_phone(raw), at.normalize_phone(raw)
+        check(f"{raw!r}: pipe={a!r} transports={b!r} agree", a == b, f"{a!r} vs {b!r}")
+
+    print("--- the gate: asked for, and only for, a new alerting task with no number ---")
+    prompt = p._phone_prompt("ohmz", "watch the price and text me under 50")
+    check("prompt names the handle", "`ohmz`" in prompt)
+    check("prompt says why it matters", "text nobody" in prompt)
+    check("prompt offers an email-only escape", "email only" in prompt)
+    check("prompt mentions the fallback address", "o@gmail.com" in prompt)
+    # A first-time user has no idea what shape to type, and no idea the text will arrive from an
+    # email address — which reads as spam if it turns up unannounced.
+    check("shows literal formats that are accepted", "514-555-0123" in prompt and "+1 514" in prompt)
+    check("warns about the sender BEFORE the number is handed over",
+          "relay@gmail.com" in prompt and prompt.index("relay@gmail.com") > prompt.index("Reply with"))
+    check("tells them to save it as a contact", "read as spam" in prompt)
+    check("prompt carries the parked request", bool(p._PHONE_MARK_RE.search(prompt)))
+    parked = base64.b64decode(p._PHONE_MARK_RE.search(prompt).group(1)).decode()
+    check("...and it round-trips exactly", parked == "watch the price and text me under 50", parked)
+
+    msgs = [{"role": "assistant", "content": prompt}]
+    check("pipe recognises the parked state", p._pending_phone_request(msgs) == parked)
+    check("no marker -> nothing parked",
+          p._pending_phone_request([{"role": "assistant", "content": "hi"}]) is None)
+
+    print("--- answering with a number saves it and runs the original request ---")
+    sent = {}
+
+    def fake_stream(text, uname="user", verify_creation=False):
+        sent.update(text=text, uname=uname, verify=verify_creation)
+        async def go():
+            yield "[scheduled]"
+        return go()
+    p._hermes_stream = fake_stream
+
+    out = drain(p._phone_reply("514-555-0123", "ohmz", parked))
+    check("confirms the saved number", "✅ Saved" in out and "514-555-0123" in out, out)
+    check("the parked request is what got delegated", sent.get("text") == parked, repr(sent))
+    check("creation is still verified", sent.get("verify") is True, repr(sent))
+    saved = json.load(open(contacts))
+    check("number persisted in E.164", saved["ohmz"]["phone"] == "+15145550123", repr(saved))
+    check("existing email was not clobbered", saved["ohmz"]["email"] == "o@gmail.com", repr(saved))
+
+    print("--- a junk number is rejected where it was typed, not at 3am ---")
+    out = drain(p._say(""))  # warm-up, keeps the helper exercised
+    r = p._phone_reply("12345", "ohmz", parked)
+    out = drain(r)
+    check("explains what is wrong", "doesn't look like a mobile number" in out, out)
+    check("re-parks the request so it is not lost", bool(p._PHONE_MARK_RE.search(out)), out)
+    check("nothing was scheduled", sent.get("text") == parked, repr(sent))
+
+    print("--- 'email only' proceeds without a number ---")
+    sent.clear()
+    out = drain(p._phone_reply("email only", "ohmz", parked))
+    check("the task still gets created", sent.get("text") == parked, repr(sent))
+    check("no prompt is repeated", "What number" not in out, out)
+
+    print("--- an unrelated reply is NOT swallowed by the phone flow ---")
+    check("free text falls through to normal routing",
+          p._phone_reply("actually, what is the weather", "ohmz", parked) is None)
+
+    print("--- the confirmation block states the real delivery setup ---")
+    block = p._alert_setup_block("ohmz")
+    check("shows the number that will be texted", "+1 514-555-0123" in block, block)
+    check("shows the address the text arrives from", "relay@gmail.com" in block, block)
+    check("shows the email destination", "o@gmail.com" in block, block)
+    check("mentions the run log channel", "background-tasks" in block, block)
+    check("sets the no-links expectation", "carriers drop" in block, block)
+    check("explains where the link is instead", "link is in the email" in block, block)
+    # The #1 first-week misdiagnosis: a channel line arrives, no text does, and the user concludes
+    # alerting is broken when the condition simply was not met.
+    check("pre-empts 'I got a channel post but no text'",
+          "meets your condition" in block, block)
+
+    json.dump({"nobody": {}}, open(contacts, "w"))
+    block = p._alert_setup_block("nobody")
+    check("a user with no number is told so, not shown a blank",
+          "no number on file" in block, block)
+
+    fails = results.count(False)
+    print(f"\n{len(results)} checks — {'ALL PASS' if not fails else str(fails) + ' FAILURE(S)'}")
+    return 1 if fails else 0
+
+
+sys.exit(main())
