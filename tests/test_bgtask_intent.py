@@ -92,6 +92,24 @@ def main():
         # to the render path. Assert the predicate itself stays quiet so ordering never matters.
         check(t, (p._is_image_request(t) or p._is_video_request(t)) and not p._is_bg_task_request(t))
 
+    print("--- conversational follow-ups continue the task exchange, but ONLY there ---")
+    # Live failure: the agent asked "re-enable this one, or create new?"; the user answered
+    # "yes reenable"; that matched no bg predicate, went to the CHAT model, and produced a
+    # confident hallucinated confirmation citing the real job id it had read from the transcript.
+    MARK = mod.Pipe._BG_MARK
+    after_task = [{"role": "assistant", "content": "Job `37d9907d5dfa` already exists. "
+                                                   "Re-enable it or create a new one?" + MARK}]
+    after_chat = [{"role": "assistant", "content": "Paris is the capital of France."}]
+    for t in ["yes reenable", "yes re-enable it", "go ahead", "resume it", "the first one",
+              "cancel it", "ok", "both"]:
+        check(f"follow-up after a task reply: {t!r}", p._is_bg_followup(t, after_task))
+    for t in ["yes reenable", "yes", "ok thanks", "go ahead", "cancel it"]:
+        check(f"same words in ordinary chat stay chat: {t!r}", not p._is_bg_followup(t, after_chat))
+    check("a long message is not a follow-up",
+          not p._is_bg_followup("yes and also please write a detailed essay about scheduling "
+                                "systems and their history in computing", after_task))
+    check("hermes replies carry the invisible marker", MARK.startswith("<!--") and MARK.endswith("-->"))
+
     print("--- the delegation brief stays paraphrase-proof (learned from job dc1230a29d82) ---")
     brief = mod.Pipe._HERMES_BRIEF
     for phrase in ("LOG:", "ALERT(", "does NOT run any delivery commands",

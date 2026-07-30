@@ -11,7 +11,7 @@ bounded, GPU-safe scheduled job, executed by a local agent and reported back int
 | Model | `hermes-genesis:agent` — a second Ollama tag of the SAME weights as the chat model (`ollama create` from `apex-compact` + `PARAMETER num_ctx 65536`; shares blobs, ~0 extra disk). Exists because hermes hard-requires a 64 K context window, and raising the global `OLLAMA_CONTEXT_LENGTH=32768` would tax every OpenWebUI chat turn instead. |
 | Service | `hermes-gateway` systemd **user** service (linger enabled). Hosts the cron scheduler and the API server on `127.0.0.1:8642` (key in `~/.hermes/.env`, a copy staged at `/volume1/docker/openwebui/config/hermes_api_key` so the pipe can read it in-container). |
 | GPU guard | `~/.hermes/plugins/gpuguard/` — a cron scheduler provider (config `cron.provider: gpuguard`) that defers ticks while ComfyUI's `/queue` shows anything running or pending. Due jobs are never lost, only deferred to the next 60 s tick. Covered by `tests/test_gpuguard.py` (9 checks). **Caveat:** a hand-run `hermes cron tick` bypasses the provider; the gateway path — the only unattended path — is guarded. |
-| Delivery | **Deterministic since 2026-07-30**: jobs run NO delivery commands — they end their response with `LOG: <summary>` (always) and `ALERT(alerts-<user>): <msg>` (only when the user's condition holds). `scripts/hermes_delivery.py` (user timer, 1 min) parses each new output under `~/.hermes/cron/output/<job>/` and does the delivery itself: LOG → background-tasks channel webhook, ALERT → `send_alert()` (no transport configured since ntfy's removal — alerts ride the channel post flagged). Recipients validated against `^[a-z0-9_-]+$`, 3 alerts/run cap, per-leg retry (a failed push never re-posts the channel log). Born from two live failures: an agent-authored job that invented `send_webhook_post()` helpers and delivered nothing, then an agent that *claimed* deliveries which never happened. The LLM writes text; infrastructure delivers. Covered by `tests/test_hermes_delivery.py` (9 checks). |
+| Delivery | **Deterministic since 2026-07-30**: jobs run NO delivery commands — they end their response with `LOG: <summary>` (always) and `ALERT(<user>): <msg>` (only when the user's condition holds). `scripts/hermes_delivery.py` (user timer, 1 min) parses each new output under `~/.hermes/cron/output/<job>/` and does the delivery itself: LOG → background-tasks channel webhook, ALERT → `send_alert()` → text (carrier email-to-SMS gateway) + email, both proven live 2026-07-30. Recipients validated against `^[a-z0-9_-]+$`, 3 alerts/run cap, per-leg retry (a failed push never re-posts the channel log). Born from two live failures: an agent-authored job that invented `send_webhook_post()` helpers and delivered nothing, then an agent that *claimed* deliveries which never happened. The LLM writes text; infrastructure delivers. Covered by `tests/test_hermes_delivery.py` (9 checks). |
 | Entry point | The `auto_assistant` pipe routes background-task intent (`tests/test_bgtask_intent.py`, 30 checks, default-deny) to `POST 127.0.0.1:8642/v1/chat/completions` — an agent runtime, not an LLM proxy. The agent creates/manages its own cron jobs via its `cronjob` tool and streams confirmation back into the same chat. **No second model row in the picker; the single-pipe architecture holds.** |
 
 ## Config decisions that are deliberate
@@ -84,6 +84,20 @@ phone authenticate and fetch each message **within one second of publish**. Aler
 every time; iOS refused to render a banner, through re-subscribes, base_url alignment, urgent
 priority and a settings audit. The failure lived in a layer this stack cannot instrument. SMS has no
 equivalent layer: the carrier either delivers a text or returns an error code.
+
+
+### Follow-ups in a task conversation
+
+Every hermes reply ends with an invisible `<!--bg-task-->` marker. A short next message ("yes
+reenable", "go ahead", "the first one") is routed back to hermes **only when the previous assistant
+turn carried that marker** — otherwise the same words are ordinary chat. The prior exchange is sent
+along so the answer has a referent, and the agent is told to call `cronjob(action='list')` and work
+from real scheduler state.
+
+This exists because of a live failure: the agent asked "re-enable this one, or create a new pair?",
+the user answered "yes reenable", the message matched no task predicate, went to the **chat** model
+— which read the job id out of the transcript and produced a confident confirmation of something it
+had not done and could not do.
 
 ## Rollback
 

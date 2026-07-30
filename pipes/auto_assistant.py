@@ -499,6 +499,30 @@ class Pipe:
     _BG_QUESTION = re.compile(
         r"^\s*(?:how|what|which|why|is there|are there|do you know|can i|should i)\b", re.I)
 
+    # Every hermes reply carries this marker. HTML comments do not render in the chat, so it is
+    # invisible to the user but survives into the message history the next turn receives — which is
+    # how a follow-up ("yes, reenable it") knows it belongs to the task conversation rather than to
+    # the general chat model.
+    _BG_MARK = "<!--bg-task-->"
+    # Short conversational follow-ups. These are only honoured when the PREVIOUS assistant turn was
+    # a hermes reply; on their own they are ordinary chat. Live failure that motivated this: after
+    # the agent asked "re-enable this one, or create new?", the user answered "yes reenable" — which
+    # matched no bg predicate, went to the chat model, and got a confident hallucinated confirmation
+    # citing the real job id it had read from the transcript.
+    _BG_FOLLOWUP = re.compile(
+        r"^\s*(?:yes|yeah|yep|ok(?:ay)?|sure|please|do it|go ahead|sounds good|"
+        r"(?:re-?)?enable|(?:re-?)?activate|resume|restart|re-?run|run it|"
+        r"the first|the second|that one|this one|both|neither|new one|a new one|"
+        r"cancel|stop|pause|remove|delete|no)\b[\s\S]{0,80}$", re.I)
+
+    def _is_bg_followup(self, text, messages):
+        """True when this short message continues the previous hermes exchange in THIS chat."""
+        if not text or len(text) > 120:
+            return False
+        prev = next((m.get("content") or "" for m in reversed(messages or [])
+                     if m.get("role") == "assistant"), "")
+        return self._BG_MARK in prev and bool(self._BG_FOLLOWUP.match(text.strip()))
+
     def _is_bg_task_request(self, t):
         raw = (t or "").strip().lower()
         if self._BG_SLASH.match(raw):
@@ -1738,6 +1762,8 @@ class Pipe:
         payload = {"model": "hermes-agent", "stream": True,
                    "messages": [{"role": "system", "content": self._HERMES_BRIEF + "\n" + ctx},
                                 {"role": "user", "content": text}]}
+        reply = ""          # accumulated so verification can check ids the agent cites
+        after = None
         timeout = aiohttp.ClientTimeout(total=None, sock_connect=15, sock_read=HERMES_TIMEOUT_S)
         try:
             async with aiohttp.ClientSession(timeout=timeout) as s:
@@ -1773,11 +1799,31 @@ class Pipe:
                                            f"({sched}) — confirmed against the scheduler, not the "
                                            f"agent's word.")
                                 elif new_jobs is not None:
-                                    yield ("\n\n⚠️ **Verification failed**: the agent described a "
-                                           "job but the scheduler has NO new entry — nothing was "
-                                           "actually created. Please resend the request.")
+                                    # No NEW job is not the same as a fabrication. The agent may
+                                    # legitimately have found an existing match and asked what to
+                                    # do — that happened live, and calling it a fabrication told
+                                    # the user to resend a request that was answered correctly.
+                                    # Distinguish by checking any job id the reply cites against
+                                    # the scheduler.
+                                    cited = [i for i in set(re.findall(r"\b[0-9a-f]{12}\b", reply))
+                                             if i in (after or {})]
+                                    if cited:
+                                        j = after[cited[0]]
+                                        state = j.get("state") or ("active" if j.get("enabled", True)
+                                                                   else "paused")
+                                        sched = (j.get("schedule_display")
+                                                 or str(j.get("schedule", "?")))
+                                        yield (f"\n\nℹ️ **No new job created** — the agent referred "
+                                               f"to an existing one: `{cited[0]}` ({sched}, "
+                                               f"{state}). That is a real job; nothing was "
+                                               f"fabricated.")
+                                    else:
+                                        yield ("\n\n⚠️ **Verification failed**: the agent described "
+                                               "a job but the scheduler has NO matching entry — "
+                                               "nothing was actually created. Please resend.")
                                 else:
                                     yield "\n\n(could not verify job creation — /api/jobs unreachable)"
+                            yield self._BG_MARK
                             return
                         try:
                             d = json.loads(data)
@@ -1785,6 +1831,7 @@ class Pipe:
                             continue
                         tok = ((d.get("choices") or [{}])[0].get("delta") or {}).get("content", "")
                         if tok:
+                            reply += tok
                             yield tok
         except asyncio.TimeoutError:
             yield ("\n\n⏳ hermes-agent did not finish within the window — the job may still have "
@@ -2197,10 +2244,22 @@ class Pipe:
         # request to render never becomes a job) and BEFORE coder routing ("track the price and
         # alert me" contains no code but 'script-like' phrasing must not reach the coder either).
         # `text` is the clean routing prompt, so RAG/search context cannot fabricate a job.
-        if BG_TASKS and not attached_img and not ref and self._is_bg_task_request(text):
-            is_manage = bool(self._BG_MANAGE.match((text or "").strip().lower()))
-            return self._hermes_stream(text, self._alert_username(__user__),
-                                       verify_creation=not is_manage)
+        if BG_TASKS and not attached_img and not ref:
+            followup = self._is_bg_followup(text, omsgs)
+            if followup or self._is_bg_task_request(text):
+                is_manage = bool(self._BG_MANAGE.match((text or "").strip().lower()))
+                sent = text
+                if followup:
+                    # "yes reenable" is meaningless alone — hand hermes what it just asked.
+                    prev = next((m.get("content") or "" for m in reversed(omsgs)
+                                 if m.get("role") == "assistant"), "")
+                    sent = (f"Continuing our exchange. You previously said:\n"
+                            f"{prev.replace(self._BG_MARK, '')[-1200:]}\n\n"
+                            f"The user now replies: {text}\n"
+                            f"Act on it against the REAL scheduler state — call "
+                            f"cronjob(action='list') first and work from what is actually there.")
+                return self._hermes_stream(sent, self._alert_username(__user__),
+                                           verify_creation=not (is_manage or followup))
         if not attached_img and not ref and await asyncio.to_thread(self._is_code_request, text):
             return self._locked_stream(self._achat_stream(
                 omsgs, guard_text=self._CODER_GUARD, keep_system=AUTO_KEEP_SYSTEM,
