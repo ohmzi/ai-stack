@@ -42,6 +42,7 @@ import json
 import os
 import re
 import sys
+import urllib.error
 import urllib.request
 
 STATE_DIR = os.path.expanduser("~/.hermes/monitor-state")
@@ -54,13 +55,51 @@ HEADERS = {"Accept": "text/html,application/xhtml+xml", "Accept-Language": "en-C
 MONEY = r"([0-9][0-9,]*\.[0-9]{2})"
 
 
+class Blocked(Exception):
+    """The site served a robot wall instead of the page. Not a transient failure — retrying on the
+    same schedule will keep hitting it, so it needs its own message and its own advice."""
+
+
+class Gone(Exception):
+    """The URL looks permanently broken (4xx, or a host that no longer resolves)."""
+
+
+def classify_error(e):
+    """('gone'|'blocked'|'transient', short human reason).
+
+    A dead amazon.ca product returns HTTP **500**, not 404 — measured — so status code alone cannot
+    decide this. 4xx and an unresolvable host are treated as permanent; everything else (5xx,
+    timeouts, resets) is transient and gets more patience before the user is told anything.
+    """
+    if isinstance(e, Blocked):
+        return "blocked", "the site is blocking automated checks"
+    if isinstance(e, urllib.error.HTTPError):
+        if 400 <= e.code < 500:
+            return "gone", f"HTTP {e.code}"
+        return "transient", f"HTTP {e.code}"
+    if isinstance(e, urllib.error.URLError):
+        reason = str(getattr(e, "reason", e))
+        if "not known" in reason or "Name or service" in reason or "No address" in reason:
+            return "gone", "the address no longer resolves"
+        return "transient", reason[:60]
+    return "transient", f"{type(e).__name__}: {str(e)[:50]}"
+
+
+TITLE_RE = re.compile(r"<title[^>]*>(.*?)</title>", re.S | re.I)
+
+
+def page_title(html):
+    m = TITLE_RE.search(html or "")
+    return re.sub(r"\s+", " ", m.group(1)).strip() if m else None
+
+
 def fetch(url):
     req = urllib.request.Request(url, headers=HEADERS)
     with urllib.request.urlopen(req, timeout=TIMEOUT) as r:
         raw = r.read()
     html = raw.decode("utf-8", "replace")
     if len(html) < 20000 and re.search(r"captcha|not a robot|automated access", html, re.I):
-        raise RuntimeError("blocked: the site served a robot wall instead of the page")
+        raise Blocked("the site served a robot wall instead of the page")
     return html
 
 
@@ -146,67 +185,144 @@ def best_candidates(url, attempts=3):
 
     Returns (candidates, tries). The last error is raised only if EVERY attempt failed.
     """
-    err, best = None, []
+    err, best, title = None, [], None
     for i in range(attempts):
         try:
-            c = candidates(fetch(url))
+            html = fetch(url)
         except Exception as e:
             err = e
+            if classify_error(e)[0] in ("gone", "blocked"):
+                raise      # permanent: retrying the same dead URL three times proves nothing
             continue
+        title = title or page_title(html)
+        c = candidates(html)
         if c and c[0][2] == "high":
-            return c, i + 1
+            return c, i + 1, title
         best = c
     if err is not None and not best:
         raise err
-    return best, attempts
+    return best, attempts, title
+
+
+# How many consecutive failures before the user hears about it. A single failed check is a blip;
+# telling someone at 3am that a page timed out once is how an alerting system gets muted. A URL
+# that looks permanently dead earns less patience than one that merely timed out.
+FAIL_ALERT_AFTER = {"gone": 2, "blocked": 2, "transient": 3}
+# A page that loads but yields no price will NEVER fire again while looking perfectly healthy.
+# That is the quiet failure worth naming.
+EMPTY_ALERT_AFTER = 3
+
+
+def emit(payload):
+    """Print both alert forms: a plain sentence, then its structured payload.
+
+    Both, deliberately. The structured line is what produces a well-written text and a laid-out
+    email, but a watcher that predates it would understand nothing and the alert would vanish —
+    the exact silent-loss failure this whole subsystem keeps being bitten by. The plain line
+    guarantees delivery; the watcher suppresses it whenever it also understood the structured one.
+    """
+    import json as _json
+    try:
+        sentence = _tpl().render_sms(payload, limit=10_000)
+    except Exception:
+        sentence = f"{payload.get('kind', 'alert')} on {payload.get('url') or 'your monitor'}"
+    print(f"ALERT({payload['to']}): {sentence}")
+    print(f"ALERT_DATA: {_json.dumps(payload, sort_keys=True)}")
 
 
 def run(a):
+    state = read_state(a.state)
+    label = a.label or state.get("item")
+    base = {"to": a.alert_to, "item": label, "url": a.url, "unit": a.unit,
+            "monitor": a.monitor, "schedule": a.schedule}
+
     try:
-        cands, tries = best_candidates(a.url)
+        cands, tries, title = best_candidates(a.url)
     except Exception as e:
-        print(f"LOG: fetch failed for {a.url} — {type(e).__name__}: {str(e)[:120]}")
-        return 0        # exit 0: a reported failure is a successful RUN, not a crash
+        kind, why = classify_error(e)
+        n = state.get("fail_streak", 0) + 1 if state.get("fail_kind") == kind else 1
+        state["fail_streak"], state["fail_kind"] = n, kind
+        state.pop("empty_streak", None)
+        print(f"LOG: check failed ({why}) — attempt {n} in a row — {a.url.split('/')[2]}")
+        # One alert per outage, on the run that confirms it. Silence afterwards until it recovers:
+        # a broken URL that texts every 6 hours for a week trains the user to ignore the channel.
+        if n == FAIL_ALERT_AFTER.get(kind, 3) and not state.get("fail_alerted"):
+            state["fail_alerted"] = True
+            emit(dict(base, kind="blocked" if kind == "blocked" else "unreachable", error=why))
+        write_state(a.state, state)
+        return 0
+
+    if title and not a.label:
+        label = _tpl().item_label(title) or label
+        state["item"] = label
+        base["item"] = label
+
     if not cands:
-        print(f"LOG: no price found on {a.url} (page fetched over {tries} attempt(s))")
+        n = state.get("empty_streak", 0) + 1
+        state["empty_streak"] = n
+        state.pop("fail_streak", None)
+        print(f"LOG: page loaded but no value found (run {n} in a row) — {a.url.split('/')[2]}")
+        if n == EMPTY_ALERT_AFTER and not state.get("empty_alerted"):
+            state["empty_alerted"] = True
+            emit(dict(base, kind="no_value"))
+        write_state(a.state, state)
         return 0
 
     price, source, conf = cands[0]
-    state = read_state(a.state)
+    recovered = bool(state.get("fail_alerted") or state.get("empty_alerted"))
+    for k in ("fail_streak", "fail_kind", "fail_alerted", "empty_streak", "empty_alerted"):
+        state.pop(k, None)
+
     prev, alerted = state.get("price"), state.get("alerted_price")
     delta = "" if prev is None else (" (unchanged)" if abs(price - prev) < 0.005
                                      else f" (was {prev:.2f})")
-    # Parentheses, not square brackets: the LOG line is posted into an OpenWebUI channel and
-    # rendered as markdown, where [...] is link syntax. Keep the caveat out of that grammar.
-    #
-    # (Record correction: the first two live runs showed no caveat and this was briefly blamed on
-    # hermes stripping the text. It was not — those runs genuinely read `high` confidence, because
-    # the cron venv is Python 3.11 and its urllib User-Agent draws the page variant that embeds the
-    # JSON price, while the 3.12 shell here draws the one that does not. No output was ever
-    # altered in transit. Left here because "delivery mangled it" was the wrong suspect twice.)
     # Confidence is printed on EVERY run, including good ones. If it only appeared on doubtful
     # readings, its absence would have to be interpreted — and an omission would be
-    # indistinguishable from a bug that stopped emitting it. Always-present means a missing
-    # confidence tag is itself the signal that something is wrong.
-    note = f" ({CONFIDENCE_PHRASE.get(source) or conf + ' confidence'})"
+    # indistinguishable from a bug that stopped emitting it.
+    phrase = CONFIDENCE_PHRASE.get(source) or f"{conf} confidence"
+    print(f"LOG: {price:.2f}{delta} ({phrase}) — {a.url.split('/')[2]}")
 
-    fires = a.below is not None and price < a.below
-    # Dampening: never repeat an identical alert. This is the only suppression allowed — the
-    # condition itself is evaluated literally, including on the very first run.
+    conf_word = "high" if conf == "high" else "unconfirmed"
+    note = None if conf == "high" else phrase.split(" - ", 1)[-1]
+    payload = dict(base, value=price, prev=prev, confidence=conf_word, confidence_note=note)
+
+    fires, kind = False, None
+    if a.below is not None and price < a.below:
+        fires, kind, payload["target"] = True, "price_drop", a.below
+    elif a.above is not None and price > a.above:
+        fires, kind, payload["target"] = True, "price_rise", a.above
+    if fires and a.kind:
+        kind = a.kind
+    # Dampening: never repeat an identical alert. The only suppression allowed — the condition
+    # itself is evaluated literally, including on the very first run.
     repeat = alerted is not None and abs(price - alerted) < 0.005
-
-    print(f"LOG: {price:.2f}{delta}{note} — {a.url.split('/')[2]}")
-    if fires and not repeat:
-        if conf == "low" and a.require_confidence:
-            print(f"LOG: alert SUPPRESSED — only a {conf}-confidence price ({source}) was "
-                  f"readable; refusing to alert on a guess")
-        else:
-            print(f"ALERT({a.alert_to}): {price:.2f}, under your {a.below:.2f} target"
-                  f"{note} — {a.url}")
-            state["alerted_price"] = price
+    suppressed = fires and conf != "high" and a.require_confidence
+    if suppressed:
+        print(f"LOG: alert SUPPRESSED — only an unconfirmed price ({source}) was readable; "
+              f"refusing to alert on a guess")
+    elif fires and not repeat:
+        emit(dict(payload, kind=kind))
+        state["alerted_price"] = price
+    elif recovered:
+        # The monitor was broken and is not any more — say so, or the user is left wondering
+        # whether it ever came back. Only when no real alert went out in the same run: two texts
+        # seconds apart saying the same monitor works and also hit its target is noise, and the
+        # target message already proves it works.
+        emit(dict(payload, kind="recovered"))
     state["price"] = price
     write_state(a.state, state)
     return 0
+
+
+def _tpl():
+    """alert_templates, imported lazily so a missing module degrades to the raw page title."""
+    import importlib.util
+    import os as _os
+    path = _os.path.join(_os.path.dirname(_os.path.abspath(__file__)), "alert_templates.py")
+    spec = importlib.util.spec_from_file_location("alert_templates", path)
+    m = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(m)
+    return m
 
 
 def selftest():
@@ -245,6 +361,12 @@ def main():
     ap.add_argument("--above", type=float)
     ap.add_argument("--alert-to", default="ohmz")
     ap.add_argument("--selector", help="regex with one capture group, overrides all strategies")
+    ap.add_argument("--kind", help="price_drop | price_rise | back_in_stock | fare | inventory | "
+                                   "availability | threshold | change (picks the message wording)")
+    ap.add_argument("--label", help="what to call the item; omit to read the page <title>")
+    ap.add_argument("--unit", default="$", help="currency symbol or code for display")
+    ap.add_argument("--monitor", help="the monitor's name, used when no item label is available")
+    ap.add_argument("--schedule", help="how often this runs, e.g. 'every 6h' (shown in the email)")
     ap.add_argument("--require-confidence", action="store_true",
                     help="refuse to alert on a low-confidence price")
     ap.add_argument("--selftest", action="store_true")

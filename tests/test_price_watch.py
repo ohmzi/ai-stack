@@ -26,7 +26,9 @@ Usage:  python3 tests/test_price_watch.py
 """
 import importlib.util
 import io
+import json
 import os
+import re
 import sys
 import tempfile
 from contextlib import redirect_stdout
@@ -48,6 +50,9 @@ def load():
 
 
 class Args:
+    """Mirrors the real argparse namespace. Built from the parser's own defaults so a new flag
+    cannot be added to the script while this fixture quietly keeps the old shape — the class of
+    drift that let a stub disagree with production three times in one day."""
     def __init__(self, **kw):
         self.url = "https://shop.example.com/item"
         self.state = "t"
@@ -56,12 +61,18 @@ class Args:
         self.alert_to = "ohmz"
         self.selector = None
         self.require_confidence = False
+        self.kind = None
+        self.label = None
+        self.unit = "$"
+        self.monitor = "test monitor"
+        self.schedule = "every 6h"
         self.__dict__.update(kw)
 
 
 # Real shapes, trimmed. The Amazon one reproduces what amazon.ca actually serves: an EMPTY
 # corePrice_feature_div plus a populated "New (N) from" offer block.
-FIX_JSONLD = '<script type="application/ld+json">{"@type":"Product","offers":{"price":"39.99"}}</script>'
+FIX_JSONLD = ('<title>Widget Deluxe, extra large, blue</title>'
+              '<script type="application/ld+json">{"@type":"Product","offers":{"price":"39.99"}}</script>')
 FIX_OG = '<meta property="og:price:amount" content="24.50" />'
 FIX_BOOKS = '<p class="price_color">£51.77</p>'
 FIX_AMAZON = ('<div id="corePrice_feature_div" class="celwidget"></div>'
@@ -143,8 +154,12 @@ def main():
     pw.fetch = lambda url: FIX_JSONLD
     good = run(state="s8", below=50)
     check("a high-confidence LOG says so explicitly", "(high confidence)" in good, good)
-    check("...and so does its ALERT line",
-          "(high confidence)" in [l for l in good.splitlines() if l.startswith("ALERT")][0], good)
+    # The SMS deliberately does NOT repeat "high confidence" — a caveat is worth characters, a
+    # reassurance is not. The structured payload still carries it for the email.
+    check("...and the structured payload carries it",
+          '"confidence": "high"' in good, good)
+    check("...while the text stays uncluttered",
+          "confidence" not in [l for l in good.splitlines() if l.startswith("ALERT(")][0], good)
     pw.fetch = lambda url: FIX_AMAZON   # restore: the checks below need the low-confidence page
     out = run(state="s4", below=50, require_confidence=True)
     check("--require-confidence suppresses it", "ALERT(" not in out, out)
@@ -158,7 +173,7 @@ def main():
     with redirect_stdout(buf):
         rc = pw.run(Args(state="s5", below=50))
     check("exit code 0 (the RUN succeeded; the fetch didn't)", rc == 0)
-    check("LOG explains the failure", buf.getvalue().startswith("LOG: fetch failed"), buf.getvalue())
+    check("LOG explains the failure", buf.getvalue().startswith("LOG: check failed"), buf.getvalue())
     check("no ALERT invented from a failed fetch", "ALERT(" not in buf.getvalue())
 
     print("--- the caveat is markdown-safe (LOG lines are rendered in an OpenWebUI channel) ---")
@@ -202,6 +217,110 @@ def main():
     check("recipient parsed as the handle", alerts and alerts[0][0] == "ohmz", repr(alerts))
     logs = hd.LOG_RE.findall("## Response\n" + out)
     check("watcher's LOG_RE matches too", len(logs) == 1, repr(logs))
+
+    print("--- the fixture matches the real CLI, flag for flag ---")
+    # A fixture that drifts from the parser silently tests a program that no longer exists.
+    src = open("/home/ohmz/ai-stack/scripts/price_watch.py").read()
+    flags = {m.replace("-", "_") for m in re.findall(r'add_argument\("--([a-z-]+)"', src)}
+    fixture = set(Args().__dict__) | {"selftest"}
+    missing = sorted(flags - fixture)
+    check("every CLI flag exists on the test fixture", not missing, f"missing: {missing}")
+    check("the check found the flags at all", len(flags) >= 10, sorted(flags))
+
+    print("--- failures are confirmed before the user hears about them ---")
+    import urllib.error as _ue
+    pw.STATE_DIR = tempfile.mkdtemp()
+
+    def fail_with(exc):
+        def f(url, attempts=3):
+            raise exc
+        pw.best_candidates = f
+
+    # A single blip must never text anyone; a dead URL earns less patience than a timeout.
+    fail_with(_ue.URLError("timed out"))
+    outs = [run(state="f1") for _ in range(4)]
+    check("transient: silent for the first two runs",
+          not any("ALERT" in o for o in outs[:2]), repr(outs[:2]))
+    check("transient: alerts on the third", "ALERT_DATA:" in outs[2], outs[2])
+    check("transient: does NOT alert again on the fourth",
+          "ALERT" not in outs[3], outs[3])
+    check("transient: every run still logs", all(o.startswith("LOG:") for o in outs))
+
+    fail_with(_ue.HTTPError("u", 404, "Not Found", {}, None))
+    outs = [run(state="f2") for _ in range(3)]
+    check("a 4xx is treated as permanent: alerts on the second",
+          "ALERT" not in outs[0] and "ALERT_DATA:" in outs[1], repr(outs[:2]))
+    check("...and stays quiet after", "ALERT" not in outs[2], outs[2])
+
+    fail_with(pw.Blocked("robot wall"))
+    outs = [run(state="f3") for _ in range(2)]
+    check("a robot wall gets its own kind", '"kind": "blocked"' in outs[1], outs[1])
+
+    print("--- classification: a dead amazon page returns 500, so status alone cannot decide ---")
+    for exc, want in [(_ue.HTTPError("u", 404, "x", {}, None), "gone"),
+                      (_ue.HTTPError("u", 410, "x", {}, None), "gone"),
+                      (_ue.HTTPError("u", 500, "x", {}, None), "transient"),
+                      (_ue.HTTPError("u", 503, "x", {}, None), "transient"),
+                      (_ue.URLError("[Errno -2] Name or service not known"), "gone"),
+                      (_ue.URLError("timed out"), "transient"),
+                      (pw.Blocked("wall"), "blocked"),
+                      (OSError("boom"), "transient")]:
+        got = pw.classify_error(exc)[0]
+        check(f"{type(exc).__name__} {getattr(exc, 'code', '')} -> {want}", got == want, got)
+
+    print("--- a page that loads but yields nothing is the quiet failure ---")
+    pw.best_candidates = lambda url, attempts=3: ([], 3, "Some Product Page")
+    outs = [run(state="e1") for _ in range(4)]
+    check("silent for two runs", not any("ALERT" in o for o in outs[:2]))
+    check("names itself on the third", '"kind": "no_value"' in outs[2], outs[2])
+    check("...once, not every run after", "ALERT" not in outs[3], outs[3])
+
+    print("--- recovery closes the loop the failure opened ---")
+    fail_with(_ue.URLError("timed out"))
+    for _ in range(3):
+        run(state="r1")
+    pw.fetch = lambda url: FIX_JSONLD
+    pw.best_candidates = lambda url, attempts=3: (pw.candidates(FIX_JSONLD), 1,
+                                                  pw.page_title(FIX_JSONLD))
+    out = run(state="r1", below=10)      # value is 39.99, so the condition does NOT fire
+    check("says it is working again", '"kind": "recovered"' in out, out)
+    check("exactly one alert", out.count("ALERT_DATA:") == 1, out)
+    # When the condition DOES fire on the recovery run, one message covers it: two texts seconds
+    # apart saying the same monitor works and also hit its target is noise.
+    fail_with(_ue.URLError("timed out"))
+    for _ in range(3):
+        run(state="r2")
+    pw.best_candidates = lambda url, attempts=3: (pw.candidates(FIX_JSONLD), 1,
+                                                  pw.page_title(FIX_JSONLD))
+    out = run(state="r2", below=50)
+    check("a firing recovery sends ONE alert", out.count("ALERT_DATA:") == 1, out)
+    check("...and it is the one the user asked for", '"kind": "price_drop"' in out, out)
+
+    print("--- the item names itself from the page, and is remembered ---")
+    out = run(state="n1", below=50)
+    check("the page title becomes the item",
+          '"item": "Widget Deluxe"' in out, out)
+    fail_with(_ue.HTTPError("u", 404, "x", {}, None))
+    run(state="n1")
+    out = run(state="n1")
+    check("a later failure still knows what it was watching",
+          '"item": "Widget Deluxe"' in out, out)
+    pw.best_candidates = lambda url, attempts=3: (pw.candidates(FIX_JSONLD), 1,
+                                                  pw.page_title(FIX_JSONLD))
+    check("an explicit --label wins over the title",
+          '"item": "My Thing"' in run(state="n2", label="My Thing", below=50))
+
+    print("--- both alert forms are emitted, so an old watcher still delivers ---")
+    pw.best_candidates = lambda url, attempts=3: (pw.candidates(FIX_JSONLD), 1,
+                                                  pw.page_title(FIX_JSONLD))
+    out = run(state="b1", below=50)
+    check("a plain ALERT( line is present", "ALERT(ohmz):" in out, out)
+    check("a structured ALERT_DATA line is present", "ALERT_DATA: {" in out, out)
+    check("the plain line is a sentence, not JSON",
+          "Hi ohmz" in [l for l in out.splitlines() if l.startswith("ALERT(")][0], out)
+    check("the structured line parses as json",
+          isinstance(json.loads([l for l in out.splitlines()
+                                 if l.startswith("ALERT_DATA:")][0][11:]), dict))
 
     fails = results.count(False)
     print(f"\n{len(results)} checks — {'ALL PASS' if not fails else str(fails) + ' FAILURE(S)'}")
