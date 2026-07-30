@@ -96,6 +96,30 @@ def is_template(msg):
     return bool(TEMPLATE_RE.search(msg))
 
 
+JOBS_FILE = os.path.expanduser("~/.hermes/cron/jobs.json")
+
+
+def job_titles():
+    """{job_id: human name} from the scheduler's own store.
+
+    Channel posts and email subjects read "a433462a8b25" today, which tells the user nothing about
+    which of their monitors just fired. The scheduler already knows the name they gave it.
+    """
+    try:
+        with open(JOBS_FILE) as f:
+            data = json.load(f)
+    except Exception:
+        return {}
+    jobs = data if isinstance(data, list) else data.get("jobs", data)
+    if isinstance(jobs, dict):
+        jobs = list(jobs.values())
+    out = {}
+    for j in jobs:
+        if isinstance(j, dict) and j.get("id"):
+            out[j["id"]] = (j.get("name") or "").strip() or j["id"]
+    return out
+
+
 def post_channel(summary, job_name):
     url = open(WEBHOOK_FILE).read().strip()
     data = json.dumps({"content": f"🤖 {job_name}: {summary}"}).encode()
@@ -104,7 +128,7 @@ def post_channel(summary, job_name):
         return r.status == 200
 
 
-def send_alert(recipient, message):
+def send_alert(recipient, message, job=None, job_id=None, when=None):
     """Deliver a personal alert via the configured transports (SMS + SMTP email).
 
     Returns ``(ok, notes)`` — ok is True if ANY channel delivered, notes are the per-channel
@@ -118,7 +142,7 @@ def send_alert(recipient, message):
     try:
         sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
         from alert_transports import send_alert as _send
-        ok, notes = _send(recipient, message)
+        ok, notes = _send(recipient, message, job=job, job_id=job_id, when=when)
         return bool(ok), list(notes)
     except Exception as e:
         print(f"  alert[{recipient}] transport error: {e}", file=sys.stderr)
@@ -166,7 +190,9 @@ def attempt_alert(key, entry):
     Returns True when delivered. An alert is only abandoned after MAX_ATTEMPTS; the caller posts a
     visible failure notice at that point so a permanently undeliverable alert is never silent."""
     n = len(entry["attempts"]) + 1
-    ok, notes = send_alert(entry["recipient"], entry["message"])
+    ok, notes = send_alert(entry["recipient"], entry["message"],
+                           job=entry.get("job"), job_id=entry.get("job_id"),
+                           when=entry.get("created"))
     rec = {"at": _iso(_now()), "attempt": n, "of": MAX_ATTEMPTS, "job": entry["job"],
            "recipient": entry["recipient"], "ok": bool(ok), "notes": notes,
            "message": entry["message"][:200]}
@@ -230,7 +256,21 @@ def main():
     alert_state = load_alert_state()
     state = {}
     if os.path.exists(STATE):
-        raw = json.load(open(STATE))
+        try:
+            with open(STATE) as f:
+                raw = json.load(f)
+        except Exception as e:
+            # A truncated state file used to raise here and abort the tick BEFORE any output was
+            # examined — every minute, forever, with no LOG, no ALERT, no ledger row and no notice.
+            # The subsystem would be dead while every record it keeps stayed silent about it.
+            # Starting from empty re-posts recent runs, which is noisy; being deaf is not survivable.
+            print(f"⚠️ {STATE} unreadable ({e}) — starting from empty; recent runs may re-post",
+                  file=sys.stderr)
+            try:
+                os.replace(STATE, STATE + ".corrupt")
+            except Exception:
+                pass
+            raw = {}
         # Migrate the original list format (fully-delivered files).
         state = ({f: {"log": True, "alerts": True} for f in raw} if isinstance(raw, list) else raw)
     files = sorted(glob.glob(os.path.join(OUT_DIR, "*", "*.md")))
@@ -240,8 +280,10 @@ def main():
         print("nothing new")
         return 0
 
+    titles = job_titles()
     for f in pending:
-        job_name = os.path.basename(os.path.dirname(f))
+        job_id = os.path.basename(os.path.dirname(f))
+        job_name = titles.get(job_id, job_id)
         log, alerts = parse_output(open(f).read())
         if a.dry_run:
             print(f"{f}: LOG={log!r} ALERTS={alerts}")
@@ -260,12 +302,10 @@ def main():
             for who, msg in alerts:
                 k = alert_key(f, who, msg)
                 if k not in alert_state:
-                    alert_state[k] = {"job": job_name, "recipient": who, "message": msg,
-                                      "created": _iso(_now()), "attempts": [],
+                    alert_state[k] = {"job": job_name, "job_id": job_id, "recipient": who,
+                                      "message": msg, "created": _iso(_now()), "attempts": [],
                                       "status": "pending", "next_attempt": 0}
             st["alerts"] = True
-        # Alerts are handled inside the channel leg while no transport exists.
-        st["alerts"] = True
         print(f"{os.path.basename(f)}: log={'y' if st['log'] else 'RETRY'} "
               f"alerts={'y' if st['alerts'] else 'RETRY'} ({len(alerts)})")
 
@@ -279,7 +319,22 @@ def main():
             except Exception:
                 pass
         save_alert_state(alert_state)
-        json.dump(state, open(STATE, "w"))
+        # tmp+rename, matching save_alert_state. Truncating the live file in place leaves a
+        # half-written state if the process dies mid-write — which is exactly how the read above
+        # came to need a guard.
+        _tmp = STATE + ".tmp"
+        with open(_tmp, "w") as _f:
+            json.dump(state, _f)
+        os.replace(_tmp, STATE)
+        # Refresh the non-secret profile the OpenWebUI pipe reads to describe alert delivery.
+        # Done here because this is the one process that runs on the host every minute AND can
+        # read ~/.hermes — so the pipe's view can never drift from the live config.
+        try:
+            sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+            from alert_transports import publish_profile
+            publish_profile()
+        except Exception as e:
+            print(f"profile publish skipped: {e}", file=sys.stderr)
     return 0
 
 

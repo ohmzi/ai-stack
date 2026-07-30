@@ -86,6 +86,47 @@ def main():
     # A "<" that is arithmetic, not a placeholder, must still get through.
     check("'price < 50 now' is not a template", not hd.is_template("price < 50 now, at 46.99"))
 
+    print("--- a corrupt .delivered.json must not wedge the watcher forever ---")
+    # It was written with a bare json.dump(open(...,"w")) — truncate-in-place, no tmp+rename — and
+    # read with an unguarded json.load. A crash mid-write left a half-file, and every subsequent
+    # tick aborted at the read BEFORE examining a single output: no LOG, no ALERT, no ledger row,
+    # no notice. Dead subsystem, silent records, once per minute, forever.
+    import glob as _glob, tempfile as _tf
+    for broken in ('{"/x/a.md": {"log": tru', "", "not json at all"):
+        d = _tf.mkdtemp()
+        hd.OUT_DIR, hd.STATE = d, os.path.join(d, ".delivered.json")
+        hd.ALERT_STATE = os.path.join(d, ".alerts.json")
+        hd.ALERT_LEDGER = os.path.join(d, "ledger.jsonl")
+        os.makedirs(os.path.join(d, "job1"))
+        open(os.path.join(d, "job1", "run.md"), "w").write("## Response\nLOG: it ran\n")
+        open(hd.STATE, "w").write(broken)
+        posted = []
+        hd.post_channel = lambda summary, job: posted.append(summary) or True
+        sys.argv = ["hd"]
+        rc = hd.main()
+        label = repr(broken[:18])
+        check(f"tick survives {label}", rc == 0, f"rc={rc}")
+        check(f"...and still delivers the run {label}", posted == ["it ran"], repr(posted))
+        check(f"...quarantines the bad file {label}", os.path.exists(hd.STATE + ".corrupt"))
+        check(f"...leaving valid state behind {label}",
+              isinstance(json.load(open(hd.STATE)), dict))
+
+    print("--- state is written atomically, so a crash cannot half-write it ---")
+    d = _tf.mkdtemp()
+    hd.OUT_DIR, hd.STATE = d, os.path.join(d, ".delivered.json")
+    hd.ALERT_STATE = os.path.join(d, ".alerts.json")
+    hd.ALERT_LEDGER = os.path.join(d, "ledger.jsonl")
+    os.makedirs(os.path.join(d, "j"))
+    open(os.path.join(d, "j", "r.md"), "w").write("## Response\nLOG: x\n")
+    hd.post_channel = lambda *a: True
+    real_replace, seen = os.replace, []
+    os.replace = lambda a, b: seen.append((a, b)) or real_replace(a, b)
+    sys.argv = ["hd"]
+    hd.main()
+    os.replace = real_replace
+    check("the state write went through a tmp file + rename",
+          any(a.endswith(".tmp") and b.endswith(".delivered.json") for a, b in seen), repr(seen))
+
     print("--- alert flood capped (injection hygiene) ---")
     body = "## Response\n" + "".join(f"ALERT(a): spam {i}\n" for i in range(10))
     _, alerts = hd.parse_output(body)
@@ -99,13 +140,16 @@ def main():
     # REAL wrapper here, stubbing only the transport beneath it.
     import types
     fake = types.ModuleType("alert_transports")
-    fake.send_alert = lambda r, m: (True, ["sms sent", "email sent"])
+    # Signature mirrors production exactly — kwargs included. This stub going stale is precisely
+    # what these checks exist to catch, and it caught itself when job/job_id/when were added.
+    fake.send_alert = lambda r, m, job=None, job_id=None, when=None: (True, ["sms sent", "email sent"])
     sys.modules["alert_transports"] = fake
     got = hd.send_alert("ohmz", "target met")
     check("returns a 2-tuple, not a bool", isinstance(got, tuple) and len(got) == 2, repr(got))
     check("unpacks the way attempt_alert calls it", got[0] is True and "sms sent" in got[1], repr(got))
 
-    fake.send_alert = lambda r, m: (_ for _ in ()).throw(RuntimeError("smtp down"))
+    fake.send_alert = lambda r, m, job=None, job_id=None, when=None: (
+        (_ for _ in ()).throw(RuntimeError("smtp down")))
     got = hd.send_alert("ohmz", "target met")
     check("a raising transport still returns the pair", isinstance(got, tuple) and len(got) == 2, repr(got))
     check("...reporting failure", got[0] is False, repr(got))
@@ -119,7 +163,7 @@ def main():
         hd.ALERT_LEDGER = os.path.join(td, "ledger.jsonl")
         calls = {"n": 0}
 
-        def failing(recipient, message):
+        def failing(recipient, message, job=None, job_id=None, when=None):
             calls["n"] += 1
             return False, [f"sms FAILED: simulated #{calls['n']}"]
         hd.send_alert = failing
@@ -158,7 +202,7 @@ def main():
               str([r["attempt"] for r in rows]))
 
         # Success path: delivered stops the queue immediately.
-        hd.send_alert = lambda r, m: (True, ["sms sent"])
+        hd.send_alert = lambda r, m, job=None, job_id=None, when=None: (True, ["sms sent"])
         e2 = {"job": "j2", "recipient": "ohmz", "message": "m", "created": "now",
               "attempts": [], "status": "pending", "next_attempt": 0}
         hd.process_alert_queue({"k2": e2})
