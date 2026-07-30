@@ -105,7 +105,7 @@ def main():
     body = at3.sms_body("46.99 is below your 50.00 target — https://www.amazon.ca/dp/B0DP6D3TRB")
     check("the URL is gone entirely", "amazon" not in body and "http" not in body, repr(body))
     check("the alert still says the thing that matters", "46.99" in body and "50.00" in body, repr(body))
-    check("and points at where the link went", body.endswith("(link in email)"), repr(body))
+    check("and points at where the link went", body.endswith("Link in email."), repr(body))
     # TESTC is why hosts are removed rather than kept: a BARE DOMAIN was filtered exactly like a
     # full URL, so an earlier version that shortened links to their hostname would have been
     # dropped identically.
@@ -124,7 +124,79 @@ def main():
         check(f"{keep[:34]!r} survives intact", at3.sms_body(keep) == keep, repr(at3.sms_body(keep)))
     check("over-long body is truncated to one segment",
           len(at3.sms_body("x" * 400)) <= 140)
-    check("truncation is marked, not silent", at3.sms_body("x" * 400).endswith("\u2026"))
+    check("truncation is marked, not silent", at3.sms_body("x" * 400).endswith("..."))
+
+    print("--- the text names the monitor, and degrades in a fixed order ---")
+    long_msg = "46.99 is below your 50.00 target (LOW confidence: amazon-offer-listing) — https://www.amazon.ca/dp/B0DP6D3TRB"
+    b = at3.sms_body(long_msg, "amazon B0DP6D3TRB price")
+    check("leads with the monitor name — WHICH one fired is the first question",
+          b.startswith("amazon B0DP6D3TRB price:"), b)
+    check("still under one segment", len(b) <= 140, str(len(b)))
+    check("keeps the pointer to the email", b.endswith("Link in email."), b)
+    check("no link survived", "amazon.ca" not in b and "http" not in b, b)
+    # The pointer is the only thing telling a first-time user where the link went, so it outranks
+    # both the monitor name and the measurement when space runs out.
+    huge = at3.sms_body(long_msg, "x" * 90)
+    check("an over-long monitor name is shortened, not the pointer",
+          huge.endswith("Link in email.") and len(huge) <= 140, f"{len(huge)}: {huge}")
+    check("...and the shortening is visible", ".." in huge, huge)
+    nolink = at3.sms_body("CPU at 91% against your 85% threshold", "cpu watch")
+    check("no pointer when there was no link to strip",
+          "in email" not in nolink and nolink.startswith("cpu watch:"), nolink)
+    check("a job-less alert still renders",
+          at3.sms_body("something fired") == "something fired")
+
+    print("--- link-stripping must not eat ordinary dotted words ---")
+    # An earlier pattern treated any "word.word" with a 2+ letter tail as a hostname, so the token
+    # naming what broke was exactly the token deleted — then a "(link in email)" was bolted on for
+    # a link that never existed. On a box running ollama, openwebui and docker this is the common
+    # case, not an edge case. The tail must be a real public suffix.
+    for keep in ["ollama.service died, GPU stuck at 100%",
+                 "openwebui container down, check webui.db",
+                 "node.js worker crashed",
+                 "hermes gateway.pid stale, 3 jobs queued",
+                 "restore from webui.db.bak-channels",
+                 "config.yaml changed, cron.provider reset"]:
+        got = at3.sms_body(keep, None)
+        check(f"survives intact: {keep[:34]!r}", got == keep, repr(got))
+        check(f"...and claims no link: {keep[:22]!r}", "in email" not in got, repr(got))
+    for strip in ["see https://x.io/a", "check www.amazon.ca", "price at amazon.ca dropped",
+                  "open foo.co.uk/page"]:
+        got = at3.sms_body(strip, None)
+        check(f"still stripped: {strip[:30]!r}", "." not in got.replace("Link in email.", ""),
+              repr(got))
+    # A half-eaten address is worse than none: "reply to omariqbal97@" looks usable and is not.
+    got = at3.sms_body("reply to omariqbal97@gmail.com", None)
+    check("an email address is removed whole, not just its domain", "@" not in got, repr(got))
+
+    print("--- everything sent is plain ASCII (gateways predate UTF-8) ---")
+    for raw in ["46.99 \u2014 below \u2018target\u2019", "price \u20ac12.34\u2026", "caf\u00e9 monitor"]:
+        out = at3.sms_body(raw, "m")
+        check(f"{raw[:24]!r} folded to ASCII", out.isascii(), repr(out))
+    check("em dash becomes a hyphen", "-" in at3.sms_body("a \u2014 b", None))
+    check("euro sign becomes EUR", "EUR" in at3.sms_body("\u20ac12.34", None))
+
+    print("--- the email subject mirrors the text, so both name one event ---")
+    subj = at3.alert_subject(long_msg, "amazon B0DP6D3TRB price")
+    check("monitor name lands first", subj.startswith("amazon B0DP6D3TRB price:"), subj)
+    check("the number lands inside the ~45-char notification window",
+          "46.99" in subj[:52], subj[:52])
+    check("no link in the subject either", "http" not in subj and "amazon.ca" not in subj, subj)
+    check("subject is ASCII", subj.isascii(), subj)
+    check("an empty message still yields a usable subject",
+          at3.alert_subject("", "cpu watch") == "Alert: cpu watch")
+    check("no job, no message -> a sane constant",
+          at3.alert_subject("", None) == "Assistant alert")
+
+    print("--- the email body carries what the text had to drop ---")
+    body = at3.alert_email_body(long_msg, "amazon B0DP6D3TRB price", "6c6f16be874c",
+                                "2026-07-30T15:24:55", "+15145579764")
+    check("the link is present in full", "https://www.amazon.ca/dp/B0DP6D3TRB" in body, body)
+    check("names the monitor", "amazon B0DP6D3TRB price" in body)
+    check("carries the job id for debugging", "6c6f16be874c" in body)
+    check("carries the time it fired", "2026-07-30T15:24:55" in body)
+    check("says a text was also sent, and to where", "+15145579764" in body)
+    check("explains why the text had no link", "silently drop" in body)
 
     print("--- the fan-out sends the SMS form to sms and the full text to email ---")
     at3.load_conf = lambda: {"SMS_GATEWAY": "msg.telus.com", "SMTP_HOST": "h",
@@ -158,6 +230,22 @@ def main():
     check("no MX but an A record is flagged 'implicit', not silently trusted",
           st == "implicit", f"{st} / {detail}")
     check("...and the note explains why that is not deliverable", "implicit MX" in detail, detail)
+
+    print("--- the ledger records the body that was actually sent ---")
+    # It recorded the ORIGINAL alert text, so a text mangled in transit by link-stripping looked
+    # flawless in the record — the one place an operator would look to find out what went wrong.
+    at5 = load()
+    at5.load_conf = lambda: {"SMS_GATEWAY": "msg.telus.com", "ALERT_CHANNELS": "sms"}
+    at5.resolve = lambda h, c=None, k=None: (None, "+15145579764")
+    at5.send_sms = lambda phone, body, conf: "gateway:x"
+    ok, notes = at5.send_alert("ohmz", "46.99 under 50.00 — https://www.amazon.ca/dp/B0",
+                               job="amazon price")
+    check("delivered", ok is True, repr(notes))
+    check("the note carries the exact body sent", any("body=" in n for n in notes), repr(notes))
+    sent_body = [n for n in notes if "body=" in n][0].split("body=", 1)[1]
+    check("...and that body is the stripped form, not the original",
+          "amazon.ca" not in sent_body and "46.99" in sent_body, sent_body)
+    check("...showing the monitor name that was prepended", "amazon price" in sent_body, sent_body)
 
     print("--- a dead domain is refused and recorded, never counted as delivered ---")
     at4.load_conf = lambda: {"SMTP_HOST": "h", "SMTP_USER": "u", "SMTP_PASS": "p",

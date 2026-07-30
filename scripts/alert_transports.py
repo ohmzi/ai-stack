@@ -57,7 +57,20 @@ import urllib.request
 from email.message import EmailMessage
 
 CONF = os.path.expanduser("~/.hermes/alert_transports.env")
-CONTACTS = os.path.expanduser("~/.hermes/alert_contacts.json")
+# Contacts live in an `alerts/` subdirectory of the OpenWebUI config tree because it is the ONLY
+# path both sides can reach. The subdirectory is owned by the host user rather than root: the
+# config dir itself is root:root 755, and an atomic tmp+rename needs write permission on the
+# DIRECTORY, not just the file — so publishing the profile from the (unprivileged) delivery timer
+# silently failed until the files got their own directory.
+#
+# Contacts live in the OpenWebUI config directory because it is the ONLY path both sides can reach:
+# the auto_assistant pipe runs INSIDE the OpenWebUI container (bind-mounted at /app/backend/data, so
+# it cannot see ~/.hermes), while these transports run on the host as the user. The pipe needs write
+# access to save a phone number the user supplies in chat, and the transports need read access to
+# send to it. Same file, two mount points. ~/.hermes stays a read fallback for older installs.
+CONTACTS = os.environ.get("ALERT_CONTACTS",
+                          "/volume1/docker/openwebui/config/alerts/contacts.json")
+LEGACY_CONTACTS = os.path.expanduser("~/.hermes/alert_contacts.json")
 OWUI_DB = os.environ.get("OWUI_DB", "/volume1/docker/openwebui/config/webui.db")
 TIMEOUT = 20
 
@@ -80,10 +93,44 @@ def load_conf():
 
 
 def load_contacts():
+    """Shared file wins; ~/.hermes is a fallback so an existing install keeps working un-migrated."""
+    for path in (CONTACTS, LEGACY_CONTACTS):
+        try:
+            with open(path) as f:
+                return json.load(f)
+        except Exception:
+            continue
+    return {}
+
+
+def save_contact(handle, phone=None, email=None):
+    """Add or update one handle. Returns (ok, note).
+
+    Writes the SHARED file, since a number supplied in chat arrives from inside the container and
+    must be visible to the host-side transports. The number is normalized before it is stored, so an
+    unusable one is rejected at the point the user typed it rather than silently at send time.
+    """
+    if phone is not None:
+        norm = normalize_phone(phone)
+        if not norm:
+            return False, f"{phone!r} is not a usable phone number"
+        phone = norm
+    contacts = load_contacts()
+    entry = dict(contacts.get(handle) or {})
+    if phone:
+        entry["phone"] = phone
+    if email:
+        entry["email"] = email
+    contacts[handle] = entry
     try:
-        return json.load(open(CONTACTS))
-    except Exception:
-        return {}
+        os.makedirs(os.path.dirname(CONTACTS), exist_ok=True)
+        tmp = CONTACTS + ".tmp"
+        with open(tmp, "w") as f:
+            json.dump(contacts, f, indent=2)
+        os.replace(tmp, CONTACTS)
+    except Exception as e:
+        return False, f"could not write {CONTACTS}: {e}"
+    return True, f"saved {handle}: " + ", ".join(k for k in ("phone", "email") if entry.get(k))
 
 
 def owui_email(handle):
@@ -200,9 +247,18 @@ def mail_domain_status(addr, timeout=6):
     if not dig:
         return "unknown", "no resolver available to check"
     def q(rr):
+        """Records, or None if the QUERY ITSELF failed — those are not the same answer.
+
+        dig writes resolver errors to stderr, leaves stdout EMPTY and exits non-zero (9 for "no
+        reply from server"). Reading stdout alone turns "I could not ask" into "there is no such
+        record", which would classify a live domain as `dead` and cancel the email leg during a
+        DNS blip — fail-CLOSED, the exact opposite of the intent stated above.
+        """
         try:
             r = subprocess.run([dig, "+short", "+time=3", "+tries=1", rr, domain],
                                capture_output=True, text=True, timeout=timeout)
+            if r.returncode != 0:
+                return None
             return [x for x in r.stdout.split("\n") if x.strip()]
         except Exception:
             return None
@@ -211,7 +267,9 @@ def mail_domain_status(addr, timeout=6):
         return "unknown", "resolver error"
     if mx:
         return "ok", f"{len(mx)} MX record(s)"
-    a = q("A") or []
+    a = q("A")
+    if a is None:
+        return "unknown", "resolver error on A lookup"
     if a:
         return "implicit", (f"no MX; mail would fall back to A record {a[0]} (RFC 5321 implicit MX) "
                             f"— for a parked domain that host speaks no SMTP and mail is lost")
@@ -245,14 +303,34 @@ def send_email(to_addr, subject, body, conf):
     return True
 
 
-# Anything a spam filter reads as a web address: full URLs, and bare hostnames like
-# "www.amazon.ca" or "amazon.ca" — the second form was measured to be dropped just like the first.
-URL_RE = re.compile(r"https?://\S+|\b(?:www\.)?[a-z0-9-]+(?:\.[a-z0-9-]+)*\.[a-z]{2,}\b(?:/\S*)?",
-                    re.I)
+# What a spam filter reads as a web address: full URLs, www.* hosts, and bare hostnames — the last
+# form was measured to be dropped exactly like a full link.
+#
+# The tail MUST be a real public suffix, not merely "2+ letters". A length rule matched every
+# dotted token in ordinary prose and deleted the substance of the alert:
+#     "ollama.service died, GPU stuck at 100%"   -> "died, GPU stuck at 100%"
+#     "openwebui down, check webui.db"           -> "openwebui down, check"
+#     "node.js worker crashed"                   -> "worker crashed"
+# The word naming what broke is precisely the word a hostname pattern eats. So the tail is an
+# allowlist: service/db/js/py/log/conf are not TLDs and survive.
+_TLD = (r"(?:com|net|org|edu|gov|mil|int|info|biz|name|pro|mobi|asia|io|co|ai|app|dev|page|site|"
+        r"online|shop|store|cloud|tech|blog|news|live|life|world|today|space|website|link|click|"
+        r"media|video|studio|design|art|music|games?|fun|xyz|top|icu|vip|cc|ws|me|tv|ly|to|sh|gg|"
+        r"fm|am|nu|bz|ca|uk|us|de|fr|jp|cn|au|nz|in|br|mx|es|it|nl|se|no|fi|dk|pl|ru|ch|at|be|pt|"
+        r"gr|ie|il|za|kr|sg|hk|tw|th|my|ph|id|vn|tr|ua|cz|hu|ro|bg|hr|rs|sk|si|lt|lv|ee|is|lu|ar|"
+        r"cl|pe|eu)")
+# Emails are matched FIRST and removed WHOLE. Letting the hostname branch reach one deleted only
+# the domain and left "reply to omariqbal97@" — a plausible-looking address that is unusable, which
+# is worse than an obvious gap.
+_EMAIL = r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}"
+URL_RE = re.compile(
+    rf"{_EMAIL}|https?://\S+|\bwww\.[a-z0-9-]+(?:\.[a-z0-9-]+)+(?:/\S*)?"
+    rf"|\b[a-z0-9-]+(?:\.[a-z0-9-]+)*\.{_TLD}\b(?:/\S*)?",
+    re.I)
 
 
-def sms_body(message, limit=140):
-    """The SMS form of an alert: no web addresses at all, one segment.
+def sms_body(message, job=None, limit=140):
+    """The SMS form of an alert: names the monitor, no web addresses, one ASCII segment.
 
     Carrier email-to-SMS gateways silently drop messages containing links. The message is accepted
     by SMTP, never bounces, and never arrives — so this cannot be detected downstream or fixed by
@@ -271,14 +349,165 @@ def sms_body(message, limit=140):
     The full text, links intact, always goes out by email — that is what the email leg is for, and
     the SMS says so.
     """
-    out = URL_RE.sub("", message)
-    out = re.sub(r"[\s\u2014-]+$", "", re.sub(r"\s{2,}", " ", out)).strip(" -\u2014")
-    if out != message.strip():
-        out += " (link in email)"
-    return out[:limit - 1] + "\u2026" if len(out) > limit else out
+    body = URL_RE.sub("", message)
+    body = re.sub(r"[\s\u2014-]+$", "", re.sub(r"\s{2,}", " ", body)).strip(" -\u2014")
+    stripped = body != message.strip()
+    body = ascii_fold(body)
+    # The pointer is the one part that must always survive: it is the only thing telling a
+    # first-time user where the link went. Only added when something was actually removed —
+    # promising a link in an email that has none is its own small lie.
+    tail = " Link in email." if stripped else ""
+    # A caveat has to survive being read once, on a lock screen. The full explanation of WHY a
+    # reading is unconfirmed is worth 60 characters in an email and is worth the flag alone in a
+    # text — spending half the segment on it pushes the measurement toward truncation.
+    body = re.sub(r"\((unconfirmed|high confidence|low confidence)[^)]*\)", r"(\1)", body)
+    # The monitor name is user-supplied ("amazon.ca watch") and is prepended AFTER stripping, so it
+    # could smuggle a domain into a text that then vanishes. Strip it on the same rule.
+    name = ascii_fold(URL_RE.sub("", job or "")).strip(" :-")
+    name = re.sub(r"\s{2,}", " ", name)
+
+    def assemble(n):
+        return (f"{n}: {body}{tail}" if n else f"{body}{tail}")
+
+    out = assemble(name)
+    if len(out) <= limit:
+        return out
+    # Degrade in a fixed order, worst-affordable-loss first. The monitor name is shortened before
+    # the measurement, the measurement before the pointer, and the pointer never at all.
+    room = limit - len(assemble(""))
+    if name and room > 8:
+        return assemble(name[:room - 4] + "..")
+    keep = limit - len(tail) - 3
+    return f"{body[:max(keep, 0)]}...{tail}"
 
 
-def send_alert(handle, message, subject="Alert from your assistant"):
+# Typographic characters an LLM and this codebase both emit freely. A carrier gateway is a 1990s
+# mail-to-SMS bridge with no promise of UTF-8; a mangled em dash reads as garbage on the handset,
+# and the link-stripping work is wasted if the text arrives looking broken anyway. ASCII is the only
+# thing every gateway is guaranteed to carry, so fold rather than gamble.
+ASCII_FOLD = {"\u2014": "-", "\u2013": "-", "\u2026": "...", "\u2018": "'", "\u2019": "'",
+              "\u201c": '"', "\u201d": '"', "\u00a0": " ", "\u00b7": "-", "\u2022": "-",
+              "\u20ac": "EUR", "\u00a3": "GBP", "\u00a5": "JPY", "\u2192": "->"}
+
+
+def ascii_fold(text):
+    for bad, good in ASCII_FOLD.items():
+        text = text.replace(bad, good)
+    # Anything still non-ASCII (emoji in a job name, an accented product title) is dropped rather
+    # than sent as bytes the gateway may refuse outright.
+    return text.encode("ascii", "ignore").decode("ascii").strip()
+
+
+PROFILE = os.environ.get("ALERT_PROFILE",
+                         "/volume1/docker/openwebui/config/alerts/profile.json")
+
+
+def alert_plan(handle):
+    """How an alert to `handle` would actually be delivered, as display facts. No secrets.
+
+    Exists so the assistant can TELL the user their alert setup at the moment they schedule a job,
+    instead of them finding out at 3am that nothing was configured. Every field here is something a
+    user can act on: a wrong number, a dead mailbox, an unrecognised sender.
+    """
+    conf = load_conf()
+    email, phone = resolve(handle, conf)
+    channels = [c.strip() for c in conf.get("ALERT_CHANNELS", "sms,email").split(",") if c.strip()]
+    gateway = conf.get("SMS_GATEWAY")
+    method = conf.get("SMS_METHOD", "gateway" if gateway else "twilio")
+    sender = conf.get("SMTP_FROM") or conf.get("SMTP_USER")
+    plan = {
+        "handle": handle,
+        "channels": channels,
+        "sms_enabled": "sms" in channels,
+        "email_enabled": "email" in channels,
+        "phone": phone,
+        "sms_method": method,
+        "sms_via": carrier_sms_address(phone, gateway) if (method == "gateway" and phone) else None,
+        "sms_from": sender if method == "gateway" else conf.get("TWILIO_FROM"),
+        "email": email,
+        "email_from": sender,
+        "configured": bool(conf),
+    }
+    plan["email_status"] = mail_domain_status(email)[0] if email else None
+    return plan
+
+
+def publish_profile(path=None):
+    """Write the non-secret display facts where the OpenWebUI pipe can read them.
+
+    The pipe runs in a container and cannot see ~/.hermes/alert_transports.env, but it needs the
+    sender address and channel list to show an honest confirmation. Refreshed by the delivery
+    watcher every tick, so it can never drift from the live config. Contains NO credentials.
+    """
+    path = path or PROFILE
+    conf = load_conf()
+    gateway = conf.get("SMS_GATEWAY")
+    method = conf.get("SMS_METHOD", "gateway" if gateway else "twilio")
+    data = {
+        "configured": bool(conf),
+        "channels": [c.strip() for c in conf.get("ALERT_CHANNELS", "sms,email").split(",")
+                     if c.strip()],
+        "sms_method": method,
+        "sms_gateway": gateway,
+        "sms_from": (conf.get("SMTP_FROM") or conf.get("SMTP_USER")) if method == "gateway"
+                    else conf.get("TWILIO_FROM"),
+        "email_from": conf.get("SMTP_FROM") or conf.get("SMTP_USER"),
+        "sms_char_limit": 140,
+        "sms_strips_links": True,
+    }
+    try:
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        tmp = path + ".tmp"
+        with open(tmp, "w") as f:
+            json.dump(data, f, indent=2)
+        os.replace(tmp, path)
+        return True
+    except Exception:
+        return False
+
+
+def alert_subject(message, job=None):
+    """Email subject: monitor, then the measurement.
+
+    "Alert from your assistant" told the user nothing — every alert looked identical in a
+    notification shade. A phone shows roughly the first 45 characters, so both the monitor name and
+    the number must land inside that window.
+
+    Deliberately the same shape as the SMS, so a user holding the text next to the email can see
+    at a glance that the two describe one event rather than two.
+    """
+    head = ascii_fold(URL_RE.sub("", message)).strip(" -")
+    head = re.sub(r"\s{2,}", " ", head)
+    if not head:
+        return f"Alert: {job}" if job else "Assistant alert"
+    if len(head) > 110:
+        head = head[:107] + "..."
+    return f"{ascii_fold(job).strip()}: {head}" if job else head
+
+
+def alert_email_body(message, job=None, job_id=None, when=None, phone=None):
+    """The full record. Everything the text had to drop, plus what an operator needs at 2am."""
+    lines = [message, ""]
+    facts = []
+    if job:
+        facts.append(f"  Monitor : {job}")
+    if job_id:
+        facts.append(f"  Job ID  : {job_id}")
+    if when:
+        facts.append(f"  Fired   : {when}")
+    if facts:
+        lines += ["What fired", *facts, ""]
+    if phone:
+        lines.append(f"A text was also sent to {phone}. Texts cannot carry links — carrier "
+                     f"gateways silently drop messages containing a web address — so any link for "
+                     f"this alert is in this email only.")
+        lines.append("")
+    lines.append("You are receiving this because a background task you scheduled met its alert "
+                 "condition. Reply in the assistant to change or cancel it.")
+    return "\n".join(lines)
+
+
+def send_alert(handle, message, subject=None, job=None, job_id=None, when=None):
     """Fan out one alert. Returns (ok, [notes]) — ok is True if ANY channel delivered."""
     conf = load_conf()
     if not conf:
@@ -292,7 +521,12 @@ def send_alert(handle, message, subject="Alert from your assistant"):
             notes.append(f"sms skipped: no phone for {handle!r} in alert_contacts.json")
         else:
             try:
-                notes.append(f"sms sent to {phone} ({send_sms(phone, sms_body(message), conf)})")
+                # The ledger recorded the ORIGINAL alert text, so a text that arrived mangled by
+                # link-stripping looked flawless in the record. Log the body that actually went
+                # out — it is the only copy of what the handset received.
+                body = sms_body(message, job)
+                ref = send_sms(phone, body, conf)
+                notes.append(f"sms sent to {phone} ({ref}) body={body!r}")
                 ok = True
             except Exception as e:
                 notes.append(f"sms FAILED: {e}")
@@ -309,7 +543,8 @@ def send_alert(handle, message, subject="Alert from your assistant"):
                 notes.append(f"email NOT SENT to {email}: {detail}")
             else:
                 try:
-                    send_email(email, subject, message, conf)
+                    send_email(email, subject or alert_subject(message, job),
+                               alert_email_body(message, job, job_id, when, phone), conf)
                     if status == "implicit":
                         notes.append(f"email sent to {email} — ⚠️ UNVERIFIABLE: {detail}")
                     else:
