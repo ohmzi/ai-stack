@@ -70,6 +70,11 @@ def load_conf():
             line = line.strip()
             if line and not line.startswith("#") and "=" in line:
                 k, v = line.split("=", 1)
+                # Strip a trailing " # inline comment" (whitespace-preceded, standard .env rule).
+                # Values here are domains / creds that never contain " #", so this is safe and it
+                # stops a comment leaking into a gateway address (observed live: a text went to
+                # "5145579764@msg.telus.com   # Telus/..." and vanished).
+                v = re.split(r"\s+#", v, 1)[0]
                 conf[k.strip()] = v.strip()
     return conf
 

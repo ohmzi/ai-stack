@@ -63,6 +63,16 @@ def main():
         got = at.normalize_phone(raw)
         check(f"{raw!r} -> {want!r}", got == want, f"got {got!r}")
 
+    print("--- env parser strips inline comments (a comment leaked into a gateway address, live) ---")
+    with tempfile.TemporaryDirectory() as td:
+        cf = os.path.join(td, "e.env")
+        open(cf, "w").write("SMS_GATEWAY=msg.telus.com   # Telus/Public\nSMTP_PASS=abcd efgh ijkl mnop\n")
+        at.CONF = cf
+        c = at.load_conf()
+        check("gateway value has no comment", c["SMS_GATEWAY"] == "msg.telus.com", repr(c.get("SMS_GATEWAY")))
+        check("app-password spaces preserved (no ' #' in it)", c["SMTP_PASS"] == "abcd efgh ijkl mnop",
+              repr(c.get("SMTP_PASS")))
+
     print("--- carrier email-to-SMS gateway address forming ---")
     for e164, want in [
         ("+15145579764", "5145579764"),
