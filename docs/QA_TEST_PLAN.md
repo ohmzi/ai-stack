@@ -254,6 +254,8 @@ Some checks are standalone harnesses rather than `cases.json` cases:
 | `tests/test_retrieval_quality.py` | Which sources survive `rag.relevance_threshold`, scored on real stored chunks |
 | `tests/test_bgtask_intent.py` | Background-task requests reach hermes-agent; ordinary conversation never does (default-deny) |
 | `tests/test_gpuguard.py` | Hermes cron defers while ComfyUI renders; fails open when ComfyUI is down (see `HERMES_AGENT.md`) |
+| `tests/test_hermes_delivery.py` | LOG/ALERT parsing contract: prompt-section lines ignored, missing LOG falls back visibly, recipients validated, alert flood capped |
+| `tests/test_alert_transports.py` | SMS/email transports: E.164 refused locally, resolution precedence, partial-success semantics, Twilio request shape (all offline) |
 
 ### 2.1 The trap cases are the point
 
