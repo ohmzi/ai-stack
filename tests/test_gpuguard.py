@@ -23,7 +23,7 @@ and fires due jobs unguarded. The gateway path — the only path that runs unatt
 
 Usage:  python3 tests/test_gpuguard.py
 """
-import importlib.util, io, json, os, sys, urllib.request
+import importlib.util, io, json, os, sys, time, urllib.request
 
 PLUGIN = os.path.expanduser("~/.hermes/plugins/gpuguard/__init__.py")
 HERMES_SRC = os.path.expanduser("~/.hermes/hermes-agent")
@@ -50,6 +50,14 @@ def main():
     check("subclasses InProcessCronScheduler (gateway passes its drain gate only then)",
           isinstance(p, InProcessCronScheduler))
     check("provider name is gpuguard", p.name == "gpuguard")
+
+    # The installed plugin must resolve INTO this repo. It is load-bearing arbitration logic, and
+    # ~/.hermes is deleted by `hermes uninstall` and rewritten by `hermes update`; without this the
+    # suite would happily pass on a box where the plugin had been silently reverted.
+    repo = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    check("installed plugin resolves into the repo (survives a rebuild)",
+          os.path.realpath(PLUGIN).startswith(repo + os.sep),
+          f"{os.path.realpath(PLUGIN)} is outside {repo}")
 
     # Stub the probe endpoint by patching urlopen inside the plugin module.
     def fake_urlopen(payload):
@@ -96,6 +104,85 @@ def main():
             check("gateway drain veto wins even with GPU idle", gate() is False)
         finally:
             InProcessCronScheduler.start = orig
+
+        # ---- the Ollama probe -------------------------------------------------
+        # Both probes go through the same urlopen, so from here on the stub has to dispatch on
+        # URL. fake_urlopen above stays untouched (and URL-agnostic) so the cases before this
+        # point keep testing exactly what they always did.
+        def fake_router(by_url):
+            def _open(url, timeout=0):
+                for frag, payload in by_url.items():
+                    if frag in url:
+                        return io.BytesIO(json.dumps(payload).encode())
+                raise OSError("no stub for " + url)
+            return _open
+
+        def bust():
+            p._last_probe_at = p._last_ps_at = p._last_gate_at = 0.0
+
+        IDLE_Q = {"queue_running": [], "queue_pending": []}
+        BUSY_Q = {"queue_running": [["x", 1]], "queue_pending": []}
+        BIG = {"name": "hermes-genesis:apex-compact", "size_vram": 17_000_000_000}
+        OWN = {"name": "hermes-genesis:agent", "size_vram": 17_000_000_000}
+        # Real measurements from this box, 2026-07-31.
+        SMALL = [{"name": "gemma3:1b", "size_vram": 990_000_000},
+                 {"name": "bge-m3:latest", "size_vram": 670_000_000},
+                 {"name": "gemma4:e2b", "size_vram": 1_950_000_000}]
+
+        for label, models, want in [
+            ("no model resident => dispatch", [], True),
+            ("chat tenant resident => defer", [BIG], False),
+            ("our OWN agent tag resident => dispatch (warm runner is reuse, not contention)",
+             [OWN], True),
+            ("small helpers resident => dispatch (a title-gen must not starve cron)", SMALL, True),
+            ("entry missing size_vram => no exception", [{"name": "mystery"}], True),
+        ]:
+            mod.urllib.request.urlopen = fake_router({"11434": {"models": models}})
+            bust()
+            check(label, p._ollama_idle() == want)
+
+        mod.urllib.request.urlopen = boom
+        bust()
+        check("Ollama unreachable => dispatch (fail open)", p._ollama_idle() is True)
+
+        mod.urllib.request.urlopen = fake_router({"11434": {"models": "nope"}})
+        bust()
+        check("malformed /api/ps => dispatch (fail open)", p._ollama_idle() is True)
+
+        # ---- the composed gate and the starvation escape ----------------------
+        mod.urllib.request.urlopen = fake_router({"8188": IDLE_Q, "11434": {"models": []}})
+        bust(); p._deferring_since = None
+        check("gate allows when ComfyUI and Ollama are both idle", p._gpu_available() is True)
+
+        mod.urllib.request.urlopen = fake_router({"8188": IDLE_Q, "11434": {"models": [BIG]}})
+        bust(); p._deferring_since = None
+        check("gate defers on a resident chat tenant", p._gpu_available() is False)
+
+        bust(); p._deferring_since = time.monotonic() - 60
+        check("still deferring before MAX_DEFER_S", p._gpu_available() is False)
+
+        bust(); p._deferring_since = time.monotonic() - (mod.MAX_DEFER_S + 1)
+        check("starvation escape fires after MAX_DEFER_S", p._gpu_available() is True)
+        check("escape clock resets after the forced dispatch", p._deferring_since is None)
+
+        # Tier separation: the soft escape must never push 18 GB into a live render — that is the
+        # exact failure this plugin exists to prevent.
+        mod.urllib.request.urlopen = fake_router({"8188": BUSY_Q, "11434": {"models": []}})
+        bust(); p._deferring_since = time.monotonic() - (mod.MAX_DEFER_S + 1)
+        check("soft escape does NOT override a RUNNING render", p._gpu_available() is False)
+
+        bust(); p._deferring_since = time.monotonic() - (mod.HARD_DEFER_S + 1)
+        check("hard escape overrides a wedged ComfyUI queue", p._gpu_available() is True)
+
+        # can_dispatch is called twice per tick (scheduler_provider loop, then inside tick()).
+        # The composed decision must be memoised or the deferral clock advances at 2x.
+        mod.urllib.request.urlopen = fake_router({"8188": IDLE_Q, "11434": {"models": [BIG]}})
+        bust(); p._deferring_since = None
+        first = p._gpu_available()
+        started = p._deferring_since
+        second = p._gpu_available()  # deliberately NOT busted: same tick
+        check("gate is stable across the two can_dispatch calls per tick",
+              first is False and second is False and p._deferring_since == started)
     finally:
         mod.urllib.request.urlopen = real
 
@@ -107,6 +194,13 @@ def main():
               "queue_running" in d and "queue_pending" in d)
     except Exception as e:
         print(f"  [SKIP] live ComfyUI probe ({e}) — guard fails open in this state by design")
+
+    try:
+        with urllib.request.urlopen("http://127.0.0.1:11434/api/ps", timeout=5) as r:
+            d = json.load(r)
+        check("live Ollama /api/ps has a models list", isinstance(d.get("models"), list))
+    except Exception as e:
+        print(f"  [SKIP] live Ollama probe ({e}) — guard fails open in this state by design")
 
     fails = results.count(False)
     print(f"\n{len(results)} checks — {'ALL PASS' if not fails else str(fails) + ' FAILURE(S)'}")

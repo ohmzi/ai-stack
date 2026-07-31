@@ -12,6 +12,7 @@ from *Workspace → Functions*, so there is no fork and no source patch.
 pipes/       Open WebUI Function pipes (the models you pick in the UI)
 filters/     Open WebUI filters
 scripts/     the alerting side — monitors, delivery, transports
+hermes/      hermes-agent plugins, symlinked into ~/.hermes
 compose/     support services (Tika, SearXNG, Kokoro, reranker)
 branding/    the OhmzAI skin
 tests/       unit tests, live QA harnesses and the eval suite
