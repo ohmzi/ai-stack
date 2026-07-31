@@ -120,19 +120,42 @@ def is_template(msg):
 JOBS_FILE = os.path.expanduser("~/.hermes/cron/jobs.json")
 
 
+NAMES_CACHE = os.path.join(OUT_DIR, ".job_names.json")
+
+
 def job_facts():
-    """{job_id: {"name":…, "schedule":…}} from the scheduler's own store.
+    """{job_id: {"name":…, "schedule":…}}, from the scheduler and a cache of what it used to hold.
 
     The schedule is read here rather than trusted from the job's own output because a job carries
     whatever schedule it was created with, baked into its prompt. Reschedule it — "change this to
     every 5 minutes" — and the run keeps reporting the old one, so the email says "Checked every 6h"
     about a monitor now running every 5 minutes. The scheduler is the only thing that knows.
+
+    The cache exists because a finite job DELETES ITSELF when its last run completes, and the
+    watcher reads the scheduler a minute later — so the final post of every bounded monitor lost
+    its name and went out as "🤖 acdf3fbb8b6d:". The last message about a task is the one most
+    worth labelling.
     """
-    out = {}
-    for jid, j in _jobs().items():
-        out[jid] = {"name": (j.get("name") or "").strip() or jid,
-                    "schedule": j.get("schedule_display") or ""}
-    return out
+    live = {jid: {"name": (j.get("name") or "").strip() or jid,
+                  "schedule": j.get("schedule_display") or ""}
+            for jid, j in _jobs().items()}
+    try:
+        with open(NAMES_CACHE) as f:
+            cached = json.load(f)
+    except Exception:
+        cached = {}
+    if live:
+        cached.update(live)
+        try:
+            tmp = NAMES_CACHE + ".tmp"
+            with open(tmp, "w") as f:
+                json.dump(cached, f)
+            os.replace(tmp, NAMES_CACHE)
+        except Exception:
+            pass                      # a cache that cannot be written must never stop delivery
+    merged = dict(cached)
+    merged.update(live)               # the scheduler always wins where both know
+    return merged
 
 
 def _jobs():

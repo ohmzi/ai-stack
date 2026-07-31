@@ -139,7 +139,23 @@ def main():
     facts = hd.job_facts()
     check("reads the friendly name", facts["abc123"]["name"] == "Giant Tiger bedside table")
     check("reads the CURRENT schedule", facts["abc123"]["schedule"] == "every 5m")
+    # A finite job deletes itself when its last run completes, and the watcher reads the scheduler
+    # a minute later — so the FINAL post of every bounded monitor went out as "🤖 acdf3fbb8b6d:".
+    # The last message about a task is the one most worth labelling.
+    hd.NAMES_CACHE = os.path.join(d, ".job_names.json")
+    hd.job_facts()                                    # populates the cache while the job exists
+    json.dump([], open(hd.JOBS_FILE, "w"))            # job finishes and removes itself
+    after = hd.job_facts()
+    check("a finished job keeps its name for its last post",
+          after.get("abc123", {}).get("name") == "Giant Tiger bedside table", after)
+    check("...and its schedule", after.get("abc123", {}).get("schedule") == "every 5m", after)
+    # The scheduler is still authoritative when both know: a rename must not be masked by the cache.
+    json.dump([{"id": "abc123", "name": "Renamed", "schedule_display": "every 1h"}],
+              open(hd.JOBS_FILE, "w"))
+    check("the live scheduler wins over the cache",
+          hd.job_facts()["abc123"]["name"] == "Renamed", hd.job_facts())
     hd.JOBS_FILE = os.path.join(d, "missing.json")
+    hd.NAMES_CACHE = os.path.join(d, "missing_cache.json")
     check("a missing jobs file degrades to empty, never raises", hd.job_facts() == {})
 
     print("--- alert flood capped (injection hygiene) ---")
