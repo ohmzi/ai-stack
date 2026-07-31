@@ -17,7 +17,7 @@ _Updated 2026-07-25 (task model → gemma4:e2b, thinking off)._
 
 | id | name | active | note |
 |---|---|---|---|
-| `auto_assistant.auto` | 🪄 Assistant (auto chat + image + video) | ✅ |  |
+| `auto_assistant.auto` | Ω Assistant | ✅ | display name is the workspace override on the `model` row; the pipe's own fallback is still `🪄 Assistant` |
 | `dolphin-venice:24b` | Dolphin Venice 24B | ✅ | chat + pipe helpers |
 | `uncensored.photo` | Photoreal | ✅ |  |
 | `flux_image.flux-dev` | Image | — |  |
