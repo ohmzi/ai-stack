@@ -1,0 +1,452 @@
+/* ============================================================================
+   OhmzAI — theme for Open WebUI 0.10.2
+   Installs as /app/backend/open_webui/static/custom.css — the directory
+   main.py mounts at /static, which index.html already <link>s. (Note it is
+   NOT /app/build/static; that path exists but is served to nobody.)
+   Built from "OhmzAI Brand.dc.html": warm-dark shell, one amber accent.
+
+   Approach: 0.10.2 is Tailwind v4, so the entire chassis is painted from a
+   --color-gray-* ramp that ships pure neutral (oklch(L% 0 0)). Re-declaring
+   that ramp warm rebrands every surface at once — no !important selector
+   chase. The app's own oled-dark preset does the same thing, which is how the
+   token roles below were confirmed:
+       gray-950/900 canvas · gray-850 raised · gray-800 line/hover
+   Only what the ramp cannot reach is hand-targeted further down.
+   ========================================================================= */
+
+/* --- Typeface -------------------------------------------------------------
+   Self-hosted rather than Google-hosted: this stack runs OFFLINE_MODE=true,
+   DO_NOT_TRACK=true, ANONYMIZED_TELEMETRY=false, so the UI should not phone
+   fonts.gstatic.com on every load. Space Grotesk is variable (400..700). */
+
+@font-face {
+  font-family: 'Space Grotesk';
+  font-style: normal;
+  font-weight: 400 700;
+  font-display: swap;
+  src: url('/static/ohmz-fonts/space-grotesk-latin.woff2') format('woff2');
+  unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA,
+    U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193,
+    U+2212, U+2215, U+FEFF, U+FFFD;
+}
+@font-face {
+  font-family: 'Space Grotesk';
+  font-style: normal;
+  font-weight: 400 700;
+  font-display: swap;
+  src: url('/static/ohmz-fonts/space-grotesk-latin-ext.woff2') format('woff2');
+  unicode-range: U+0100-02BA, U+02BD-02C5, U+02C7-02CC, U+02CE-02D7, U+02DD-02FF,
+    U+0304, U+0308, U+0329, U+1D00-1DBF, U+1E00-1E9F, U+1EF2-1EFF, U+2020,
+    U+20A0-20AB, U+20AD-20C0, U+2113, U+2C60-2C7F, U+A720-A7FF;
+}
+@font-face {
+  font-family: 'IBM Plex Mono';
+  font-style: normal;
+  font-weight: 400;
+  font-display: swap;
+  src: url('/static/ohmz-fonts/ibm-plex-mono-400-latin.woff2') format('woff2');
+  unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA,
+    U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193,
+    U+2212, U+2215, U+FEFF, U+FFFD;
+}
+@font-face {
+  font-family: 'IBM Plex Mono';
+  font-style: normal;
+  font-weight: 400;
+  font-display: swap;
+  src: url('/static/ohmz-fonts/ibm-plex-mono-400-latin-ext.woff2') format('woff2');
+  unicode-range: U+0100-02BA, U+02BD-02C5, U+02C7-02CC, U+02CE-02D7, U+02DD-02FF,
+    U+0304, U+0308, U+0329, U+1D00-1DBF, U+1E00-1E9F, U+1EF2-1EFF, U+2020,
+    U+20A0-20AB, U+20AD-20C0, U+2113, U+2C60-2C7F, U+A720-A7FF;
+}
+@font-face {
+  font-family: 'IBM Plex Mono';
+  font-style: normal;
+  font-weight: 500;
+  font-display: swap;
+  src: url('/static/ohmz-fonts/ibm-plex-mono-500-latin.woff2') format('woff2');
+  unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA,
+    U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193,
+    U+2212, U+2215, U+FEFF, U+FFFD;
+}
+@font-face {
+  font-family: 'IBM Plex Mono';
+  font-style: normal;
+  font-weight: 500;
+  font-display: swap;
+  src: url('/static/ohmz-fonts/ibm-plex-mono-500-latin-ext.woff2') format('woff2');
+  unicode-range: U+0100-02BA, U+02BD-02C5, U+02C7-02CC, U+02CE-02D7, U+02DD-02FF,
+    U+0304, U+0308, U+0329, U+1D00-1DBF, U+1E00-1E9F, U+1EF2-1EFF, U+2020,
+    U+20A0-20AB, U+20AD-20C0, U+2113, U+2C60-2C7F, U+A720-A7FF;
+}
+
+/* --- Brand palette ------------------------------------------------------ */
+
+:root {
+  --ohmz-canvas: #1a1917;
+  --ohmz-panel: #211f1d;
+  --ohmz-raise: #262421;
+  --ohmz-hover: #2d2a26;
+  --ohmz-line: #3a3733;
+  --ohmz-line-soft: #302d2a;
+  --ohmz-text: #f0edea;
+  --ohmz-secondary: #cbc5be;
+  --ohmz-muted: #8b857e;
+  --ohmz-tertiary: #7d7770;
+  --ohmz-amber: #e0913f;
+  --ohmz-amber-bright: #edaa5f;
+  --ohmz-on-amber: #241f18;
+  --ohmz-code: #131211;
+
+  /* Light-mode counterparts, same hue family. */
+  --ohmz-l-canvas: #faf9f7;
+  --ohmz-l-panel: #f0edea;
+  --ohmz-l-line: #ddd7d0;
+  --ohmz-l-text: #1a1917;
+  --ohmz-l-amber: #a8631d;
+
+  /* Re-declare Tailwind's neutral ramp as the brand's warm ramp. Lightness
+     order is preserved so every dark: / light: pairing in the app still
+     resolves the way its author intended. */
+  --color-gray-50: #f7f5f3;
+  --color-gray-100: #f0edea;
+  --color-gray-200: #e2ddd8;
+  --color-gray-300: #cbc5be;
+  --color-gray-400: #8b857e;
+  --color-gray-500: #7d7770;
+  --color-gray-600: #4d4944;
+  --color-gray-700: #3a3733;
+  --color-gray-800: #302d2a;
+  --color-gray-850: #262421;
+  --color-gray-900: #1a1917;
+  --color-gray-950: #131211;
+
+  /* Warms every dark:text-white / bg-white surface in one move. Pure #fff
+     against warm greys is the single biggest tell that a theme is bolted on. */
+  --color-white: #f6f4f2;
+
+  /* Same move at the other end. This is also what fixes the sign-in screen:
+     the auth route's full-bleed backdrop is a hardcoded `dark:bg-black`, which
+     is why it stayed pure black while the rest of the app went warm. Doubles as
+     the light-mode text colour, since `text-black` reads this too. */
+  --color-black: #1a1917;
+
+  /* Stock OWUI spends three different hues on "active / selected / info" —
+     blue (focus rings, selected citations), sky (the composer toggle pills and
+     the unread dot) and indigo. The brand sheet allows exactly one accent, so
+     all three ramps are re-pointed at the amber family rather than chased
+     selector by selector. Red and green are left alone; destructive and
+     success still need to read as themselves. */
+  --color-blue-50: #fdf4e8;
+  --color-blue-100: #fae6cd;
+  --color-blue-200: #f5cf9d;
+  --color-blue-300: #edb877;
+  --color-blue-400: #e6a45c;
+  --color-blue-500: #e0913f;
+  --color-blue-600: #c97a2c;
+  --color-blue-700: #a8631d;
+  --color-blue-800: #7d4916;
+  --color-blue-900: #4a3113;
+  --color-blue-950: #2b1d0c;
+
+  --color-sky-50: #fdf4e8;
+  --color-sky-100: #fae6cd;
+  --color-sky-200: #f5cf9d;
+  --color-sky-300: #edb877;
+  --color-sky-400: #e6a45c;
+  --color-sky-500: #e0913f;
+  --color-sky-600: #c97a2c;
+  --color-sky-700: #a8631d;
+
+  --color-indigo-300: #edb877;
+  --color-indigo-400: #e0913f;
+  --color-indigo-500: #c97a2c;
+  --color-indigo-600: #a8631d;
+
+  --ohmz-radius: 12px;
+}
+
+/* Tailwind emits .font-primary from the app's own theme config. */
+:root {
+  --font-primary: 'Space Grotesk', ui-sans-serif, system-ui, -apple-system,
+    'Segoe UI', Helvetica, Arial, sans-serif;
+  --font-mono: 'IBM Plex Mono', ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+
+/* --- Chassis --------------------------------------------------------------
+   body's colours are literal hex in the app's stylesheet, not ramp tokens, so
+   they are the one pair that has to be restated. */
+
+html,
+body {
+  font-family: var(--font-primary);
+}
+
+html.dark body,
+html.dark {
+  background: var(--ohmz-canvas);
+  color: var(--ohmz-text);
+}
+
+html.light body,
+html.light {
+  background: var(--ohmz-l-canvas);
+  color: var(--ohmz-l-text);
+}
+
+code,
+pre,
+kbd,
+samp,
+.font-mono,
+textarea.font-mono {
+  font-family: var(--font-mono);
+}
+
+/* --- Sidebar --------------------------------------------------------------
+   The brand sheet lifts the sidebar a step above the canvas rather than
+   sinking it — the reverse of stock OWUI, which lets it inherit body. */
+
+html.dark #sidebar {
+  background: var(--ohmz-panel);
+  border-inline-end: 1px solid var(--ohmz-line-soft);
+}
+
+html.light #sidebar {
+  background: var(--ohmz-l-panel);
+  border-inline-end: 1px solid var(--ohmz-l-line);
+}
+
+/* Section headings ("Today", "Yesterday") pick up the mono label treatment. */
+html #sidebar .font-medium.text-xs,
+html #sidebar .text-xs.font-medium {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+}
+
+/* --- Accent ---------------------------------------------------------------
+   One amber, spent only on the primary action, the active state and links. */
+
+html.dark #send-message-button:not(:disabled),
+html.light #send-message-button:not(:disabled) {
+  background: var(--ohmz-amber);
+  color: var(--ohmz-on-amber);
+}
+
+html #send-message-button:not(:disabled):hover {
+  background: var(--ohmz-amber-bright);
+}
+
+html #send-message-button:not(:disabled) svg {
+  color: var(--ohmz-on-amber);
+}
+
+html.dark a:not([class*='btn']):not([class*='bg-']),
+html.dark .prose a {
+  color: var(--ohmz-amber);
+}
+
+html.light a:not([class*='btn']):not([class*='bg-']),
+html.light .prose a {
+  color: var(--ohmz-l-amber);
+}
+
+/* Focus ring — stock is a neutral outline, which vanishes on warm greys.
+   Kept on every focusable control for keyboard users, but taken off the
+   composer: that textarea is already inside a bordered container, and ringing
+   it too draws a second box around the box. */
+html *:focus-visible {
+  outline: 2px solid var(--ohmz-amber);
+  outline-offset: 1px;
+}
+
+html #chat-input:focus,
+html #chat-input:focus-visible,
+html textarea:focus-visible {
+  outline: none;
+}
+
+html.dark ::selection {
+  background: color-mix(in srgb, var(--ohmz-amber) 32%, transparent);
+  color: var(--ohmz-text);
+}
+
+html.light ::selection {
+  background: color-mix(in srgb, var(--ohmz-amber) 30%, transparent);
+  color: var(--ohmz-l-text);
+}
+
+/* Toggles / checked controls read as "on", so they take the accent. */
+html input[type='checkbox']:checked,
+html input[type='radio']:checked {
+  accent-color: var(--ohmz-amber);
+}
+
+/* --- Composer -------------------------------------------------------------
+   Brand sheet: raised surface, 16px corner, hairline. */
+
+html.dark #chat-input,
+html.dark .chat-input-container {
+  background: transparent;
+}
+
+html.dark div:has(> #chat-input) {
+  border-radius: 16px;
+}
+
+/* --- Scrollbars ---------------------------------------------------------- */
+
+html.dark ::-webkit-scrollbar-thumb {
+  background: var(--ohmz-line);
+  border-radius: 999px;
+}
+
+html.dark ::-webkit-scrollbar-thumb:hover {
+  background: #4d4944;
+}
+
+html.light ::-webkit-scrollbar-thumb {
+  background: var(--ohmz-l-line);
+  border-radius: 999px;
+}
+
+html ::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+/* --- Code blocks ----------------------------------------------------------
+   Sink below the canvas so code reads as inset, matching the brand sheet's
+   #131211 sample blocks. */
+
+html.dark pre,
+html.dark .prose pre {
+  background: var(--ohmz-code);
+  border: 1px solid var(--ohmz-line-soft);
+}
+
+html.dark :not(pre) > code {
+  background: var(--ohmz-raise);
+  color: var(--ohmz-secondary);
+}
+
+/* --- Splash ---------------------------------------------------------------
+   index.html carries an inline <style> that paints the boot screen #000 in
+   dark and #fff in light. It is declared after this file, so matching its
+   specificity would lose on source order — the extra `body` outranks it and
+   keeps the first paint from flashing black before a warm canvas. */
+
+html.light body #splash-screen {
+  background: var(--ohmz-l-canvas);
+}
+
+html.dark body #splash-screen {
+  background: var(--ohmz-canvas);
+}
+
+/* --- Sign-in --------------------------------------------------------------
+   The auth route paints its own full-bleed backdrop with a hardcoded
+   `dark:bg-black`, which is why the login screen stayed pure black while the
+   rest of the app went warm. It reads --color-black (declared above), so the
+   backdrop is fixed at the token layer; what is left is the form itself.
+
+   Everything here is scoped to the auth container so ordinary dialogs and
+   settings forms elsewhere in the app keep their own styling. */
+
+.fixed.min-h-screen.font-primary input[type='text'],
+.fixed.min-h-screen.font-primary input[type='email'],
+.fixed.min-h-screen.font-primary div.flex:has(> input[type='password']) {
+  background: var(--ohmz-raise);
+  border: 1px solid var(--ohmz-line);
+  border-radius: 10px;
+  padding: 10px 12px;
+}
+
+html.light .fixed.min-h-screen.font-primary input[type='text'],
+html.light .fixed.min-h-screen.font-primary input[type='email'],
+html.light .fixed.min-h-screen.font-primary div.flex:has(> input[type='password']) {
+  background: #fff;
+  border-color: var(--ohmz-l-line);
+}
+
+/* The password row already wraps its reveal button, so the box goes on the
+   row and the input inside it stays bare — otherwise you get a box in a box. */
+.fixed.min-h-screen.font-primary div.flex:has(> input[type='password']) > input {
+  background: transparent;
+  border: 0;
+  padding: 0;
+}
+
+/* Chrome paints autofilled fields pale blue over any background it is given;
+   the inset shadow is the only way to reach them. */
+.fixed.min-h-screen.font-primary input:-webkit-autofill,
+.fixed.min-h-screen.font-primary input:-webkit-autofill:hover,
+.fixed.min-h-screen.font-primary input:-webkit-autofill:focus {
+  -webkit-box-shadow: 0 0 0 1000px var(--ohmz-raise) inset;
+  -webkit-text-fill-color: var(--ohmz-text);
+  caret-color: var(--ohmz-text);
+}
+
+html.light .fixed.min-h-screen.font-primary input:-webkit-autofill {
+  -webkit-box-shadow: 0 0 0 1000px #fff inset;
+  -webkit-text-fill-color: var(--ohmz-l-text);
+}
+
+/* Sign in / Create account — the primary action, so it takes the accent. */
+.fixed.min-h-screen.font-primary button[type='submit'] {
+  background: var(--ohmz-amber);
+  color: var(--ohmz-on-amber);
+}
+
+.fixed.min-h-screen.font-primary button[type='submit']:hover {
+  background: var(--ohmz-amber-bright);
+  color: var(--ohmz-on-amber);
+}
+
+/* --- Sidebar: wordmark and new chat ---------------------------------------
+   #sidebar-webui-name renders WEBUI_NAME, which upstream forces to
+   "<name> (Open WebUI)" (env.py:842-844). Setting the lockup here gets the
+   brand wordmark — Ohmz in text, AI in amber — without recreating the
+   container. Cosmetic only: the page title and the sign-in heading still read
+   whatever WEBUI_NAME is set to. */
+
+#sidebar-webui-name {
+  font-size: 0;
+  letter-spacing: 0;
+}
+
+#sidebar-webui-name::before,
+#sidebar-webui-name::after {
+  font-size: 16px;
+  font-weight: 500;
+  letter-spacing: -0.02em;
+}
+
+#sidebar-webui-name::before {
+  content: 'Ohmz';
+}
+
+#sidebar-webui-name::after {
+  content: 'AI';
+  color: var(--ohmz-amber);
+  font-weight: 600;
+}
+
+/* New chat is the sidebar's primary action; the brand sheet gives it a raised
+   card rather than the bare row the other nav items get. */
+html.dark #sidebar-new-chat-button {
+  background: var(--ohmz-hover);
+  border: 1px solid var(--ohmz-line);
+  border-radius: 10px;
+}
+
+html.light #sidebar-new-chat-button {
+  background: #fff;
+  border: 1px solid var(--ohmz-l-line);
+  border-radius: 10px;
+}
+
+html.dark #sidebar-new-chat-button:hover {
+  background: #35322d;
+}

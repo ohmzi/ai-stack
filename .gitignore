@@ -14,6 +14,10 @@ tests/eval/results/
 # reranker model cache (downloaded at runtime, ~2GB)
 compose/infinity-cache/
 
+# branding build input — the upstream Space Grotesk TTF, re-fetched on demand.
+# The rendered assets/ and the subsetted fonts/ ARE tracked.
+branding/.cache/
+
 # searxng secret — rotated out of git 2026-07-29, lives here only
 compose/.env
 
