@@ -39,6 +39,7 @@ browser actually run the current file?" in one lookup.
 | Path | What it is |
 |---|---|
 | `ohmz.css` | The theme. Installs as `custom.css`. |
+| `loader.js` | App-name override. Installs as `loader.js`. |
 | `assets/` | Rendered marks — favicons, splash, manifest icons. Committed. |
 | `fonts/` | Space Grotesk + IBM Plex Mono `woff2`, self-hosted. |
 | `build_assets.py` | Regenerates `assets/` from the font outline. |
@@ -118,25 +119,30 @@ elsewhere keep their own styling.
 
 ## The app name
 
-`#sidebar-webui-name` is set to the brand lockup in CSS — Ohmz in text, **AI**
-in amber — so the sidebar reads *OhmzAI* with no container changes. This is
-**cosmetic only**: the DOM text, the page title and the sign-in heading still
-render whatever `WEBUI_NAME` is.
+`loader.js` is where this is solved. `GET /api/config` returns `{"name": ...}`
+and is the single source the whole front-end reads for the app name — the
+sign-in heading, the sidebar and the document title all derive from it. The
+loader wraps `window.fetch`, rewrites that one field, and everything downstream
+says **OhmzAI**.
 
-For those, `WEBUI_NAME` is read from the environment at import, so it needs the
-container **recreated**, not restarted — and this one was created by hand, with
-no `com.docker.compose.*` labels, so that means reconstructing its `docker run`.
+index.html loads `loader.js` with `defer` at line 34, ahead of the SvelteKit
+entry at line 120, so the patch is in place before the app's first request. On
+anything that isn't `/api/config` — or if the rewrite throws — it hands back the
+untouched response.
 
-Worth knowing before you bother: `env.py:842-844` appends `" (Open WebUI)"` to
-any `WEBUI_NAME` that isn't the default, so it renders as
-**"OhmzAI (Open WebUI)"**. That suffix is upstream's attribution and no env var
-suppresses it.
+Two things this beats:
 
-```
-WEBUI_NAME=OhmzAI
-```
+- **`WEBUI_NAME`.** `env.py:842-844` appends `" (Open WebUI)"` to any value that
+  isn't the default, so the env var can only ever produce *"OhmzAI (Open
+  WebUI)"*. It also needs the container recreated rather than restarted, and
+  `WEBUI_SECRET_KEY` is unset here — every restart signs everyone out.
+- **A CSS text swap.** The heading has four variants ("Sign in to X", "Get
+  started with X", "Signing in to X", "... with LDAP"). Replacing the string
+  would fix one and break three.
 
-Note that Open WebUI's licence only permits removing its branding for
-deployments of 50 users or fewer (or with a commercial agreement). This is a
-single-user instance, which is why the lockup above is fine here. The version
-footer is left as-is.
+`#sidebar-webui-name` still carries a CSS lockup on top, purely so the sidebar
+renders the **AI** in amber.
+
+Open WebUI's licence permits removing its branding for deployments of 50 users
+or fewer (or with a commercial agreement). This is a single-user instance. The
+version footer is left as-is.
