@@ -115,6 +115,26 @@ ROUTE_CLASSIFIER_TIMEOUT = 12       # seconds; on any failure we fall back to no
 # user_prompt is captured at :2803.
 AUTO_KEEP_SYSTEM = True
 
+# --- confirmation before a render ----------------------------------------------------------------
+# Media routing is default-deny and heavily measured, but the residual false-positive rate is ~35%
+# (UPGRADE_ROADMAP.md:864) and no regex will drive that to zero — the remaining cases are genuinely
+# ambiguous English. A wrong render is not a wrong answer: it evicts the 18 GB chat tenant, holds
+# the card for minutes, and the user waits for something they never asked for.
+#
+#   "never"  no gate
+#   "video"  ask before video / animate / multi-shot only          (default)
+#   "all"    ask before images too
+#
+# Video is the default line because that is where the asymmetry lives: a Wan render is 3-6 minutes
+# (V04 measured 386 s) against ~16-48 s for a Krea image, so a false positive on video costs an
+# order of magnitude more than the interruption of asking. Gating images too would nag on the 65%
+# of media turns that were correct all along, to save 30 seconds.
+#
+# ALWAYS fails open. The gate is a courtesy to avoid wasted GPU, not a safety control: when there is
+# no client to ask — the eval harness drives pipe() directly, and so does any API caller — the
+# render proceeds. Failing closed would hang tests/eval/run_eval.py on every media case.
+CONFIRM_RENDERS = "video"
+
 
 class Pipe:
     def __init__(self):
@@ -2040,6 +2060,33 @@ class Pipe:
                 out.append((jid, ", ".join(diffs)))
         return out
 
+    _RESEARCH_BRIEF = (
+        "You are answering a ONE-OFF question for the user, using your tools. This is not a "
+        "scheduled job.\n"
+        "1. Do NOT create, modify or mention cron jobs. Nothing here recurs. If the user actually "
+        "wants something watched over time, say so in one line and stop — they will ask for it.\n"
+        "2. Do NOT emit LOG:, ALERT(...) or ALERT_DATA: lines. Those belong to scheduled runs and "
+        "are parsed by delivery infrastructure; here they would be picked up as a false alert.\n"
+        "3. Use your tools to find things out rather than answering from memory, and say which "
+        "source each fact came from. If the tools cannot establish something, say that plainly "
+        "instead of filling the gap.\n"
+        "4. Never state a number, price or date you did not read from a source in this session.\n"
+        "5. Answer in prose for the user, not as a report to a machine. Be concise."
+    )
+
+    def _release_chat_tenant(self):
+        """Unload the 32768-ctx chat model so the 65536-ctx agent runner has room.
+
+        Targeted rather than _free_vram(): that unloads EVERY model, including a hermes job that
+        may be mid-run, and polls for up to 30 s. Here we only need the one tenant that cannot
+        co-reside with the agent. Best-effort — Ollama would evict eventually anyway; this just
+        makes it happen before the load rather than during it."""
+        try:
+            requests.post(f"{self.ollama}/api/generate",
+                          json={"model": self.chat_model, "keep_alive": 0}, timeout=10)
+        except Exception:
+            pass
+
     def _hermes_jobs(self):
         """Job ids currently scheduled, straight from hermes's /api/jobs — deterministic ground
         truth. None on any error (verification then reports 'could not verify', never a false
@@ -2069,32 +2116,48 @@ class Pipe:
         handle = re.sub(r"[^a-z0-9_-]", "", local.lower())
         return handle or "user"
 
-    async def _hermes_stream(self, text, uname="user", verify_creation=False):
+    async def _hermes_stream(self, text, uname="user", verify_creation=False, brief=None):
         """Delegate a background-task request to the local hermes-agent API server.
 
         A plain HTTP client, deliberately: hermes's API server is an agent runtime that streams
         SSE chunks including inline tool-progress markers, so the user watches the agent work and
         then gets its confirmation — inside the same single chat entry. No second model row, no
-        bypass of this pipe."""
+        bypass of this pipe.
+
+        `brief` selects the contract: the default cron brief for scheduling, or _RESEARCH_BRIEF for
+        one-shot work. They are not interchangeable — handing a research question the cron brief
+        would tell the agent to create a job nobody asked for."""
         key = self._hermes_key()
         if not key:
             yield ("⚠️ Background tasks are configured but the hermes-agent key is missing "
                    f"({HERMES_KEY_FILE}). Is the hermes gateway set up on this host?")
             return
-        ctx = (f"Request context: the requesting user is '{uname}'. If this job needs to "
-               f"alert them, the ALERT line's recipient is '{uname}'.")
-        kind = self._guess_kind(text)
-        ctx += (f" The request is a '{kind}' watch — pass --kind {kind}."
-                if kind else
-                " Choose --kind yourself from: price_drop, price_rise, back_in_stock, "
-                "out_of_stock, fare, inventory, availability, threshold, change — whichever "
-                "best describes what the user is watching for.")
+        if brief is None:
+            brief = self._HERMES_BRIEF
+            ctx = (f"Request context: the requesting user is '{uname}'. If this job needs to "
+                   f"alert them, the ALERT line's recipient is '{uname}'.")
+            kind = self._guess_kind(text)
+            ctx += (f" The request is a '{kind}' watch — pass --kind {kind}."
+                    if kind else
+                    " Choose --kind yourself from: price_drop, price_rise, back_in_stock, "
+                    "out_of_stock, fare, inventory, availability, threshold, change — whichever "
+                    "best describes what the user is watching for.")
+        else:
+            ctx = f"Request context: the requesting user is '{uname}'."
+        # hermes runs hermes-genesis:agent at num_ctx 65536 while chat holds apex-compact at 32768.
+        # Ollama keys runners by model+options, so those are two distinct ~17 GB allocations and
+        # only one fits. Releasing the chat tenant first makes the handoff deterministic instead of
+        # leaving Ollama to evict under memory pressure mid-load.
+        #
+        # to_thread because _release_chat_tenant is a blocking requests call: running it inline
+        # would stall the event loop, and this pipe serves every other conversation on the box.
+        await asyncio.to_thread(self._release_chat_tenant)
         # Snapshot the scheduler BEFORE delegating, so creation can be verified against ground
         # truth after the stream rather than trusting the agent's narration (it has claimed jobs
         # it never created). None when verification is off — e.g. list/cancel requests.
         before = self._hermes_jobs() if verify_creation else None
         payload = {"model": "hermes-agent", "stream": True,
-                   "messages": [{"role": "system", "content": self._HERMES_BRIEF + "\n" + ctx},
+                   "messages": [{"role": "system", "content": brief + "\n" + ctx},
                                 {"role": "user", "content": text}]}
         reply = ""          # accumulated so verification can check ids the agent cites
         after = None
@@ -2437,6 +2500,47 @@ class Pipe:
             except Exception:
                 pass
 
+    async def _confirm_render(self, event_call, kind, detail, expensive=True):
+        """Ask before spending minutes of GPU on a render. True = go ahead.
+
+        Fails OPEN on every path that is not an explicit "no": no client attached (the eval
+        harness and any direct API caller), the socket disconnected, an unsupported client, a
+        malformed answer, or an exception. The gate exists to stop a misrouted request wasting the
+        card — it must never be the reason a correctly-routed render fails to happen, and it must
+        never hang a caller that has no user behind it.
+
+        OpenWebUI's client renders type "confirmation" from data.title/data.message and returns the
+        user's answer through sio.call (frontend handler; backend socket/main.py:1039).
+        """
+        want = CONFIRM_RENDERS
+        if want == "never" or event_call is None:
+            return True
+        # Keyed on measured COST, not on the noun. A Qwen-Image-Edit round is 162 s median (n=26)
+        # against 16.3 s for a fresh Krea image, so an edit belongs with video under "video" even
+        # though the user would call both "an image".
+        if want != "all" and not expensive:
+            return True
+        try:
+            answer = await event_call({
+                "type": "confirmation",
+                "data": {"title": f"Generate this {kind}?",
+                         "message": f"{detail}\n\nThis holds the GPU and pauses chat until it "
+                                    f"finishes."},
+            })
+        except Exception:
+            return True
+        # sio.call returns {'error': ...} on a dead session; anything non-boolean is "not a no".
+        if answer is False:
+            return False
+        if isinstance(answer, dict) and answer.get("confirmed") is False:
+            return False
+        return True
+
+    @staticmethod
+    def _declined(kind):
+        return (f"Okay — no {kind} generated. If you meant that as a question rather than a "
+                f"request, just ask it and I'll answer in chat.")
+
     @staticmethod
     def _fmt_dur(secs):
         s = int(round(secs))
@@ -2468,8 +2572,11 @@ class Pipe:
             await self._status(emitter, "", done=True)  # error text is already in the message body
         return result
 
-    async def pipe(self, body: dict, __metadata__=None, __event_emitter__=None, __user__=None):
+    async def pipe(self, body: dict, __metadata__=None, __event_emitter__=None, __event_call__=None,
+                   __user__=None):
         emitter = __event_emitter__
+        # None whenever nothing can be asked (direct API, eval harness); _confirm_render fails open.
+        confirm = __event_call__
         msgs = body.get("messages", [])
         text, ref = self._last_user(msgs)
         # OpenWebUI PREPENDS retrieved file/knowledge context to the LAST USER message (RAG_SYSTEM_CONTEXT
@@ -2516,6 +2623,9 @@ class Pipe:
                 and (self._is_video_request(text) or self._wants_new_video(text))):
             opts = self._video_opts(text)
             motion = self._strip_video_directives(self._clean_prompt(text))
+            if not await self._confirm_render(confirm, "video",
+                                              f"Animate the image: “{motion[:120]}”"):
+                return self._declined("video")
             result, el = await self._tracked(emitter, "Animating image",
                                              self._gen_i2v_and_cache(cid, anim_img, motion, opts))
             return await self._finish(emitter, result, "Animated", el,
@@ -2526,6 +2636,8 @@ class Pipe:
             opts = self._video_opts(text)
             cleaned = self._strip_video_directives(self._clean_prompt(text))
             n = self._wants_multishot(text)
+            if not await self._confirm_render(confirm, "video", f"Generate a video: “{cleaned[:120]}”"):
+                return self._declined("video")
             # A multi-shot sequence needs cross-shot consistency (best-quality A14B chain), so it
             # overrides 'fast' rather than being silently dropped to a single 5B clip.
             if n >= 2:
@@ -2542,8 +2654,13 @@ class Pipe:
         # (unless it's a restyle of the image on the table — "make this picture realistic" — which
         # must fall through to the EDIT path below, not t2i a mangled prompt from scratch)
         if text and not ref and not style_edit and self._is_image_request(text):
+            cleaned_img = self._clean_prompt(text)
+            if not await self._confirm_render(confirm, "image",
+                                              f"Generate an image: “{cleaned_img[:120]}”",
+                                              expensive=False):   # ~16 s; only gated under "all"
+                return self._declined("image")
             result, el = await self._tracked(emitter, "Generating image",
-                                             self._gen_and_cache(cid, self._clean_prompt(text), None))
+                                             self._gen_and_cache(cid, cleaned_img, None))
             return await self._finish(emitter, result, "Generated", el,
                                       f"Krea 2 · {IMG_T2I_W}×{IMG_T2I_H} · 8 steps")
         # Follow-up about the most recent VIDEO → regenerate it with the change folded into the
@@ -2558,6 +2675,12 @@ class Pipe:
             # A pure duration change ('make it longer') → re-render the SAME prompt+seed at the new
             # length; merging would perturb the scene for no reason.
             vdetail = f"Wan 2.2 A14B · {opts['w']}×{opts['h']} · {opts['length']}f"
+            # Gated once, above both paths: a re-render costs the same minutes as the first one, and
+            # a misread follow-up ("that's great, thanks") is exactly the kind of turn that should
+            # not silently re-enter the renderer. Asked before _merge_video_prompt so the question
+            # names the user's own words rather than a prompt they have not seen yet.
+            if not await self._confirm_render(confirm, "video", f"Re-render the video: “{text[:120]}”"):
+                return self._declined("video")
             if self._is_length_only(text):
                 if is_multishot:
                     n = min(V_SHOT_MAX, max(2, prev_prompt.count(" || ") + 1))
@@ -2583,8 +2706,12 @@ class Pipe:
         # needed. Any non-question/non-smalltalk message here is treated as an edit instruction.
         img = ref or (media if kind == "image" else None)
         if text and img and self._wants_edit(text):
+            instruction = self._edit_instruction(text)
+            # expensive=True: 162 s median, the slowest per-result operation on the box.
+            if not await self._confirm_render(confirm, "image edit", f"Edit the image: “{instruction[:120]}”"):
+                return self._declined("image edit")
             result, el = await self._tracked(emitter, "Editing image",
-                                             self._gen_and_cache(cid, self._edit_instruction(text), img, msgs))
+                                             self._gen_and_cache(cid, instruction, img, msgs))
             return await self._finish(emitter, result, "Edited", el, "Qwen-Image-Edit")
         # Chat. If the conversation revolves around an image the pipe GENERATED and this turn is a
         # question about it, attach the pixels to the last user message so the vision model (gemma4)
@@ -2608,6 +2735,23 @@ class Pipe:
         # `text` is the clean routing prompt, so RAG/search context cannot fabricate a job.
         if BG_TASKS and not attached_img and not ref:
             handle = self._alert_username(__user__)
+            # One-shot delegation, EXPLICIT ONLY. hermes's chat surface already has web, file,
+            # memory, session_search and todo (terminal and code execution are deliberately
+            # excluded in config.yaml), so multi-step research is installed and safe — it was just
+            # unreachable, because _is_bg_task_request requires RECURRENCE and everything one-shot
+            # fell through to plain chat.
+            #
+            # A slash command rather than a heuristic, on purpose. Every routing tier in this file
+            # that guessed has needed measuring and walking back, and the cost here is not a wrong
+            # answer: delegating evicts the chat tenant and the user waits ~23 s for the reload.
+            # /img and /vid set the precedent. Earn a heuristic with data first.
+            if (text or "").strip().lower().startswith(("/research", "/agent")):
+                question = re.sub(r"^/(research|agent)\s*", "", text.strip(), flags=re.I)
+                if not question:
+                    return self._say("Give me something to look into — e.g. "
+                                     "`/research what changed in the Wan 2.2 release notes`.")
+                return self._hermes_stream(question, handle, verify_creation=False,
+                                           brief=self._RESEARCH_BRIEF)
             # A turn that answers "what number should I text?" is handled before anything else —
             # a bare "514-555-0123" matches no task predicate and would otherwise reach the chat
             # model, which would cheerfully claim to have saved it.

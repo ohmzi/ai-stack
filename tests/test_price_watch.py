@@ -133,6 +133,20 @@ def main():
     check("identical repeat is dampened", "ALERT(" not in out, out)
     check("but still logs, marked unchanged", "(unchanged)" in out, out)
 
+    print("--- a REUSED --state name must not inherit another watch's dampening ---")
+    # --state is a short name the agent picks and it reuses them: this box already has two
+    # different watches both called "tipping-the-velvet-price". Before the url binding, the second
+    # watch inherited the first's alerted_price and its very first reading was read as "same as
+    # last time", so the user was never told — a silent monitor that looks like a working one.
+    # Its own state name — reusing s1 here would reset the state a later check reads back.
+    run(state="reuse1", below=50)                                    # watch A claims the name
+    out = run(state="reuse1", below=50, url="https://a-different-shop.example/other-item")
+    check("a different url under the same state name alerts", "ALERT(ohmz):" in out, out)
+    check("...and the old watch's dampening did not leak in", "(was " not in out, out)
+    # Same url must still dampen, or the fix would trade a silent monitor for a nightly repeat.
+    out = run(state="reuse1", below=50, url="https://a-different-shop.example/other-item")
+    check("the reused name then dampens on ITS own url", "ALERT(" not in out, out)
+
     pw.fetch = lambda url: '<meta property="og:price:amount" content="35.00" />'
     out = run(state="s1", below=50)
     check("a CHANGED price under target alerts again", "ALERT(ohmz):" in out, out)

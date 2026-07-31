@@ -13,7 +13,7 @@ bounded, GPU-safe scheduled job, executed by a local agent and reported back int
 | GPU guard | `hermes/plugins/gpuguard/` in this repo, **symlinked** to `~/.hermes/plugins/gpuguard/` (config `cron.provider: gpuguard`). A cron scheduler provider that defers ticks while **either** ComfyUI's `/queue` shows work **or** Ollama's `/api/ps` shows a big model that isn't ours. Due jobs are never lost, only deferred to the next 60 s tick. Covered by `tests/test_gpuguard.py` (26 checks). **Caveat:** a hand-run `hermes cron tick` bypasses the provider; the gateway path — the only unattended path — is guarded. |
 | ↳ why Ollama too | Added 2026-07-31. The cron tag runs at `num_ctx 65536` and the pipe's chat tenant at 32768; Ollama keys runners by model+options, so those are two **distinct** ~17 GB runners that cannot co-reside on a 24 GB card. A tick firing mid-conversation evicted the chat model and the user's next turn paid a cold reload — **measured at 22.7 s**. Co-residency is unreachable without taxing every chat turn, so the fix is scheduling. `/api/ps` answers "is a big model *resident*", not "*generating*" — with `OLLAMA_KEEP_ALIVE=60s` those differ by at most one tick, which is the accepted trade. Helpers are excluded by footprint (measured: tenant 16.70 GiB vs `gemma4:e2b` 1.81, `gemma3:1b` 0.92, `bge-m3` 0.62 — threshold 10 GiB), because OWUI runs title/tag generation and the route classifier constantly and "any model loaded ⇒ defer" would starve cron permanently. Our own `hermes-genesis:agent` never defers: resident means a job just ran, and reusing that warm runner is the best case. |
 | ↳ starvation escape | Continuous chat keeps the tenant resident indefinitely, so the gate cannot be stateless. `HERMES_GPUGUARD_MAX_DEFER_S` (default 900) force-dispatches when **only Ollama** blocks — three cadence periods of the tightest 5-minute monitor. `HERMES_GPUGUARD_HARD_DEFER_S` (default 3600) force-dispatches regardless, releasing a wedged queue. The two tiers deliberately do **not** share a threshold: forcing past a resident-idle tenant costs one recoverable eviction, but forcing past a *running render* OOMs a job that may be twenty minutes in — the exact failure this plugin exists to prevent. |
-| Delivery | **Deterministic since 2026-07-30**: jobs run NO delivery commands — they end their response with `LOG: <summary>` (always) and `ALERT(<user>): <msg>` (only when the user's condition holds). `scripts/hermes_delivery.py` (user timer, 1 min) parses each new output under `~/.hermes/cron/output/<job>/` and does the delivery itself: LOG → background-tasks channel webhook, ALERT → `send_alert()` → text (carrier email-to-SMS gateway) + email, both proven live 2026-07-30. Recipients validated against `^[a-z0-9_-]+$`, 3 alerts/run cap, per-leg retry (a failed push never re-posts the channel log). Born from two live failures: an agent-authored job that invented `send_webhook_post()` helpers and delivered nothing, then an agent that *claimed* deliveries which never happened. The LLM writes text; infrastructure delivers. Covered by `tests/test_hermes_delivery.py` (9 checks). |
+| Delivery | **Deterministic since 2026-07-30**: jobs run NO delivery commands — they end their response with `LOG: <summary>` (always) and `ALERT(<user>): <msg>` (only when the user's condition holds). `scripts/hermes_delivery.py` (user timer, 1 min) parses each new output under `~/.hermes/cron/output/<job>/` and does the delivery itself: LOG → background-tasks channel webhook, ALERT → `send_alert()` → text (carrier email-to-SMS gateway) + email, both proven live 2026-07-30. Recipients validated against `^[a-z0-9_-]+$`, 3 alerts/run cap, per-leg retry (a failed push never re-posts the channel log). Born from two live failures: an agent-authored job that invented `send_webhook_post()` helpers and delivered nothing, then an agent that *claimed* deliveries which never happened. The LLM writes text; infrastructure delivers. Covered by `tests/test_hermes_delivery.py` (65 checks). |
 | Entry point | The `auto_assistant` pipe routes background-task intent (`tests/test_bgtask_intent.py`, 30 checks, default-deny) to `POST 127.0.0.1:8642/v1/chat/completions` — an agent runtime, not an LLM proxy. The agent creates/manages its own cron jobs via its `cronjob` tool and streams confirmation back into the same chat. **No second model row in the picker; the single-pipe architecture holds.** |
 
 ## Config decisions that are deliberate
@@ -38,6 +38,40 @@ In OpenWebUI, just ask: *"monitor the price of X … check every 6 hours for 2 w
 route. Results appear in the **background-tasks** channel. From a terminal: `hermes cron list`,
 `hermes cron remove <id>`, `journalctl --user -u hermes-gateway -f`.
 
+### One-shot research — `/research` (added 2026-07-31)
+
+`/research <question>` (or `/agent`) delegates a **single** multi-step question to the same agent
+and streams the answer back. No job is created and no scheduler verification runs.
+
+This reaches capability that was installed but unreachable: the chat surface already has `web`,
+`file`, `memory`, `session_search` and `todo`, with terminal and code execution deliberately
+excluded — but `_is_bg_task_request` requires *recurrence*, so everything one-shot fell through to
+plain chat.
+
+**Explicit by design, not a heuristic.** Every routing tier in this stack that guessed has needed
+measuring and walking back, and the cost of a false positive here is not a wrong answer: delegating
+releases the chat tenant, so the user pays a ~23 s reload for a question that would have been
+answered in two. `/img` and `/vid` set the precedent. A heuristic can be earned later, with data.
+
+It runs under `_RESEARCH_BRIEF`, not the cron brief — the two are not interchangeable. The cron
+brief instructs the agent to schedule work and to emit `LOG:` / `ALERT(...)` lines, and
+`hermes_delivery.py` parses those out of *any* run, so a research answer under the cron brief could
+post a false alert. The research brief forbids both, and keeps the "never state a number you did
+not read from a source" rule.
+
+### Confirmation before a render
+
+Media routing is default-deny but the residual false-positive rate is ~35%, and a wrong render
+evicts the 18 GB chat tenant for minutes. `CONFIRM_RENDERS` in the pipe (`"never"` / `"video"` /
+`"all"`, default `"video"`) asks first, keyed on **measured cost** rather than the noun: video
+(186–386 s) and image *edits* (162 s median) are gated; a fresh Krea image (16 s) is not, unless
+set to `"all"`.
+
+It **always fails open** — no client to ask, a dead socket, an unsupported client or any exception
+all proceed. The gate is a courtesy to avoid wasted GPU, never a reason a correctly-routed render
+fails; failing closed would hang `tests/eval/run_eval.py`, which drives `pipe()` with no client
+attached. Covered by `tests/test_confirm_gate.py`.
+
 Proven end-to-end 2026-07-29 with a bounded demo (books.toscrape.com, every 2 m, repeat 2): run 1
 posted "£51.77 (first run)", run 2 read the state file and posted "£51.77 (unchanged)", job then
 retired itself.
@@ -58,8 +92,10 @@ upgrade). This box uses the gateway.
 Addresses come from where they actually live: **email is derived automatically** from the
 OpenWebUI user table by matching the handle against each account's email local part — no
 configuration, new users work immediately. **Phone numbers are opt-in** per handle in
-`~/.hermes/alert_contacts.json`, because OpenWebUI has no phone field and not everyone in a
-household wants texts; a handle with no phone entry quietly gets email only.
+`/volume1/docker/openwebui/config/alerts/contacts.json` (the shared file — see the caveat further
+down; `~/.hermes/alert_contacts.json` is only an un-migrated fallback and does not merge), because
+OpenWebUI has no phone field and not everyone in a household wants texts; a handle with no phone
+entry quietly gets email only.
 
 Secrets live in `~/.hermes/alert_transports.env` (0600, never in git; a `.template` sits beside it).
 Gmail needs an **app password**, not the account password. A Twilio **trial** account can only text
@@ -74,7 +110,7 @@ Design decisions worth keeping:
 - **Unconfigured is not an error.** Missing config, missing phone, or every channel failing folds
   the alert text into the channel post flagged `⚠️ [alert]` — a fired condition is never lost.
 
-Covered by `tests/test_alert_transports.py` (27 checks: normalization, resolution precedence,
+Covered by `tests/test_alert_transports.py` (130 checks: normalization, resolution precedence,
 fan-out semantics, channel selection, and the Twilio request shape against the documented API).
 Everything verifiable offline is pinned there, so a live failure has exactly one unknown left.
 
@@ -113,8 +149,23 @@ last error — an undeliverable alert is never silent.
 ### Price monitoring is deterministic code, not a per-run scraper
 
 `scripts/price_watch.py` fetches, extracts, compares against saved state and prints the LOG/ALERT
-lines itself. Jobs run it via `--script <name>.py --no-agent`, so **no model runs at all** — there is
-no step at which a price can be invented.
+lines itself. A model *does* run — the job is an ordinary agent run — but it is never allowed to
+produce the number: the brief (rule 5d) dictates the exact command and tells the agent to print its
+output **verbatim as the entire response**, adding nothing. So there is no step at which a price can
+be invented, and that property comes from the extractor being deterministic rather than from the
+absence of a model.
+
+> Corrected 2026-07-31. This section previously claimed jobs run via `--script <name>.py
+> --no-agent`, so "no model runs at all". That was true of the retired model-authored era and is
+> not how any live monitor works — commit 2418669 narrowed a blanket `--no-agent` ban that
+> "forbade the one thing that fixes the bug it was written about". The only `--no-agent` job left
+> in `jobs.json` is the retired `amazon_price_check.py`, whose last status is an error.
+
+State is keyed by `--state` **and bound to the URL it was recorded for**. The agent picks and
+reuses these short names — this box already has two different watches both called
+`tipping-the-velvet-price` — and a reused name would otherwise inherit the previous watch's
+`alerted_price`, so the new monitor's first reading reads as "unchanged" and the user is never
+told. A different URL under the same name resets the dampening.
 
 It replaced the model-writes-a-scraper approach after that approach failed three separate ways in
 production: a crash inside its own regex, an ALERT assigned to a variable it never printed, and
@@ -344,7 +395,14 @@ the user holding a pointer to nothing.
 | `dead` | no MX, no A | refuse; record the reason instead of spending an "ok" on it |
 | `unknown` | no resolver available | send — a missing `dig` must never stop an alert |
 
-Addresses are per-handle in `~/.hermes/alert_contacts.json`, which overrides the OpenWebUI lookup:
+Addresses are per-handle in **`/volume1/docker/openwebui/config/alerts/contacts.json`** — the
+shared file, readable from inside the container as `/app/backend/data/alerts/contacts.json`. It
+overrides the OpenWebUI lookup.
+
+> `~/.hermes/alert_contacts.json` is only a **fallback** for un-migrated installs, and
+> `load_contacts()` returns the FIRST readable file *whole* — it does not merge. On this box the
+> shared file exists and wins, so editing the `~/.hermes` copy changes nothing. Earlier revisions
+> of this doc pointed here, which is why that matters. Check which one is live before editing:
 
 ```bash
 python3 -c "import json,os;p=os.path.expanduser('~/.hermes/alert_contacts.json');print(open(p).read())"

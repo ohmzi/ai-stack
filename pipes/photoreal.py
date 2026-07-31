@@ -179,9 +179,19 @@ class Pipe:
             else:
                 # Timed out: cancel the still-queued/running job so it doesn't execute later as an
                 # orphan (burning GPU and evicting whatever is loaded by then).
+                #
+                # /queue delete is safe — it names our pid. /interrupt is NOT: it takes no
+                # argument and cancels whatever ComfyUI is executing right now. If our job was
+                # still PENDING, the delete above already removed it and the interrupt then kills
+                # a stranger's render — an Assistant video 20 minutes in, most likely, since that
+                # is the longest thing on this box. Only interrupt when the running job is ours.
                 try:
                     requests.post(f"{self.comfy}/queue", json={"delete": [pid]}, timeout=10)
-                    requests.post(f"{self.comfy}/interrupt", timeout=10)
+                    running = requests.get(f"{self.comfy}/queue", timeout=10).json().get(
+                        "queue_running") or []
+                    # Entries are [index, prompt_id, prompt, extra_data, outputs].
+                    if any(len(e) > 1 and e[1] == pid for e in running):
+                        requests.post(f"{self.comfy}/interrupt", timeout=10)
                 except Exception:
                     pass
                 return "⏳ Timed out waiting for the image (cancelled the queued job)."

@@ -232,6 +232,22 @@ def emit(payload):
 
 def run(a):
     state = read_state(a.state)
+
+    # Bind the state to the URL it was recorded for.
+    #
+    # --state is a short name the agent picks, and it reuses them: this box already has two
+    # different watches that were both called "tipping-the-velvet-price". A reused name inherits
+    # the previous watch's `alerted_price`, and the repeat dampener below then reads the NEW
+    # monitor's very first reading as "same as last time" and stays silent. The user is never told
+    # — which is the single outcome this entire path exists to prevent, and it would look like a
+    # working monitor the whole time.
+    #
+    # A different URL under the same name is a different watch, so its dampening means nothing.
+    # State with no url predates this check: adopt it rather than resetting a live monitor.
+    if state.get("url") and state["url"] != a.url:
+        state = {}
+    state["url"] = a.url
+
     label = a.label or state.get("item")
     base = {"to": a.alert_to, "item": label, "url": a.url, "unit": a.unit,
             "monitor": a.monitor, "schedule": a.schedule}

@@ -63,6 +63,9 @@ class _Resp:
         return "stub error body"
 
 
+SENT = {}          # last payload the pipe posted to hermes, for contract assertions
+
+
 class _Session:
     def __init__(self, lines, status=200):
         self._lines, self._status = lines, status
@@ -74,6 +77,8 @@ class _Session:
         return False
 
     def post(self, *a, **kw):
+        SENT.clear()
+        SENT.update(kw.get("json") or {})
         return _Resp(self._lines, self._status)
 
 
@@ -110,10 +115,11 @@ def job(jid, sched="every 5m", enabled=True, state="active", repeat=None):
             "state": state, "repeat": repeat}
 
 
-def drive(reply, snapshots, verify=True, status=200):
+def drive(reply, snapshots, verify=True, status=200, brief=None):
     """Run one delegation turn. `snapshots` is what _hermes_jobs returns on successive calls."""
     p = mod.Pipe()
     seq = list(snapshots)
+    released = []
 
     def fake_jobs():
         return seq.pop(0) if len(seq) > 1 else seq[0]
@@ -121,6 +127,9 @@ def drive(reply, snapshots, verify=True, status=200):
     p._hermes_jobs = fake_jobs
     p._hermes_key = lambda: "test-key"
     p._alert_setup_block = lambda uname: "\n<alert-setup>"
+    # Never touch the real Ollama from a test; record that the handoff released the tenant.
+    p._release_chat_tenant = lambda: released.append(p.chat_model)
+    drive.released = released
 
     real_aiohttp = mod.aiohttp
     real_sleep = mod.asyncio.sleep
@@ -133,7 +142,7 @@ def drive(reply, snapshots, verify=True, status=200):
     chunks = []
     try:
         async def go():
-            async for c in p._hermes_stream("watch this price every 5m", "ohmz", verify):
+            async for c in p._hermes_stream("watch this price every 5m", "ohmz", verify, brief):
                 chunks.append(c)
         asyncio.run(go())
     finally:
@@ -211,6 +220,38 @@ def main():
     out = drive("nope", [before, before], status=503)
     check("a non-200 from hermes surfaces as an error, not a silent pass",
           "hermes-agent HTTP 503" in out, out[:160])
+
+    print("--- the GPU handoff ---")
+    # The cron tag runs at num_ctx 65536 and chat at 32768; Ollama keys runners by model+options,
+    # so they are two distinct ~17 GB allocations and only one fits on the card.
+    drive("ok", [before, before], verify=False)
+    check("delegating releases the chat tenant first", drive.released == [mod.Pipe().chat_model],
+          repr(drive.released))
+
+    print("--- one-shot research uses its OWN contract, not the cron brief ---")
+    rb = mod.Pipe._RESEARCH_BRIEF
+    drive("looked it up", [None, None], verify=False, brief=rb)
+    sysmsg = next((m["content"] for m in SENT.get("messages", []) if m["role"] == "system"), "")
+    check("the research brief is what actually goes on the wire", rb[:60] in sysmsg, sysmsg[:100])
+    check("...and the cron brief does not", mod.Pipe._HERMES_BRIEF[:60] not in sysmsg)
+    # These two are the whole reason the briefs cannot be shared: the cron brief instructs the agent
+    # to schedule and to emit LOG/ALERT lines, and hermes_delivery.py parses those out of any run.
+    check("research forbids creating cron jobs", "not create" in rb.lower() or "do not create" in rb.lower())
+    check("research forbids LOG/ALERT lines (they would be delivered as a real alert)",
+          "ALERT(" in rb and "LOG:" in rb)
+    check("research still bans unsourced numbers", "did not read" in rb.lower())
+
+    # And the default path must be unchanged by the parameterisation.
+    drive("scheduled", [before, before], verify=False)
+    sysmsg = next((m["content"] for m in SENT.get("messages", []) if m["role"] == "system"), "")
+    check("the cron brief is still the default", mod.Pipe._HERMES_BRIEF[:60] in sysmsg)
+
+    print("--- /research is EXPLICIT: no heuristic may fire on ordinary chat ---")
+    p = mod.Pipe()
+    for t in ["research the best way to cook rice", "can you look into this for me",
+              "agent smith is a character in the matrix", "what should I cook tonight?"]:
+        check(f"plain text does not delegate: {t!r}",
+              not t.lower().startswith(("/research", "/agent")) and not p._is_bg_task_request(t))
 
     fails = results.count(False)
     print(f"\n{len(results)} checks — {'ALL PASS' if not fails else str(fails) + ' FAILURE(S)'}")
