@@ -127,6 +127,21 @@ def main():
     check("the state write went through a tmp file + rename",
           any(a.endswith(".tmp") and b.endswith(".delivered.json") for a, b in seen), repr(seen))
 
+    print("--- the live schedule wins over the one baked into the job ---")
+    # A job carries whatever schedule it was created with, inside its own prompt. Reschedule it and
+    # the run keeps reporting the old one, so the email says "Checked every 6h" about a monitor now
+    # running every 5 minutes. The scheduler is the only thing that knows.
+    import tempfile as _tf2
+    d = _tf2.mkdtemp()
+    hd.JOBS_FILE = os.path.join(d, "jobs.json")
+    json.dump([{"id": "abc123", "name": "Giant Tiger bedside table",
+                "schedule_display": "every 5m"}], open(hd.JOBS_FILE, "w"))
+    facts = hd.job_facts()
+    check("reads the friendly name", facts["abc123"]["name"] == "Giant Tiger bedside table")
+    check("reads the CURRENT schedule", facts["abc123"]["schedule"] == "every 5m")
+    hd.JOBS_FILE = os.path.join(d, "missing.json")
+    check("a missing jobs file degrades to empty, never raises", hd.job_facts() == {})
+
     print("--- alert flood capped (injection hygiene) ---")
     body = "## Response\n" + "".join(f"ALERT(a): spam {i}\n" for i in range(10))
     _, alerts, _d = hd.parse_output(body)

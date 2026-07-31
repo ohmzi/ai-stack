@@ -120,6 +120,33 @@ def is_template(msg):
 JOBS_FILE = os.path.expanduser("~/.hermes/cron/jobs.json")
 
 
+def job_facts():
+    """{job_id: {"name":…, "schedule":…}} from the scheduler's own store.
+
+    The schedule is read here rather than trusted from the job's own output because a job carries
+    whatever schedule it was created with, baked into its prompt. Reschedule it — "change this to
+    every 5 minutes" — and the run keeps reporting the old one, so the email says "Checked every 6h"
+    about a monitor now running every 5 minutes. The scheduler is the only thing that knows.
+    """
+    out = {}
+    for jid, j in _jobs().items():
+        out[jid] = {"name": (j.get("name") or "").strip() or jid,
+                    "schedule": j.get("schedule_display") or ""}
+    return out
+
+
+def _jobs():
+    try:
+        with open(JOBS_FILE) as f:
+            data = json.load(f)
+    except Exception:
+        return {}
+    jobs = data if isinstance(data, list) else data.get("jobs", data)
+    if isinstance(jobs, dict):
+        jobs = list(jobs.values())
+    return {j["id"]: j for j in jobs if isinstance(j, dict) and j.get("id")}
+
+
 def job_titles():
     """{job_id: human name} from the scheduler's own store.
 
@@ -312,10 +339,10 @@ def main():
         print("nothing new")
         return 0
 
-    titles = job_titles()
+    facts = job_facts()
     for f in pending:
         job_id = os.path.basename(os.path.dirname(f))
-        job_name = titles.get(job_id, job_id)
+        job_name = facts.get(job_id, {}).get("name", job_id)
         log, alerts, payloads = parse_output(open(f).read())
         if a.dry_run:
             print(f"{f}: LOG={log!r} ALERTS={alerts} DATA={[p for _, p in payloads]}")
@@ -343,6 +370,9 @@ def main():
                     # Fill in what the job could not know about delivery itself, so the rendered
                     # email can say "a text went to ..." truthfully.
                     data.setdefault("monitor", job_name)
+                    live_sched = facts.get(job_id, {}).get("schedule")
+                    if live_sched:
+                        data["schedule"] = live_sched      # scheduler wins over the baked-in value
                     alert_state[k] = {"job": job_name, "job_id": job_id, "recipient": who,
                                       "message": _plain(data), "payload": data,
                                       "created": _iso(_now()), "attempts": [],
