@@ -25,6 +25,10 @@
 (() => {
 	const BRAND = 'OhmzAI';
 
+	// Sentinel, so "did the browser actually run this file?" is one lookup
+	// rather than an afternoon. Cache layers make that question non-obvious.
+	window.__ohmzLoader = BRAND;
+
 	document.title = BRAND;
 
 	const nativeFetch = window.fetch;

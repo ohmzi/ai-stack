@@ -9,8 +9,30 @@ python3 branding/build_assets.py   # render the mark (only after editing it)
 ./branding/apply.sh --revert       # put the stock look back
 ```
 
-Then hard-refresh the browser (`ctrl-shift-r`) — `custom.css` and the favicons
-are cached aggressively.
+## Caching — read this before debugging a "it didn't apply" report
+
+This cost the most time of anything here, and it is invisible from the server:
+the files on disk are correct, the edge just isn't serving them.
+
+`ai.ohmz.cloud` sits behind Cloudflare, which caches `/static/*` for four hours
+(`max-age=14400`, `cf-cache-status: HIT`). A client-side `cache: 'no-store'`
+does **not** see through it — that only bypasses the *browser* cache and still
+hits the edge, so a probe can report the new file while the `<script>` tag runs
+an old one. Two layers, disagreeing.
+
+`apply.sh` therefore fingerprints the asset URLs in `index.html` (`?v=<hash>`),
+which is cached `DYNAMIC` — never — so a new hash busts both layers at once and
+no refresh is needed for the assets.
+
+The one thing a fingerprint can't bust is the HTML carrying it. Open WebUI
+serves `/` with no `cache-control`, so browsers apply *heuristic* freshness —
+roughly 10% of the document's age. Against a shell whose `Last-Modified` was
+the image build date, that is days. Hence: **one** hard refresh after the first
+install. After that the shell's `Last-Modified` is recent, browsers revalidate
+it on almost every load, and later changes propagate on their own.
+
+`window.__ohmzLoader` is a sentinel for exactly this — it answers "did the
+browser actually run the current file?" in one lookup.
 
 ## What's here
 
