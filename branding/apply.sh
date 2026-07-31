@@ -42,26 +42,36 @@ docker inspect "$CONTAINER" >/dev/null 2>&1 \
 [ "$(docker inspect -f '{{.State.Running}}' "$CONTAINER")" = true ] \
   || die "container '$CONTAINER' is not running"
 
-# Back up the stock assets exactly once.
+# Back up the stock assets exactly once. Deliberately all-or-nothing rather
+# than per-file top-up: on a re-run the live files are already branded, so
+# "copy anything missing from the backup" would enshrine a branded file as the
+# stock one and destroy the only way back.
 if ! docker exec "$CONTAINER" test -d "$BACKUP"; then
   echo "backing up stock assets -> $BACKUP"
   docker exec "$CONTAINER" mkdir -p "$BACKUP"
   docker exec "$CONTAINER" sh -c \
-    "cd $STATIC && for f in custom.css ${ASSETS[*]}; do [ -f \"\$f\" ] && cp -p \"\$f\" $BACKUP/ || true; done"
+    "cd $STATIC && for f in ${ASSETS[*]}; do [ -f \"\$f\" ] && cp -p \"\$f\" $BACKUP/ || true; done"
 fi
 
 if [ "${1:-}" = "--revert" ]; then
   docker exec "$CONTAINER" test -d "$BACKUP" || die "no backup to revert to"
-  docker exec "$CONTAINER" sh -c "cp -rp $BACKUP/. $STATIC/ && rm -rf $FONTS"
+  # custom.css and loader.js ship empty — they exist purely as customisation
+  # hooks — so truncating them IS the stock state, no backup copy needed.
+  docker exec "$CONTAINER" sh -c \
+    "cp -rp $BACKUP/. $STATIC/ && : > $STATIC/custom.css && : > $STATIC/loader.js && rm -rf $FONTS"
   echo "reverted to stock assets. Hard-refresh the browser (ctrl-shift-r)."
   exit 0
 fi
 
 [ -f "$HERE/ohmz.css" ] || die "missing $HERE/ohmz.css"
+[ -f "$HERE/loader.js" ] || die "missing $HERE/loader.js"
 [ -d "$HERE/assets" ] || die "missing $HERE/assets (run: python3 branding/build_assets.py)"
 
 echo "installing theme"
 docker cp "$HERE/ohmz.css" "$CONTAINER:$STATIC/custom.css"
+
+echo "installing app-name override"
+docker cp "$HERE/loader.js" "$CONTAINER:$STATIC/loader.js"
 
 echo "installing fonts"
 docker exec "$CONTAINER" mkdir -p "$FONTS"
@@ -81,14 +91,14 @@ docker exec "$CONTAINER" sh -c "chmod -R a+r $STATIC && chmod a+rx $FONTS"
 cat <<'DONE'
 
 OhmzAI skin installed. Hard-refresh the browser (ctrl-shift-r) to clear the
-cached custom.css and favicons.
+cached custom.css, loader.js and favicons.
 
-Not covered by this script — it needs the container to be recreated, not just
-restarted:
+The app name is handled by loader.js, which rewrites the "name" field of
+GET /api/config before the front-end reads it — so the sign-in heading, the
+sidebar and the document title all say OhmzAI. Setting WEBUI_NAME instead
+would need the container recreated, and env.py:842-844 would render it as
+"OhmzAI (Open WebUI)" regardless.
 
-  WEBUI_NAME=OhmzAI     renames the app in the title bar and sidebar.
-
-  Caveat: open_webui/env.py:842-844 appends " (Open WebUI)" to any WEBUI_NAME
-  that isn't the default, so it renders as "OhmzAI (Open WebUI)". That suffix
-  is upstream's attribution and there is no env var to suppress it.
+No restart is needed or wanted: these files are read per request, and
+WEBUI_SECRET_KEY is unset on this container, so a restart signs everyone out.
 DONE
