@@ -322,6 +322,43 @@ def main():
           isinstance(json.loads([l for l in out.splitlines()
                                  if l.startswith("ALERT_DATA:")][0][11:]), dict))
 
+    print("--- the REAL best_candidates contract, which --selftest depends on ---")
+    # selftest() unpacked this as a 2-tuple while it returned three, so the documented
+    # verification step for the whole alerting path ("python3 scripts/price_watch.py --selftest",
+    # HERMES_AGENT.md) failed on BOTH reference pages with "too many values to unpack".
+    #
+    # This suite could not catch it, and the reason is worth keeping in mind when adding tests:
+    # every other check above REPLACES best_candidates with its own correctly-shaped lambda. The
+    # one function whose real arity was wrong was the one function never called for real. A mock
+    # that is more correct than production hides the bug it was meant to model.
+    #
+    # So: a fresh module (unpatched by the stubs above) with only fetch stubbed.
+    fresh = load()
+    fresh.fetch = lambda url: FIX_JSONLD
+    got = fresh.best_candidates("https://shop.example.com/item")
+    check("best_candidates returns exactly (candidates, tries, title)", len(got) == 3, repr(got)[:120])
+    cands, tries, title = got
+    check("...candidates first", bool(cands) and abs(cands[0][0] - 39.99) < 0.005, repr(cands[:1]))
+    check("...fetch count second", isinstance(tries, int) and tries >= 1, repr(tries))
+    check("...page title third", title == fresh.page_title(FIX_JSONLD), repr(title))
+    check("its docstring documents the shape it actually returns",
+          "(candidates, tries, title)" in (fresh.best_candidates.__doc__ or ""))
+
+    # And exercise selftest's own unpacking, offline. This is the line that was broken.
+    fresh2 = load()
+    fresh2.fetch = lambda url: FIX_JSONLD
+    import io as _io, contextlib as _ctx
+    buf = _io.StringIO()
+    try:
+        with _ctx.redirect_stdout(buf):
+            rc = fresh2.selftest()
+        crashed = ""
+    except Exception as e:                                     # pragma: no cover - the bug itself
+        rc, crashed = 1, f"{type(e).__name__}: {e}"
+    out = buf.getvalue()
+    check("--selftest runs without unpacking errors", not crashed, crashed)
+    check("...and reports a price rather than FAIL", "FAIL" not in out, out.strip()[:160])
+
     fails = results.count(False)
     print(f"\n{len(results)} checks — {'ALL PASS' if not fails else str(fails) + ' FAILURE(S)'}")
     return 1 if fails else 0

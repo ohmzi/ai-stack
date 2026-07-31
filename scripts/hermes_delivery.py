@@ -65,10 +65,27 @@ ALERT_DATA_RE = re.compile(r"^ALERT_DATA:\s*(\{.*\})\s*$", re.M)
 
 RECIPIENT_RE = re.compile(r"^[a-z0-9_-]+$")
 
+# hermes's own "nothing to report" token. Anchored and allowed only alongside markdown punctuation
+# or a trailing sentence, so it matches a genuinely empty run and not a real result that mentions it.
+SILENT_RE = re.compile(r"^[\s#*_>-]*\[SILENT\][\s.*_>-]*$", re.I)
+
 
 def parse_output(text):
     """(log_line, [(who, message), ...], [(who, payload), ...]) from one run's markdown output."""
     body = text.split("## Response", 1)[-1]
+
+    # hermes prefixes EVERY cron prompt with its own convention: "If there is genuinely nothing new
+    # to report, respond with exactly [SILENT]". That collides head-on with our brief, which demands
+    # a LOG line on every run — so a job obeying its own runtime scored as a protocol violation and
+    # posted the loud warning below. It has already happened
+    # (~/.hermes/cron/output/aa92f2b114b7/2026-07-30_23-51-42.md).
+    #
+    # A bare [SILENT] means the job ran and had nothing to say: post nothing, warn about nothing.
+    # Deliberately narrow — only a response that is ESSENTIALLY nothing but the token qualifies, so
+    # a run that reports a real measurement and happens to contain the word is still parsed normally.
+    if SILENT_RE.match(body.strip()):
+        return None, [], []
+
     m = LOG_RE.search(body)
     if m:
         log = m.group(1).strip()

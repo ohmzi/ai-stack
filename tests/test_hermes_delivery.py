@@ -56,6 +56,29 @@ def main():
     log, _, _d = hd.parse_output("## Response\n\n")
     check("empty response -> no log", log is None, repr(log))
 
+    print("--- [SILENT]: hermes's own convention must not read as a broken run ---")
+    # hermes prefixes EVERY cron prompt with "If there is genuinely nothing new to report, respond
+    # with exactly [SILENT]", which collides with our brief's "a LOG line, always". A job obeying
+    # its own runtime therefore scored as a protocol violation and posted the loud warning — it
+    # already happened on 2026-07-30. A quiet run must be quiet, not alarming.
+    for label, body in [("bare", "[SILENT]"),
+                        ("markdown-wrapped", "**[SILENT]**"),
+                        ("lowercase", "[silent]"),
+                        ("with trailing punctuation", "[SILENT].")]:
+        log, alerts, _d = hd.parse_output(f"## Response\n\n{body}\n")
+        check(f"{label} [SILENT] posts nothing", log is None and alerts == [], repr(log))
+
+    # Deliberately narrow: a run that reports a real measurement is still parsed, even if the word
+    # appears in it. Swallowing those would turn the fix into a much worse bug than the one it fixes.
+    log, _, _d = hd.parse_output(
+        "## Response\nLOG: 25.00 unchanged; otherwise the job stays [SILENT]\n")
+    check("a real LOG mentioning the token still delivers",
+          log == "25.00 unchanged; otherwise the job stays [SILENT]", repr(log))
+    log, alerts, _d = hd.parse_output(
+        "## Response\n[SILENT]\nALERT(ohmz): the price dropped to 12.00\n")
+    check("a response carrying a real ALERT is never treated as silent",
+          alerts == [("ohmz", "the price dropped to 12.00")], repr(alerts))
+
     print("--- recipient validation, and back-compat with the legacy alerts- prefix ---")
     _, alerts, _d = hd.parse_output(
         "## Response\nALERT(ohmz2): bare handle\nALERT(UPPER): bad chars\n"

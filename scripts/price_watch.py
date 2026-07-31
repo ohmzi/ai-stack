@@ -183,7 +183,7 @@ def best_candidates(url, attempts=3):
     would report `low` on a page that could have answered properly. Retrying costs a second and
     turns an intermittent high-confidence source into a usually-available one.
 
-    Returns (candidates, tries). The last error is raised only if EVERY attempt failed.
+    Returns (candidates, tries, title). The last error is raised only if EVERY attempt failed.
     """
     err, best, title = None, [], None
     for i in range(attempts):
@@ -338,7 +338,7 @@ def selftest():
     ]
     for label, url, expect_conf in cases:
         try:
-            c, tries = best_candidates(url)
+            c, tries, _title = best_candidates(url)
             if c:
                 p, src, conf = c[0]
                 good = conf == expect_conf if expect_conf else True
