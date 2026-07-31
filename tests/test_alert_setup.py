@@ -162,6 +162,61 @@ def main():
     check("a user with no number is told so, not shown a blank",
           "no number on file" in block, block)
 
+    print("--- email resolves the way delivery resolves it, not just from contacts ---")
+    # Live failure: a user whose address is perfectly good was told "no address on file", because
+    # this side read only the contacts file while the delivery side falls back to the OpenWebUI
+    # user table. It reads as "your email alerts will not work" about a setup that works fine.
+    import sqlite3
+    db_path = os.path.join(tmp, "webui.db")
+    db = sqlite3.connect(db_path)
+    db.execute("create table user (id text, name text, email text)")
+    db.execute("create table auth (id text, active int)")
+    db.execute("insert into user values ('1','omariqbal97','omariqbal97@gmail.com')")
+    db.execute("insert into auth values ('1',1)")
+    db.commit(); db.close()
+    mod.OWUI_DB = db_path
+    json.dump({"ohmz": {"email": "override@x.com"}}, open(contacts, "w"))
+    check("an account with no contacts entry still resolves",
+          p._alert_email("omariqbal97") == "omariqbal97@gmail.com", p._alert_email("omariqbal97"))
+    check("a contacts entry still overrides the account address",
+          p._alert_email("ohmz") == "override@x.com", p._alert_email("ohmz"))
+    check("an unknown handle resolves to nothing", p._alert_email("nobody") is None)
+    block = p._alert_setup_block("omariqbal97")
+    check("the confirmation shows the resolved address, not 'none'",
+          "omariqbal97@gmail.com" in block and "no address on file" not in block, block)
+    mod.OWUI_DB = "/nonexistent/webui.db"
+    check("an unreadable database degrades to None, never raises",
+          p._alert_email("omariqbal97") is None)
+
+    print("--- an UPDATE is verified as success, not reported as a failed creation ---")
+    # Live failure: "change my alert to every 5 minutes" rescheduled the job correctly AND said
+    # nothing had been created — the loudest possible way to report success. Ground truth, not
+    # keywords: a job the scheduler already had, now different.
+    before = {"j1": {"schedule_display": "every 6h", "repeat": {"times": None}, "enabled": True,
+                     "state": "scheduled"}}
+    after = {"j1": {"schedule_display": "every 5m", "repeat": {"times": 4}, "enabled": True,
+                    "state": "scheduled"}}
+    ch = p._changed_jobs(before, after)
+    check("a reschedule is detected", ch and ch[0][0] == "j1" and "rescheduled" in ch[0][1], ch)
+    check("...and so is the new run budget", "run count changed" in ch[0][1], ch)
+    off = {"j1": dict(after["j1"], enabled=False)}
+    check("disabling is detected", "disabled" in p._changed_jobs(after, off)[0][1])
+    check("re-enabling is detected", "enabled" in p._changed_jobs(off, after)[0][1])
+    # These move on their own every minute; reporting them would claim a change on every turn.
+    noise = {"j1": dict(after["j1"], next_run_at="later", last_status="ok",
+                        last_run_at="now")}
+    check("clock movement is NOT a change", p._changed_jobs(after, noise) == [],
+          p._changed_jobs(after, noise))
+    check("an identical snapshot is not a change", p._changed_jobs(after, after) == [])
+    check("a brand-new job is not an update", p._changed_jobs({}, after) == [])
+    check("a vanished job is not an update", p._changed_jobs(after, {}) == [])
+
+    print("--- the brief forbids claiming confirmation it never made ---")
+    brief = mod.Pipe._HERMES_BRIEF
+    check("tells the agent it cannot open the page", "cannot open the page" in brief)
+    check("names the live failure it came from", "AUD" in brief)
+    check("stops it narrating skills and future intentions", "Do not mention" in brief)
+
     fails = results.count(False)
     print(f"\n{len(results)} checks — {'ALL PASS' if not fails else str(fails) + ' FAILURE(S)'}")
     return 1 if fails else 0

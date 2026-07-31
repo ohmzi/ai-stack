@@ -5,7 +5,7 @@ version: 0.5.0
 required_open_webui_version: 0.5.0
 description: One model that decides - chats (with vision), makes a Krea 2 image (text or gentle image-to-image edit), or a Wan video. Non-blocking (async). Never uses the uncensored model.
 """
-import asyncio, aiohttp, requests, time, base64, hashlib, os, random, re, json, threading
+import asyncio, aiohttp, requests, time, base64, hashlib, os, random, re, json, sqlite3, threading
 
 # Serialize the VRAM-manipulating generation section so two concurrent Assistant invocations
 # can't both free/reload models on the single 24 GB card and OOM each other.
@@ -86,6 +86,8 @@ HERMES_TIMEOUT_S = 300  # an agent turn can run several tool calls before answer
 ALERT_CONTACTS_FILE = os.environ.get("ALERT_CONTACTS",
                                      "/app/backend/data/alerts/contacts.json")
 ALERT_PROFILE_FILE = os.environ.get("ALERT_PROFILE", "/app/backend/data/alerts/profile.json")
+# Read-only, for resolving a handle to its account email exactly as the delivery side does.
+OWUI_DB = os.environ.get("OWUI_DB", "/app/backend/data/webui.db")
 VID_ENHANCE = True  # expand terse video ideas ("guy shooting hoops") into detailed prompts — the
                     # single biggest quality lever for Wan; terse prompts produce broken scenes
 VID_VERIFY = True   # vision-check a mid frame of the clip against the request; one corrected retry
@@ -591,6 +593,31 @@ class Pipe:
     def _contact(self, handle):
         return (self._read_json(ALERT_CONTACTS_FILE, {}) or {}).get(handle) or {}
 
+    @staticmethod
+    def _owui_email(handle):
+        """The OpenWebUI address whose local part matches this handle.
+
+        Mirrors alert_transports.owui_email, because the delivery side resolves email that way and
+        this side must agree. It did not: the confirmation block read only the contacts file and
+        told a user with a perfectly good address "no address on file", which reads as "your email
+        alerts will not work" about a setup that works fine.
+        """
+        try:
+            db = sqlite3.connect(f"file:{OWUI_DB}?mode=ro", uri=True)
+            rows = db.execute("select u.email from user u join auth a on a.id=u.id "
+                              "where a.active=1").fetchall()
+            db.close()
+        except Exception:
+            return None
+        for (email,) in rows:
+            if re.sub(r"[^a-z0-9_-]", "", (email or "").split("@")[0].lower()) == handle:
+                return email
+        return None
+
+    def _alert_email(self, handle):
+        """Where an alert to this handle would actually go — contacts override, OWUI otherwise."""
+        return self._contact(handle).get("email") or self._owui_email(handle)
+
     def _save_phone(self, handle, e164):
         """Persist a number for this handle. Returns True on success.
 
@@ -626,7 +653,7 @@ class Pipe:
         prof = self._read_json(ALERT_PROFILE_FILE, {}) or {}
         c = self._contact(handle)
         phone = c.get("phone")
-        email = c.get("email")
+        email = self._alert_email(handle)
         chans = prof.get("channels") or ["sms", "email"]
         rows = []
         if "sms" in chans:
@@ -659,7 +686,7 @@ class Pipe:
         """Ask for a number BEFORE scheduling, and carry the request across the turn."""
         blob = base64.b64encode((pending_request or "").encode()).decode()
         prof = self._read_json(ALERT_PROFILE_FILE, {}) or {}
-        email = self._contact(handle).get("email")
+        email = self._alert_email(handle)
         alt = (f"Or reply **email only** — alerts still go to `{email}`."
                if email else "Or reply **email only** to skip texts.")
         # Set the expectation about the sender BEFORE the number is handed over. These texts arrive
@@ -1939,6 +1966,13 @@ class Pipe:
         "pass the job's real name and its human schedule. Add --unit for a non-dollar currency. "
         "This is still normal agent mode (rule 6b holds) — the agent runs a vetted command rather "
         "than generating extraction code per run.\n"
+        "5d-i. NEVER claim you confirmed something you did not check. A job was created saying "
+        "'below $20 AUD (confirmed currency from page)' for a Canadian retailer — the currency was "
+        "invented and the word 'confirmed' made it sound verified. You cannot open the page from "
+        "this session. State the number the user gave you and nothing about where it came from. "
+        "Pass --unit only when the USER named a currency; otherwise leave it. Do not mention "
+        "skills, internal tools, or what you might do later — the reply is a confirmation of what "
+        "was scheduled, nothing else.\n"
         "5e. The extractor also reports its OWN failures: a dead URL, a site blocking automated "
         "checks, and a page that still loads but no longer shows a value. Never add your own "
         "error handling or retry logic around it — it already confirms a failure across runs "
@@ -1978,6 +2012,33 @@ class Pipe:
             return k or None
         except Exception:
             return None
+
+    @staticmethod
+    def _changed_jobs(before, after):
+        """[(job_id, what changed)] for jobs the scheduler already had and has since altered.
+
+        Only fields a user would recognise as "my task changed": how often it runs, how many runs
+        are left, and whether it is on. Anything else (next_run_at ticking forward, last_status)
+        moves on its own every minute and would report a change on every single turn.
+        """
+        out = []
+        for jid, a in (after or {}).items():
+            b = (before or {}).get(jid)
+            if not b:
+                continue
+            diffs = []
+            if (a.get("schedule_display") or a.get("schedule")) != \
+                    (b.get("schedule_display") or b.get("schedule")):
+                diffs.append("rescheduled")
+            if a.get("repeat") != b.get("repeat"):
+                diffs.append("run count changed")
+            if bool(a.get("enabled", True)) != bool(b.get("enabled", True)):
+                diffs.append("enabled" if a.get("enabled", True) else "disabled")
+            if (a.get("state") or "") != (b.get("state") or ""):
+                diffs.append(f"now {a.get('state')}")
+            if diffs:
+                out.append((jid, ", ".join(diffs)))
+        return out
 
     def _hermes_jobs(self):
         """Job ids currently scheduled, straight from hermes's /api/jobs — deterministic ground
@@ -2077,6 +2138,20 @@ class Pipe:
                                            f"({sched}) — confirmed against the scheduler, not the "
                                            f"agent's word.")
                                     yield self._alert_setup_block(uname)
+                                elif new_jobs is not None and self._changed_jobs(before, after):
+                                    # An UPDATE is not a creation. "change my alert to every 5
+                                    # minutes" produced a correctly rescheduled job AND a message
+                                    # saying nothing had been created — the loudest possible way to
+                                    # report success. Ground truth, not keywords: if a job the
+                                    # scheduler already had now has a different schedule, state or
+                                    # run budget, something real happened.
+                                    jid, what = self._changed_jobs(before, after)[0]
+                                    j = after[jid]
+                                    sched = (j.get("schedule_display")
+                                             or str(j.get("schedule", "?")))
+                                    yield (f"\n\n✅ **Verified updated**: job `{jid}` is now "
+                                           f"{sched} ({what}) — confirmed against the scheduler, "
+                                           f"not the agent's word.")
                                 elif new_jobs is not None:
                                     # No NEW job is not the same as a fabrication. The agent may
                                     # legitimately have found an existing match and asked what to
