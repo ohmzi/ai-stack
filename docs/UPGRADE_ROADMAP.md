@@ -585,6 +585,17 @@ and web-search turns would be silently truncated rather than erroring.
 > note when a render is **running** (not merely pending — a strip the user cannot act on is one
 > they learn to ignore). Nothing at all without a client. A bounded *wait* remains unbuilt pending
 > a measured reason to want one.
+>
+> **B2 measured 2026-08-01 (`tests/test_contention.py --live`, `contention-20260801T064558Z.json`)
+> — the bounded wait is now CLOSED as a recorded negative.** One median-class Wan 14B render plus
+> concurrent chat: contended TTFT 10.03 s cold / 0.51 s warm against 5.52 / 0.29 idle — **1.8×**,
+> not minutes. The chat tenant does partially spill (`size_vram/size` = 0.407, ~60% offloaded), so
+> long generations mid-render run degraded — but the render itself finished in **191.1 s against
+> the 186.7 s median (+2.4%)** with a 23 401 MiB peak and no OOM. A bounded wait would trade a
+> working 0.5–10 s first token for up to a full render of enforced silence; the measurement says
+> don't. This also unblocks the `--lowvram` re-evaluation (3.3), which was gated on exactly this
+> number. Caveat recorded honestly: TTFT was measured, sustained tok/s under spill was not — if
+> long mid-render replies ever feel unusable, that is the number to take next.
 
 **What.** Replace the module-level `threading.Lock` with an `fcntl.flock` on a fixed path (~15 lines,
 in `auto_assistant.py` only — do **not** duplicate 40 lines into four files that will drift; two of
