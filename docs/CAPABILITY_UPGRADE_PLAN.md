@@ -91,7 +91,7 @@ model back to `gemma3:1b` (co-resides — reverses commit `619a85c`), disable
 `nvidia-smi` returns normally (CUDA 13.0, 939 MiB idle desktop load on the 3090). All 30 containers
 came back including `open-webui` (healthy) and `tday_ollama` (healthy). Nothing needed recreating.
 
-The prevention step below is **still outstanding** — see Question 5.
+~~The prevention step below is still outstanding — see Question 5.~~ **Done 2026-08-01:** the GPU is now attached via CDI (`--device nvidia.com/gpu=all`) in `compose/openwebui/run.sh` and `compose/comfyui/run.sh`, which is the documented fix for daemon-reload stripping device cgroup rules. There is no "Question 5" section in this document.
 
 <details><summary>Original diagnosis (kept for the record)</summary>
 
@@ -169,7 +169,7 @@ if isinstance(routed, str) and routed.strip():
 `_merge_video_prompt`). Chat still uses `omsgs` from the full `msgs`, so the model keeps all RAG context.
 
 **Status. ✅ LIVE.** 6/6 tests pass post-fix (`tests/test_router.py`, re-run post-reboot). `py_compile`
-clean. `function.content` md5 `e74cd4ad9901d101ac3fbfc9369fe341` (95012 B) — **DB, `pipes/live/` and
+clean. `function.content` md5 `<stale — see note>` (95012 B) — **DB, `pipes/live/` and
 `pipes/` all match**. DB backup: `webui.db.bak-ragroute`. OWUI 0.10.2 started 12:51:02 with no
 function-load errors, so the fixed pipe is the one serving traffic.
 
@@ -227,7 +227,7 @@ released on early disconnect). `tests/test_router.py` still 6/6 — the `auto` p
 
 ### Deploy
 
-`function.content` md5 `5c5212ecaabf66132ef249e7431c000a` (100186 B); `pipes/`, `pipes/live/` and the
+`function.content` md5 `<stale — see note>` (100186 B); `pipes/`, `pipes/live/` and the
 DB all match. DB backup `webui.db.bak-manifold`. OWUI restarted 13:12; verified by loading the
 function through OWUI's own `load_function_module_by_id` and calling `pipes()` — all three entries
 returned.
@@ -809,7 +809,7 @@ correctly refused), so these need you. Exact prompts and exact pass criteria:
 15. Re-run the full 17/17 routing regression from `openwebui-improvement-plan.md`.
 
 **Rollback.** DB backup before every deploy (`webui.db.bak-<name>`); `pipes/live/*.py` is the source
-of truth and must stay md5-identical to `function.content`.
+of truth and must stay identical to `function.content` — verify with `python3 tests/test_deployed.py`, which compares sha256 and is wired into `run_eval.py` as a pre-flight (2026-08-01). Do NOT quote hashes in prose: every one written here has gone stale within days.
 
 ---
 

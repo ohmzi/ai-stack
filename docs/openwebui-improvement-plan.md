@@ -253,6 +253,8 @@ _6 findings (3 major). Status: ✅ complete._
 
 - [x] **F30** 🔵 suggestion · `config:cfg#341` — gemma3:1b is adequate for titles/tags but marginal for search-query/retrieval generation, degrading web-search/RAG recall
     - **Problem:** task.model.default=task.model.external=gemma3:1b handles title, tag, follow-up AND retrieval/web-search query generation (task.query.search.enable=true L341, task.query.retrieval.enable=true). A 1b model is fine for the short low-stakes title/tag jobs (and autocomplete is disabled), but is a weak point for query reformulation, degrading recall. This is a quality trade-off, not a broken flow — the tiny model correctly avoids evicting the big chat model for background tasks.
+    - **Status 2026-08-01: this is the live state again, deliberately.** The swap to `gemma4:e2b` was reverted after measuring what it actually cost: e2b reports 1.81 GiB but Ollama reserves ~9.4 GiB for it, and loading it **evicted the 16.70 GiB chat tenant outright** — so every chat title charged the user a full 18 GB reload on their next turn. `gemma3:1b` co-resides (21298/24576 measured).
+    - The recall concern above stands and is **unmeasured**: nobody has compared 1b vs e2b query reformulation on real retrieval. If RAG recall ever feels weak, that is the experiment to run — not a blind re-swap, since the eviction cost is now a measured number and the recall cost is not.
     - **Fix:** Keep gemma3:1b for titles/tags; if search quality matters, point only the query task at a stronger model (e.g. dolphin), accepting the extra swap, or leave as-is if background-task cost is the priority.
     - **Status:** ✅ done — Kept gemma3:1b for all background tasks (titles/tags/query) — OpenWebUI has no per-task override; switching all to dolphin would thrash VRAM. [user-approved, documented tradeoff]
 
@@ -262,10 +264,10 @@ _6 findings (3 major). Status: ✅ complete._
 
 _1 findings (0 major). Status: ✅ complete._
 
-- [ ] **F41** 🔵 Remove the dead `video` pipe function + `video.wan` workspace model (superseded by the Assistant's video path).
-- [ ] **Deploy:** write every edited pipe's `content` back to the DB, update config/model rows.
-- [ ] **Verify:** `docker restart open-webui`; confirm all 5 active functions load with no errors in logs.
-- [ ] **Test:** run routing unit tests (`_wants_edit`, `_is_image_request`, `_is_video_request`, model-split) against representative prompts.
+- [x] **F41** 🔵 Remove the dead `video` pipe function + `video.wan` workspace model (superseded by the Assistant's video path).
+- [x] **Deploy:** write every edited pipe's `content` back to the DB, update config/model rows.
+- [x] **Verify:** `docker restart open-webui`; confirm all 5 active functions load with no errors in logs.
+- [x] **Test:** run routing unit tests (`_wants_edit`, `_is_image_request`, `_is_video_request`, model-split) against representative prompts.
 - [ ] Sync `live/` → disk pipe filenames so the on-disk copy is no longer stale.
 
 ### Finding detail

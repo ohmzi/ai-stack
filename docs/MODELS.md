@@ -3,12 +3,16 @@
 Single 24 GB RTX 3090. **Every number here is measured** (`nvidia-smi` delta on a clean idle
 baseline), not estimated — see the warning about `/api/ps` below.
 
-**As of 2026-07-26 the box runs FOUR models, one of which does almost everything.**
+**As of 2026-08-01 the box runs FIVE models, one of which does almost everything.**
+(Was four until `hermes-genesis:agent` — the 65536-ctx tag hermes-agent needs — joined the
+roster on 2026-07-29. Same weights as `apex-compact`, ~0 extra disk, but a SEPARATE runner:
+Ollama keys runners by model+options, so the two cannot co-reside on this card.)
 
 | Slot | Model | Real VRAM | tok/s | Role |
 |---|---|---|---|---|
 | **Everything** | `hermes-genesis:apex-compact` (MoE, ~3 B active of 34.7 B) | **18285 MiB** | **135.3** | Chat, code, vision, and the uncensored prompt helpers — across `auto_assistant`, `photoreal` and `image_krea`. |
-| **Task model** | `gemma4:e2b` | **3307 MiB** | 166.6 | Chat titles, tags, RAG query generation. Thinking is OFF (see below). Also the QA judge. ⚠️ see "the phantom". |
+| **Task model** | `gemma3:1b` | **1313 MiB** | 235.4 | Chat titles, tags, RAG query generation. **Reverted from `gemma4:e2b` on 2026-08-01** — see "the phantom": e2b was measured EVICTING the 16.70 GiB tenant on every title generation. `gemma3:1b` co-resides (21298/24576 measured). |
+| **QA judge** | `gemma4:e2b` | 3307 MiB | 166.6 | Still the eval judge (cross-family control). Kept on disk; no longer in the request path. ⚠️ see "the phantom". |
 | **Router classifier** | `gemma3:1b` | **1313 MiB** | 235.4 | The HINT-tier chat-vs-code classifier in the pipe. Co-resides with the main tenant. |
 | **Embeddings** | `bge-m3:latest` | ~941 MiB, transient | — | RAG embeddings via the Ollama engine. 1024-dim, 8192-token window. |
 
@@ -87,6 +91,13 @@ At `num_ctx=8192` a genuine triple works (`e2b → 1b → dolphin`, 20161 MiB), 
 `OLLAMA_MAX_LOADED_MODELS=3` is **fiction at 32768 and real at 8192**.
 
 ### ⚠️ The `gemma4:e2b` phantom
+
+> **Acted on 2026-08-01.** Measured directly: loading `gemma4:e2b` while the tenant was
+> resident left ONLY e2b in `/api/ps` — it evicted 16.70 GiB to load 1.81. `gemma3:1b` co-resides
+> (both present, 21298/24576 MiB). Task model reverted. The known counter-argument, recorded so it
+> is not lost: a 1b model is weaker at RAG query reformulation
+> (`openwebui-improvement-plan.md:255`). That cost is UNMEASURED; the eviction cost is not. If
+> retrieval recall ever feels weak, measure the two on real queries rather than swapping back.
 
 Ollama's scheduler *predicts* **7.5 GiB** for `gemma4:e2b`, which really uses 3.23 GiB — a **4.3 GiB
 phantom reservation**. It therefore needs ~9.4 GiB free to load and cannot co-reside with the coder
@@ -171,6 +182,11 @@ prompt-enhancer-style requests settle it:
 That gap is the entire reason dolphin survived this long, and closing it is what let the box go from
 three large tenants to one.
 
+> **SUPERSEDED — kept for the measurements, not the recommendation.** Everything below
+> this line was written before the consolidation and argues for a swap that has since
+> happened: chat/vision/coder all point at `hermes-genesis:apex-compact` today
+> (pipe lines 330/335/340). Read it as a record of how the decision was reached.
+
 **Now measured, 2026-07-26.** The refusal gap is real: on five prompt-enhancer-style requests the
 coder refused **2 of 5**, while `dolphin` and an uncensored Qwen3.6 both complied 5/5. So `dolphin`
 cannot simply be deleted — something uncensored has to take its place.
@@ -191,7 +207,7 @@ download size, not just config.
 
 | To undo | Steps |
 |---|---|
-| **The whole consolidation** | `ollama pull hf.co/unsloth/Qwen3.6-35B-A3B-GGUF:UD-IQ4_XS` (17.7 GB) and `ollama pull dolphin-venice:24b` (14 GB), then revert `chat_model`/`vision_model`/`coder_model` in `pipes/auto_assistant.py`, `text_model` in `photoreal.py`, and both in `image_krea.py`. Git history has the exact prior values. |
+| **The whole consolidation** | `ollama pull hf.co/unsloth/Qwen3.6-35B-A3B-GGUF:UD-IQ4_XS` (17.7 GB) and `ollama pull dolphin-venice:24b` (14 GB), then revert `chat_model`/`vision_model`/`coder_model` in `pipes/auto_assistant.py`, `text_model` in `uncensored.py (function id `uncensored`, shown as "Photoreal")`, and both in `image_krea.py`. Git history has the exact prior values. |
 | **Vision only** | `ollama pull gemma4:31b` (19 GB), set `self.vision_model`. |
 | **Task model → `gemma3:1b`** | set `task.model.default` / `task.model.external`, restart OpenWebUI. No download — it is still installed. |
 | **Re-create the main model** | The source GGUFs are kept at `/home/ohmz/models/hermes-genesis/` (18.3 GB) precisely so this does not need a re-download: `ollama create hermes-genesis:apex-compact -f Modelfile`. Worth keeping — the upstream repo's `:latest` tag resolves to **V3**, not the V5 build in use here, so a re-download would not reproduce it. |
