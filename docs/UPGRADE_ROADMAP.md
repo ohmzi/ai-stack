@@ -558,6 +558,34 @@ and web-search turns would be silently truncated rather than erroring.
 
 #### 2.3 One VRAM arbiter, and admission control for chat
 
+> **DONE 2026-07-31, and the second half resolved to "inform", not "block".**
+>
+> The arbiter shipped: `fcntl.flock` on `/app/backend/data/.gpu.lock`, kept alongside the
+> `threading.Lock` because flock is per-fd and does not arbitrate threads inside one process. The
+> four media pipelines moved onto the same pair via `_gpu_lock()` — leaving them on the in-process
+> lock while the coder path used the file lock would have been two mechanisms arbitrating one GPU.
+> Honest scope: `UVICORN_WORKERS` is unset and defaults to **1**, so cross-process arbitration is
+> **latent**. Its active value today is that the lock's identity survives the re-exec every deploy
+> triggers, and the OS releases it if the process dies.
+>
+> **A wedge was found and fixed on the way.** `_locked_stream` acquired OUTSIDE its `try:`, and
+> `asyncio.to_thread` cannot interrupt a thread already blocked in `acquire()`. A client
+> disconnecting mid-wait cancelled the coroutine before the `try` was entered, so the `finally`
+> never ran; the worker then won the lock with nobody to release it and **every later render and
+> coder turn blocked forever**, recoverable only by a redeploy. The docstring claimed the `finally`
+> prevented exactly that. Writing the regression test wedged the test process, which is the
+> demonstration. Polling alone was not enough — the thread can still win the lock in the instant
+> after cancellation — so the acquire is `shield`ed and the `finally` settles it.
+>
+> **Admission control: informs, does not block.** The baseline is "chat contends and works";
+> blocking would trade a slow success for a guaranteed wait of up to a full render (~20 min for six
+> shots). A pipe-side gate also covers one of four GPU consumers — title/tag generation on
+> `gemma4:e2b`, `bge-m3` embeddings and Adaptive Memory all run outside `pipe()` and never take the
+> lock. So the coder path now ticks its wait from inside the polling loop, and plain chat emits one
+> note when a render is **running** (not merely pending — a strip the user cannot act on is one
+> they learn to ignore). Nothing at all without a client. A bounded *wait* remains unbuilt pending
+> a measured reason to want one.
+
 **What.** Replace the module-level `threading.Lock` with an `fcntl.flock` on a fixed path (~15 lines,
 in `auto_assistant.py` only — do **not** duplicate 40 lines into four files that will drift; two of
 the siblings are being deactivated in 1.7 and `photoreal` is the only remaining one worth a second
@@ -585,6 +613,46 @@ flag — it costs ~5 GPU-minutes and can OOM the box by design.
 ---
 
 #### 2.4 Structured output on the pipe's own helper calls
+
+> **DONE 2026-07-31 — but this item's stated rationale was wrong, and the reason it was worth doing
+> is not the reason written below.**
+>
+> **The latency case is dead.** Every helper except the classifier sets `keep_alive: 0`, so each
+> pays a **~23 s cold load** of the 18.3 GB tenant. A 2.25 s → 0.55 s decode saving is under 10% of
+> that. And `_classify_code` already caps `num_predict: 4`, so the grammar's mechanism — suppressing
+> preamble — has nothing left to suppress. Measured on `gemma3:1b`: `eval_count` **3 → 14** tokens
+> under the schema, i.e. a schema makes the one latency-critical call **4.7× more expensive**. If
+> helper latency is ever the goal the lever is `keep_alive` (one 18 GB load per media job instead of
+> three, worth 20-45 s), not `format`.
+>
+> **The correctness case is real, and is a different claim from the one this item measured and
+> rejected.** "Zero malformed-JSON failures across 72 runs" was true and irrelevant: syntax was
+> never the problem. `_verify_image` scored a pass as the ABSENCE of a substring, so
+> `**OK:** no`, a preamble, or the model answering correctly in prose — *"No, the image does not
+> contain a basketball."* — all counted as PASS. Measured live: the same model with `format` off
+> returned `The user wants me to identify the dominant color of the provided image.` and nothing
+> else inside a 60-token budget; the old rule scored that as a correct render. Verified the old rule
+> passed **3 of 4** such replies.
+>
+> Most of the value needed no schema: an explicit-`yes` parse plus counters. Schemas then went on
+> `_verify_image`, `_plan_shots` (envelope only — the prose in each shot is unconstrained) and
+> `_enhance_edit`, all behind `STRUCTURED_OUTPUT` with JSON-first/regex-second parsing, so a model
+> that ignores the grammar lands on the old path.
+>
+> **`_classify_code` was deliberately left alone**, and that is now measured rather than argued: a
+> 50-prompt bench against the real prompt produced **1/50** malformed — `"capital of france"` →
+> `PARIS`, which does not start with `CODE` and so falls back to CHAT, the correct route anyway.
+>
+> **Verified on this box** (Ollama 0.32.1): `format` accepts a JSON Schema, and it composes with the
+> multimodal path — two solid-colour images with an enum schema returned answers that **tracked the
+> image** (red → `"red"`, blue → `"blue"`), so the grammar is applied without bypassing the
+> projector. A top-level array is accepted, though it will happily satisfy the grammar with `[]`,
+> which is why counts are enforced in Python.
+>
+> **Under a grammar, `num_predict` becomes a correctness knob**: a grammar cannot early-close a
+> structure, so hitting the cap yields *invalid* JSON — strictly worse than truncated free text,
+> which the regex could often still use. Hence no `minItems`/`minLength` anywhere, and the raises to
+> 220 / 400 / 1400.
 
 **What.** Pass Ollama's `format` JSON schema on internal helper calls — the code classifier becomes
 `{"type":"object","properties":{"route":{"enum":["CODE","CHAT"]}},"required":["route"]}`.
@@ -747,7 +815,7 @@ must also host an 18 GB tenant could OOM mid-render. **Gate on the contention te
 | **MTP** GGUFs (+0.48 GB, claimed 1.5–2× decode) | Ollama gains CUDA MTP. Today it is MLX/Apple-Silicon only, and there is an open bug that Qwen3.6-35B-A3B MTP GGUFs fail to load. The "90% faster" figure was Apple Silicon |
 | **EXL3 / exllamav3** | Only if the coder moves off Ollama for another reason. Measured +8% (39.1 vs 36.2 tok/s) on a 3090, against losing keep-alive auto-unload on a card shared with ComfyUI |
 | **Mage-Flow** (4B, MIT, 4-step, 4.16 GB int8) | A tagged ComfyUI release contains it. Merged to master 2026-07-25 only; running master on a live assistant is not the trade |
-| **mcpo / MCP tool servers** | Only after the confirmation gate ships, and read-only tools only. Note the correction: legacy FC does **not** block MCP/OpenAPI servers — they merge into `tools_dict` at `middleware.py:2611-2660` regardless of mode. Time it around the 2026-07-28 MCP spec rewrite by pinning server versions |
+| **mcpo / MCP tool servers** | **UNBLOCKED 2026-07-31, deliberately NOT adopted** — see the entry below. |
 
 ---
 
@@ -885,3 +953,59 @@ Where the underlying research was thin or contradictory, said plainly:
 - **"Ollama is 1.8× slower than llama.cpp"** is a single opinion piece and could not be corroborated; this box measured 102.9–124.9 tok/s on the coder under Ollama.
 - **Contextual retrieval's effect size is contested**: Anthropic reports 49–67% failure reduction; the independent ECIR-2025 study on comparable hardware reports 0.303 → 0.317 nDCG@5. Both are cited above; the gap is not resolved.
 - **Three research passes independently recommended flipping off legacy function calling.** All three were wrong about the cost. Treat any future recommendation to do so as requiring the tool loop to exist and be tested first.
+
+---
+
+## MCP / OpenAPI tool servers — unblocked 2026-07-31, deliberately not adopted
+
+The confirmation gate, this item's stated prerequisite, shipped 2026-07-31. Investigated properly
+and then **declined**, with the reasons written down so it does not get re-litigated from scratch.
+
+**What is actually here.** This build speaks **native MCP** — the `mcp` SDK 1.27.2 is installed and
+`utils/mcp/client.py:12,64-76` uses `streamablehttp_client`. **Streamable-HTTP only: no stdio, no
+SSE**, so a stdio-only server needs a bridge. OpenAPI tool servers work too
+(`utils/tools.py:1273,1414`). `mcpo` is NOT installed.
+
+**The old citation in this doc was wrong.** It claimed the merge happens at
+`middleware.py:2611-2660`. That range is `direct_tool_servers` — per-user, client-supplied servers,
+not the admin `tool_server.connections`. The load-bearing line is **`middleware.py:2758-2761`**:
+
+```python
+if tools_dict:
+    # Always store resolved tools in metadata so downstream consumers
+    # (e.g. pipe functions) can access all tools including MCP and builtins.
+    metadata['tools'] = tools_dict
+```
+
+That *is* unconditional with respect to function-calling mode — the legacy/native split is at
+`:2763` — so the conclusion held even though the line numbers did not.
+
+**But "enable MCP" does not mean what it sounds like on this deployment.** `auto_assistant.auto` is
+pinned `function_calling: "legacy"`, and in that mode middleware **executes** tool-server tools
+*before* the pipe runs: the **task model (`gemma4:e2b`) selects them** (`middleware.py:1130-1152`),
+invokes them (`:1206`), and injects the results as prose into the last user message (`:2807-2808`).
+The pipe never receives `__tools__` — `functions.py:194` filters `extra_params` by signature and
+`pipe()` does not declare it. Routing is unaffected, since it reads `user_prompt` captured before
+that injection, but the chat path sees the prose.
+
+So adopting MCP here would hand tool selection to a 3 GB task model and deliver results as text,
+which is a materially different thing from the pipe calling tools.
+
+**Why no server was installed.** Nothing available adds capability this stack lacks — it already
+has web search (SearXNG), RAG, memory, and hermes for agentic work — and none of the running
+services expose a schema to point at: SearXNG has no OpenAPI document, Tika and qdrant both 404 on
+`/openapi.json`.
+
+**If it is ever adopted, the security shape is not optional:**
+
+- `auth_type: "session"` forwards the user's **live OpenWebUI JWT and all request cookies** to the
+  tool server (`utils/tools.py:143-144`), which lets that server call back into OpenWebUI as the
+  user. Use `bearer` with a static key. Never `session`.
+- There is **no URL or host allowlist anywhere** in `utils/tools.py` — an admin can point a
+  connection at any address.
+- Bind to `127.0.0.1`; the container is `NetworkMode: host`, so OpenWebUI reaches it and the LAN
+  does not.
+- Set `config.function_name_filter_list` to read-only verbs, leave `config.access_grants` empty
+  (= admin-only), and pin the server version.
+- `tool_ids` must contain `server:mcp:<info.id>`; the model's `meta` has no `toolIds` today, so a
+  configured server would otherwise still be selected by nothing.

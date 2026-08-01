@@ -63,10 +63,14 @@ def make_pipe():
         # while broken — which is exactly what case J tests for.
         return "CODER" if kw.get("force_model") else "CHAT"
 
-    def _locked_stream(inner):
-        # The coder path wraps its stream in _GEN_LOCK. Here the "stream" is just the stub's string,
-        # so pass it straight through. Lock acquire/release/disconnect behaviour is covered properly
-        # by test_manifold.py, which does not stub the stream.
+    def _locked_stream(inner, emitter=None):
+        # The coder path wraps its stream in the GPU lock. Here the "stream" is just the stub's
+        # string, so pass it straight through. Lock acquire/release/disconnect behaviour is covered
+        # properly by test_admission.py and test_manifold.py, which do not stub the stream.
+        #
+        # `emitter` is accepted but ignored: the real _locked_stream takes it so the coder path can
+        # tick "Waiting for the GPU…" from inside its polling loop. A double that does not track
+        # the signature it stands in for fails with a TypeError that looks like a routing bug.
         return inner
 
     async def _status(*a, **k):

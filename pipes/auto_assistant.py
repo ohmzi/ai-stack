@@ -9,7 +9,147 @@ import asyncio, aiohttp, requests, time, base64, hashlib, os, random, re, json, 
 
 # Serialize the VRAM-manipulating generation section so two concurrent Assistant invocations
 # can't both free/reload models on the single 24 GB card and OOM each other.
+def _extract_balanced(text, start_pos, opener, closer):
+    """The substring from `start_pos` through its matching bracket, honouring strings/escapes."""
+    depth, in_string, escape = 0, False, False
+    for i, ch in enumerate(text[start_pos:], start=start_pos):
+        if escape:
+            escape = False
+            continue
+        if ch == "\\" and in_string:
+            escape = True
+            continue
+        if ch == '"':
+            in_string = not in_string
+            continue
+        if in_string:
+            continue
+        if ch == opener:
+            depth += 1
+        elif ch == closer:
+            depth -= 1
+            if depth == 0:
+                return text[start_pos:i + 1]
+    return None
+
+
+def _extract_json(text):
+    """JSON out of an LLM reply that may wrap it in prose or a fence. None if there is none.
+
+    COPIED from filters/adaptive_memory.py:242-271 (JSONParser.extract_and_parse) rather than
+    imported: OpenWebUI Functions deploy as a SINGLE file, so there is nothing to import from.
+    Diff the two if either changes.
+
+    Replaces `re.search(r"\\[.*\\]", out, re.S)`, which is greedy over DOTALL — a reply whose
+    commentary happens to contain a later `]` swallowed everything between, and the shot planner
+    then silently fell back to a single clip.
+    """
+    if not text:
+        return None
+    try:                                    # 1. the whole reply is JSON
+        return json.loads(text)
+    except Exception:
+        pass
+    m = re.search(r"```(?:json)?\s*([\s\S]*?)\s*```", text)   # 2. fenced
+    if m:
+        try:
+            return json.loads(m.group(1))
+        except Exception:
+            pass
+    for opener, closer in (("[", "]"), ("{", "}")):           # 3. balanced scan through prose
+        pos = 0
+        while True:
+            start = text.find(opener, pos)
+            if start == -1:
+                break
+            cand = _extract_balanced(text, start, opener, closer)
+            if cand is not None:
+                try:
+                    out = json.loads(cand)
+                    if isinstance(out, (list, dict)):
+                        return out
+                except Exception:
+                    pass
+            pos = start + 1
+    return None
+
+
 _GEN_LOCK = threading.Lock()
+
+# --- the GPU lock, as a file lock -----------------------------------------------------------------
+# _GEN_LOCK alone was not an identity you could build on. OpenWebUI re-execs function.content on ANY
+# diff, so every deploy mints a FRESH lock object: a render started under lock A and a coder turn
+# taking lock B then ran concurrently, unarbitrated. Deploying a change to this very file is the
+# event that triggers it.
+#
+# flock fixes both halves of that: the lock lives in the filesystem so its identity survives the
+# re-exec, and the OS releases it if the process dies — where a leaked threading.Lock could only be
+# cleared by another redeploy.
+#
+# Honest scope: UVICORN_WORKERS is unset and defaults to 1, so cross-PROCESS arbitration is latent
+# today. It becomes real the moment workers are raised (roadmap 1.6 lists that as a pin to make).
+# _GEN_LOCK is kept alongside because flock is per-fd and does NOT arbitrate threads within one
+# process — both are needed, always in this order.
+GPU_LOCK_PATH = os.environ.get("AA_GPU_LOCK", "/app/backend/data/.gpu.lock")
+_FLOCK_FH = None
+
+
+def _gpu_lock_acquire(timeout):
+    """Take the in-process lock then the file lock. True if both were won within `timeout`."""
+    global _FLOCK_FH
+    if not _GEN_LOCK.acquire(True, timeout):
+        return False
+    try:
+        import fcntl
+        if _FLOCK_FH is None:
+            _FLOCK_FH = open(GPU_LOCK_PATH, "a+")
+        fcntl.flock(_FLOCK_FH.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        # Contended: another PROCESS holds it. Give the in-process lock back rather than sitting on
+        # it while we wait, and let the caller poll again.
+        _GEN_LOCK.release()
+        return False
+    except Exception:
+        # Cannot use flock AT ALL — no fcntl, an unwritable or missing path (tests and any host
+        # without the container's data volume), a filesystem that does not support it. Degrade to
+        # the in-process lock rather than refusing to render.
+        #
+        # This must NOT be `except OSError`: FileNotFoundError is a subclass of it, so a missing
+        # lock file took the contended branch and _gpu_lock_acquire could never succeed — every
+        # locked stream then polled forever. Caught by tests/test_admission.py, which hung.
+        pass
+    return True
+
+
+class _gpu_lock:
+    """Blocking context manager over the same pair, for the synchronous media pipelines.
+
+    They previously did `with _GEN_LOCK:` directly, which would have left media on the in-process
+    lock while the coder path moved to the file lock — two mechanisms arbitrating one GPU, which is
+    the same class of bug as having no lock at all.
+    """
+    def __enter__(self):
+        while not _gpu_lock_acquire(1.0):
+            pass
+        return self
+
+    def __exit__(self, *exc):
+        _gpu_lock_release()
+        return False
+
+
+def _gpu_lock_release():
+    global _FLOCK_FH
+    try:
+        if _FLOCK_FH is not None:
+            import fcntl
+            fcntl.flock(_FLOCK_FH.fileno(), fcntl.LOCK_UN)
+    except Exception:
+        pass
+    try:
+        _GEN_LOCK.release()
+    except RuntimeError:
+        pass
 
 V_QUALITY = "best"  # "best" = Wan 2.2 A14B two-expert Lightning (default) | "fast" = TI2V 5B
 V_W, V_H = 832, 480            # default 480p
@@ -134,6 +274,38 @@ AUTO_KEEP_SYSTEM = True
 # no client to ask — the eval harness drives pipe() directly, and so does any API caller — the
 # render proceeds. Failing closed would hang tests/eval/run_eval.py on every media case.
 CONFIRM_RENDERS = "video"
+
+# --- structured outputs on helper calls ----------------------------------------------------------
+# Ollama 0.32.1 accepts `format` as a JSON Schema and constrains decoding to it. Verified on this
+# box, including the part that mattered: with two solid-colour images and an enum schema, the
+# answers TRACKED the image (red -> "red", blue -> "blue"), so the grammar composes with the
+# multimodal path rather than bypassing the projector.
+#
+# This is NOT the roadmap's latency argument, which is dead: every helper sets keep_alive:0 and so
+# pays a ~23 s cold load, against which a ~2 s decode saving is noise. It is a CORRECTNESS argument.
+# The same probe with format OFF returned 'The user wants me to identify the dominant color of the
+# provided image.' and nothing else — the verdict never appeared inside the token budget, and the
+# old verifier scored exactly that as a pass.
+#
+# Set STRUCTURED_OUTPUT = False to disable all of it, or any single _*_FORMAT to None to disable
+# that site alone. Every site parses JSON first and falls back to the regex path on the same raw
+# text, so a model that ignores the grammar lands on the old behaviour rather than failing.
+STRUCTURED_OUTPUT = True
+
+# Property ORDER is load-bearing: llama.cpp emits required properties in schema order, so `ok`
+# comes before `fix` and the verdict is committed before any justification is written. No
+# minLength on `fix` — a grammar cannot early-close a structure, so hitting num_predict yields
+# INVALID json, where the regex path could still use a truncated FIX line.
+_VERIFY_FORMAT = {"type": "object",
+                  "properties": {"ok": {"type": "boolean"}, "fix": {"type": "string"}},
+                  "required": ["ok", "fix"]}
+# Envelope only — the prose inside each shot is unconstrained. Deliberately no minItems: the count
+# is enforced in Python, where a short plan can be reported instead of silently truncated.
+_SHOTS_FORMAT = {"type": "array", "items": {"type": "string"}}
+_EDIT_FORMAT = {"type": "object",
+                "properties": {"edit": {"type": "string"},
+                               "avoid": {"type": "array", "items": {"type": "string"}}},
+                "required": ["edit", "avoid"]}
 
 
 class Pipe:
@@ -321,18 +493,56 @@ class Pipe:
             return False
         return self._classify_code(text)
 
-    async def _locked_stream(self, inner):
-        """Hold _GEN_LOCK for a whole streamed reply, so loading a large tenant can't land in the
-        middle of a ComfyUI render. Acquired on a worker thread (never the event loop) and released
-        in `finally` so a client disconnect cannot leak it."""
-        await asyncio.to_thread(_GEN_LOCK.acquire)
+    async def _locked_stream(self, inner, emitter=None):
+        """Hold the GPU lock for a whole streamed reply, so loading a large tenant can't land in
+        the middle of a ComfyUI render.
+
+        Acquired by POLLING on a worker thread, which is the whole point. It used to be a single
+        blocking `to_thread(_GEN_LOCK.acquire)` placed OUTSIDE the try — and asyncio.to_thread
+        cannot interrupt a thread already blocked in acquire(). A client disconnecting while that
+        thread waited cancelled the coroutine before the `try` was entered, so the `finally` never
+        ran; the worker then won the lock with nobody left to release it and every later render and
+        coder turn blocked forever, recoverable only by a redeploy. The old docstring claimed the
+        `finally` prevented exactly that. Writing the regression test for this wedged the test
+        process, which is as good a demonstration as it gets.
+
+        Polling with a timeout makes cancellation observable, and `held` means the release in
+        `finally` can never fire for a lock we do not own.
+        """
+        held = False
+        acq = None          # the in-flight acquire, so `finally` can settle it
+        waited = 0.0
         try:
+            while not held:
+                # shield: cancelling US must not cancel the worker mid-acquire, or we could never
+                # find out whether it won the lock. Polling alone is NOT enough — the thread can
+                # win it in the instant after we are cancelled, and then `held` is never assigned
+                # and nothing releases. That is the leak, one second narrower.
+                acq = asyncio.ensure_future(asyncio.to_thread(_gpu_lock_acquire, 1.0))
+                held = await asyncio.shield(acq)
+                acq = None
+                if not held:
+                    waited += 1.0
+                    # The coder path is the real "appears hung": it blocks with no output at all,
+                    # for as long as a render takes — up to ~20 minutes for six shots.
+                    await self._status(emitter, f"Waiting for the GPU… {self._fmt_dur(waited)}")
+            if waited:
+                await self._status(emitter, "", done=True)
             async for tok in inner:
                 yield tok
         finally:
             # Release BEFORE closing `inner`: the lock is the contended resource and must come back
             # even if the underlying HTTP stream misbehaves on teardown.
-            _GEN_LOCK.release()
+            if not held and acq is not None:
+                # Cancelled while an acquire was in flight. Wait for it — bounded by the 1 s poll —
+                # so a lock the worker won on the way out is given back rather than stranded.
+                try:
+                    held = await asyncio.shield(acq)
+                except Exception:
+                    held = bool(acq.done() and not acq.cancelled() and acq.exception() is None
+                                and acq.result())
+            if held:
+                _gpu_lock_release()
             try:
                 await inner.aclose()
             except Exception:
@@ -1100,6 +1310,23 @@ class Pipe:
         except Exception:
             return None
 
+    def _gpu_contended(self):
+        """True only when ComfyUI has a job actually RUNNING. Never raises.
+
+        Deliberately not `not _comfy_idle()`: that also counts a PENDING queue, and it must not.
+        The same reasoning as gpuguard's AGENT_MODEL exclusion — reporting contention the user
+        cannot act on, or that is really Ollama evicting its own tenant, trains them to ignore the
+        status strip, and then it is worth nothing when it matters.
+
+        Used only to TELL the user their reply may be slow. It gates nothing, so a failed probe is
+        silent: instrumentation must never be why a chat turn fails.
+        """
+        try:
+            with requests.get(f"{self.comfy}/queue", timeout=3) as r:
+                return bool((r.json().get("queue_running") or []))
+        except Exception:
+            return False
+
     def _comfy_free(self, need_gib=20.0):
         """Ask ComfyUI to unload its models so the ~20 GB vision model can load for the QA check,
         then BLOCK until VRAM is actually released (the unload is async — a blind 2 s sleep raced it).
@@ -1134,20 +1361,74 @@ class Pipe:
     )
 
     def _verify_image(self, request_text, img_b64):
-        """(ok, fix) — Gemma-vision compares the produced image to what was asked. Fails open."""
+        """(ok, fix) — the vision model compares the produced image to what was asked.
+
+        Fails open, deliberately: the QA loop is a courtesy and must never be the reason a
+        correctly-rendered image is thrown away.
+
+        But it used to fail open INVISIBLY, and by accident. The verdict was scored as the ABSENCE
+        of a substring:
+
+            ok = not re.search(r"^\\s*OK:\\s*no\\b", out, re.I | re.M)
+
+        so anything that did not literally contain a line starting `OK: no` counted as a pass —
+        `**OK:** no`, a preamble that pushed the verdict past num_predict, or the model answering
+        the question correctly in prose ("No, the image does not contain a basketball."). Measured
+        on this box: the same model asked a colour question with no format constraint returned
+        'The user wants me to identify the dominant color...' and nothing else, inside a 60-token
+        budget. Under the old rule that was a PASS.
+
+        Now the verdict must be stated. An unparseable reply is still a pass — the risk posture is
+        unchanged — but it is COUNTED, so the pass rate stops being unfalsifiable.
+        """
         try:
-            r = requests.post(f"{self.ollama}/api/generate",
-                json={"model": self.vision_model, "system": self._VERIFY_SYS,
-                      "prompt": f"Request: {request_text}\nDoes the image satisfy every hard requirement?",
-                      "images": [img_b64], "stream": False, "think": False, "keep_alive": 0,
-                      "options": {"temperature": 0.1, "num_predict": 150}}, timeout=300)
-            out = (r.json().get("response") or "").strip()
-            ok = not re.search(r"^\s*OK:\s*no\b", out, re.I | re.M)
-            m = re.search(r"^\s*FIX:\s*(.+)$", out, re.I | re.M)
-            fix = (m.group(1).strip() if m else "")
-            return ok, ("" if fix.lower().startswith("none") else fix)
+            out = self._generate(
+                {"model": self.vision_model, "system": self._VERIFY_SYS,
+                 "prompt": f"Request: {request_text}\nDoes the image satisfy every hard requirement?",
+                 "images": [img_b64], "stream": False, "think": False, "keep_alive": 0,
+                 "options": {"temperature": 0.1, "num_predict": 220}},
+                fmt=_VERIFY_FORMAT, timeout=300).strip()
+            # JSON first, regex second, on the SAME raw text: a model that ignored the grammar, or
+            # a disabled schema, lands on the old path rather than failing.
+            d = _extract_json(out)
+            if isinstance(d, dict) and isinstance(d.get("ok"), bool):
+                fix = str(d.get("fix") or "").strip()
+                return d["ok"], ("" if fix.lower().startswith("none") else fix)
+            return self._parse_verdict(out)
         except Exception:
             return True, ""
+
+    def _generate(self, payload, fmt=None, timeout=180):
+        """POST /api/generate, optionally schema-constrained, with a one-shot self-heal.
+
+        If the server rejects the request with something about `format` or `grammar` — a model
+        whose template fights the constraint, or a future Ollama that tightens validation — retry
+        once WITHOUT the schema and record it. That turns a silent degrade into a recorded,
+        self-correcting call, which matters because this stack swaps models.
+        """
+        body = dict(payload)
+        if fmt and STRUCTURED_OUTPUT:
+            body["format"] = fmt
+        r = requests.post(f"{self.ollama}/api/generate", json=body, timeout=timeout)
+        if r.status_code != 200 and "format" in body:
+            detail = (r.text or "")[:300].lower()
+            if "format" in detail or "grammar" in detail or "schema" in detail:
+                self._metric(job="generate", format_rejected=True, detail=detail[:160])
+                body.pop("format", None)
+                r = requests.post(f"{self.ollama}/api/generate", json=body, timeout=timeout)
+        return (r.json().get("response") or "")
+
+    def _parse_verdict(self, out):
+        """(ok, fix) from a verifier reply. Split out so tests can drive it without a GPU."""
+        # Tolerant of markdown emphasis and a full-width colon, both of which the model emits.
+        m = re.search(r"^\s*\**\s*OK\**\s*[:：]\s*\**\s*(yes|no)\b", out, re.I | re.M)
+        if m is None:
+            self._metric(job="verify", parse="none", raw=(out or "")[:200])
+            return True, ""
+        ok = m.group(1).lower() == "yes"
+        f = re.search(r"^\s*\**\s*FIX\**\s*[:：]\s*\**\s*(.+)$", out, re.I | re.M)
+        fix = (f.group(1).strip().strip("*").strip() if f else "")
+        return ok, ("" if fix.lower().startswith("none") else fix)
 
     def _enhance_edit(self, instruction, msgs):
         """(explicit_instruction, negative) via the local LLM. Vague relative asks ('a bit older')
@@ -1157,14 +1438,30 @@ class Pipe:
         prompt = (f"Conversation:\n{ctx}\n\nRewrite the last user request."
                   if ctx else f"Request: {instruction}\n\nRewrite this request.")
         try:
-            r = requests.post(f"{self.ollama}/api/generate",
-                json={"model": self.chat_model, "system": self._EDIT_REWRITE_SYS, "prompt": prompt,
-                      "stream": False, "think": False, "keep_alive": 0,
-                      "options": {"temperature": 0.4, "num_predict": 220}}, timeout=180)
-            out = (r.json().get("response") or "").strip()
-            edit = re.search(r"^\s*EDIT:\s*(.+)$", out, re.I | re.M)
-            avoid = re.search(r"^\s*AVOID:\s*(.+)$", out, re.I | re.M)
+            out = self._generate(
+                {"model": self.chat_model, "system": self._EDIT_REWRITE_SYS, "prompt": prompt,
+                 "stream": False, "think": False, "keep_alive": 0,
+                 # 220 was too small before any of this: an 80-word instruction is ~110 tokens on
+                 # its own, before 3-8 AVOID traits and their separators. A truncated reply loses
+                 # the AVOID line first, which is exactly the silent failure below.
+                 "options": {"temperature": 0.4, "num_predict": 400}},
+                fmt=_EDIT_FORMAT, timeout=180).strip()
+            d = _extract_json(out)
+            if isinstance(d, dict) and str(d.get("edit") or "").strip():
+                av = d.get("avoid")
+                # `negative` is consumed downstream as a plain comma string by _build_edit_wf, so
+                # joining at this boundary keeps the schema a drop-in.
+                avoid_s = ", ".join(str(x).strip() for x in av if str(x).strip()) if isinstance(av, list) else ""
+                if not avoid_s:
+                    self._metric(job="enhance_edit", avoid_missing=True, via="schema")
+                return str(d["edit"]).strip(), avoid_s
+            edit = re.search(r"^\s*\**\s*EDIT\**\s*:\s*(.+)$", out, re.I | re.M)
+            avoid = re.search(r"^\s*\**\s*AVOID\**\s*:\s*(.+)$", out, re.I | re.M)
             if edit:
+                if not avoid:
+                    # The edit lands but the negative prompt is silently dropped, so the editor
+                    # runs unconstrained and nobody finds out. Count it.
+                    self._metric(job="enhance_edit", avoid_missing=True)
                 return edit.group(1).strip(), (avoid.group(1).strip() if avoid else "")
         except Exception:
             pass
@@ -1499,7 +1796,15 @@ class Pipe:
                 for _round in (1, 2):
                     self._comfy_free()
                     ok, fix = self._verify_image(instruction, base64.b64encode(data).decode())
-                    if ok or not fix:
+                    if ok:
+                        break
+                    if not fix:
+                        # QA said no and gave nothing to act on. Same control flow as before (we
+                        # stop), but it used to be indistinguishable from a pass — the two exits
+                        # shared one branch, so a detected-but-unfixable failure was invisible.
+                        qa_note = ("\n\n*QA flagged a mismatch but returned no correction — "
+                                   "the image is left as generated.*")
+                        self._metric(job="edit", qa_unfixable=True, request=(instruction or "")[:160])
                         break
                     first_fix = first_fix or fix
                     cur = f"{cur} IMPORTANT correction: {fix}"
@@ -1543,7 +1848,12 @@ class Pipe:
             for _round in (1, 2):
                 self._comfy_free()
                 ok, fix = self._verify_image(raw, base64.b64encode(data).decode())
-                if ok or not fix:
+                if ok:
+                    break
+                if not fix:
+                    qa_note = ("\n\n*QA flagged a mismatch but returned no correction — "
+                               "the image is left as generated.*")
+                    self._metric(job="t2i", qa_unfixable=True, request=(raw or "")[:160])
                     break
                 first_fix = first_fix or fix
                 try:
@@ -1757,18 +2067,28 @@ class Pipe:
                "and appearance (repeat it in every shot for consistency), the action step by step, "
                "setting, camera, lighting. Under 60 words per shot. "
                f"Return STRICT JSON only: an array of exactly {n} strings.")
-        try:
-            r = requests.post(f"{self.ollama}/api/generate",
-                json={"model": self.chat_model, "system": sys, "prompt": text, "stream": False,
-                      "think": False, "keep_alive": 0,
-                      "options": {"temperature": 0.6, "num_predict": 900}}, timeout=300)
-            out = (r.json().get("response") or "")
-            m = re.search(r"\[.*\]", out, re.S)
-            shots = [str(s).strip() for s in json.loads(m.group(0)) if str(s).strip()]
-            if len(shots) >= 2:
-                return shots[:V_SHOT_MAX]
-        except Exception:
-            pass
+        # Two attempts. The first pays the ~23 s cold load; a retry reuses the warm runner and is
+        # far cheaper than the alternative, which is silently shipping a 5-second clip when a
+        # 15-second sequence was asked for.
+        for attempt, temp in ((1, 0.6), (2, 0.2)):
+            try:
+                out = self._generate(
+                    {"model": self.chat_model, "system": sys, "prompt": text, "stream": False,
+                     "think": False, "keep_alive": 0,
+                     "options": {"temperature": temp, "num_predict": 1400}},
+                    fmt=_SHOTS_FORMAT, timeout=300)
+                parsed = _extract_json(out)
+                if isinstance(parsed, dict):          # a model that wrapped the array in an object
+                    parsed = next((v for v in parsed.values() if isinstance(v, list)), None)
+                if isinstance(parsed, list):
+                    shots = [str(s).strip() for s in parsed if str(s).strip()]
+                    if len(shots) >= 2:
+                        if len(shots) < n:
+                            self._metric(job="plan_shots", short=True, asked=n, got=len(shots))
+                        return shots[:min(n, V_SHOT_MAX)]
+            except Exception:
+                pass
+            self._metric(job="plan_shots", parse="none", attempt=attempt)
         return None
 
     def _concat_webms(self, segs):
@@ -2409,7 +2729,7 @@ class Pipe:
 
     async def _gen_and_cache(self, cid, prompt, ref, msgs=None):
         def run():
-            with _GEN_LOCK:  # only one VRAM-manipulating pipeline at a time
+            with _gpu_lock():  # only one VRAM-manipulating pipeline at a time
                 return self._gen_image(prompt, ref, msgs)
         result = await asyncio.to_thread(run)
         b64 = self._extract_b64(result)
@@ -2430,7 +2750,7 @@ class Pipe:
         seed = seed if seed is not None else random.randint(0, 2**31)
 
         def run():
-            with _GEN_LOCK:  # only one VRAM-manipulating pipeline at a time
+            with _gpu_lock():  # only one VRAM-manipulating pipeline at a time
                 self._comfy_free()  # free ComfyUI before the dolphin enhance helper loads
                 p = self._enhance_video(prompt) if enhance else prompt
                 # QA judges against the pre-enhancement wording (the user's ground truth) — the
@@ -2449,7 +2769,7 @@ class Pipe:
         opts = opts or {"w": V_W, "h": V_H, "length": V_LEN_14B, "fast": False}
 
         def run():
-          with _GEN_LOCK:  # only one VRAM-manipulating pipeline at a time
+          with _gpu_lock():  # only one VRAM-manipulating pipeline at a time
             self._comfy_free()  # free ComfyUI before the dolphin motion-prompt helper loads
             motion = self._enhance_video(prompt) if prompt else "natural, gentle cinematic motion"
             self._free_vram()
@@ -2477,11 +2797,19 @@ class Pipe:
     async def _gen_multishot_and_cache(self, cid, text, n, opts, seed=None):
         seed = seed if seed is not None else random.randint(0, 2**31)
         def run():
-            with _GEN_LOCK:  # only one VRAM-manipulating pipeline at a time
+            with _gpu_lock():  # only one VRAM-manipulating pipeline at a time
                 return self._gen_multishot(text, seed, opts, n)
         result = await asyncio.to_thread(run)
-        if result is None:  # shot planning failed → fall back to one enhanced clip
-            return await self._gen_video_and_cache(cid, text, seed, enhance=VID_ENHANCE, opts=opts)
+        if result is None:
+            # Shot planning failed → one enhanced clip. SAY SO. This silently turned a requested
+            # 15-second sequence into a 5-second clip, and the user had no way to tell that from
+            # the model simply deciding one shot was enough. A silent product downgrade is the
+            # worst failure mode in this file; the sentence is worth more than the retry above.
+            single = await self._gen_video_and_cache(cid, text, seed, enhance=VID_ENHANCE, opts=opts)
+            if isinstance(single, str) and self._is_media(single):
+                single += (f"\n\n*Could not plan the {n}-shot sequence — this is a single "
+                           f"{V_LEN_14B // 16}-second clip instead. Ask again to retry.*")
+            return single
         if result.lstrip().startswith("<video"):
             v = re.search(r'data-p64="([A-Za-z0-9+/=]*)"', result)
             try:
@@ -2784,7 +3112,17 @@ class Pipe:
                 return self._hermes_stream(sent, handle,
                                            verify_creation=not (is_manage or followup))
         if not attached_img and not ref and await asyncio.to_thread(self._is_code_request, text):
+            # emitter goes IN, so the wait ticks from inside _locked_stream's polling loop. Not
+            # wrapped around it — wrapping one async generator in another breaks aclose()
+            # propagation and would hold the GPU on a disconnect, which is the bug just fixed.
             return self._locked_stream(self._achat_stream(
                 omsgs, guard_text=self._CODER_GUARD, keep_system=AUTO_KEEP_SYSTEM,
-                force_model=self.coder_model))
+                force_model=self.coder_model), emitter=emitter)
+        # Plain chat takes no lock and still will not — it contends and works, and blocking it
+        # would trade a slow success for a guaranteed wait of up to a full render. It just stops
+        # looking hung. One note, not a live strip: chat never calls _status again, so a done=False
+        # strip would linger for the whole reply. Nothing at all when there is no client.
+        if emitter and await asyncio.to_thread(self._gpu_contended):
+            await self._status(emitter, "GPU is rendering — this reply may be slow to start.",
+                               done=True)
         return self._achat_stream(omsgs, keep_system=AUTO_KEEP_SYSTEM)
