@@ -22,7 +22,12 @@ docker rm -f comfyui 2>/dev/null || true
 docker run -d --name comfyui --restart unless-stopped \
   --device nvidia.com/gpu=all \
   -e TORCHINDUCTOR_CACHE_DIR=/app/inductor_cache \
-  -p 8188:8188 \
+  -p 127.0.0.1:8188:8188 \
+  `# Loopback deliberately: ComfyUI has NO auth, and /prompt-/interrupt on the LAN means any` \
+  `# device (or wifi guest) can queue renders or kill yours. ufw does not help — docker's` \
+  `# published ports bypass it. Every consumer (auto_assistant, photoreal, gpuguard, tests)` \
+  `# already talks to 127.0.0.1. Do NOT touch --listen below: that is the bind INSIDE the` \
+  `# bridge namespace, where 0.0.0.0 is required for the docker-proxy to reach it at all.` \
   -v "$DATA/input:/app/input" \
   -v "$DATA/models:/app/models" \
   -v "$DATA/output:/app/output" \
