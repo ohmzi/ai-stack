@@ -89,21 +89,33 @@ treatment so the OS circle-crop doesn't clip the mark.
 
 Re-run it only if you change the mark; `assets/` is committed.
 
-## Where this installs, and why it's a script
+## Where this installs — TWO directories, and both are mandatory
 
-`main.py:2567` mounts `/static` from `STATIC_DIR`, which `env.py:240` resolves
-to **`/app/backend/open_webui/static`**. It is *not* `/app/build/static` — that
-directory also exists, is a leftover of the front-end build, and is served to
-nobody. Writing branding there looks like it worked and changes nothing.
+`main.py:2567` mounts `/static` from `STATIC_DIR`, which `env.py:240` resolves to
+**`/app/backend/open_webui/static`**. But that directory is **rebuilt on every container start**:
+`config.py:96-115` runs at import, unlinks every top-level file in it, then copies
+**`/app/build/static/**/*`** over the top. Directories survive; files do not.
 
-That directory lives inside the image. This container's only bind mount is
-`/app/backend/data`, so the skin survives `docker restart` but is wiped by
-`docker rm` or an image pull. **Re-run `apply.sh` after either.** It is
-idempotent, and it stashes the stock files in `.stock-backup` on first run only,
-so re-running never overwrites the pristine originals with branded ones.
+So `apply.sh` writes **both**:
 
-Brand webfonts go in `$STATIC/ohmz-fonts/`, deliberately not `$STATIC/fonts/` —
-that one already holds the Noto family the PDF exporter needs.
+| Path | Role |
+|---|---|
+| `/app/backend/open_webui/static` | what `/static` serves — write it so the skin is live immediately |
+| `/app/build/static` | the source the above is rebuilt from — write it so a restart reproduces the brand |
+
+An earlier revision of this file called `/app/build/static` "a leftover served to nobody". That was
+**wrong**, and acting on it broke the skin on 2026-08-01: a plain `docker restart` copied stock
+right back over the branded files. The failure is nasty because it is invisible from the server —
+`index.html` keeps its `?v=` fingerprints while the assets they point at return **200 OK and zero
+bytes**. `tests/test_branding.py` now asserts served *bytes* against the repo files, and with
+`--restart` reproduces the regression end to end.
+
+Both directories live inside the image, so `docker rm` or an image pull still wipes them: **re-run
+`apply.sh` after either**. It is idempotent, and it stashes the stock files in `.stock-backup` on
+first run only, so re-running never overwrites the pristine originals with branded ones.
+
+Brand webfonts go in `$STATIC/ohmz-fonts/`, deliberately not `$STATIC/fonts/` — that one already
+holds the Noto family the PDF exporter needs.
 
 ## The sign-in screen
 
@@ -134,8 +146,10 @@ Two things this beats:
 
 - **`WEBUI_NAME`.** `env.py:842-844` appends `" (Open WebUI)"` to any value that
   isn't the default, so the env var can only ever produce *"OhmzAI (Open
-  WebUI)"*. It also needs the container recreated rather than restarted, and
-  `WEBUI_SECRET_KEY` is unset here — every restart signs everyone out.
+  WebUI)"*. It also needs the container recreated rather than restarted.
+  (Historic note: this used to add "and a restart signs everyone out" — no
+  longer true since `0f95516` set `WEBUI_SECRET_KEY` in
+  `compose/openwebui/run.sh`.)
 - **A CSS text swap.** The heading has four variants ("Sign in to X", "Get
   started with X", "Signing in to X", "... with LDAP"). Replacing the string
   would fix one and break three.

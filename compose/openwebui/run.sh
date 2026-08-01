@@ -22,8 +22,9 @@
 #   WEBUI_NAME           — env.py appends " (Open WebUI)" to any custom value; the branding
 #                          loader.js rewrites /api/config suffix-free instead.
 #
-# After any recreate: run branding/apply.sh (the static dir lives inside the image, so a fresh
-# container is stock), then python3 tests/test_deployed.py.
+# After a RECREATE or image pull: run branding/apply.sh (both static dirs live inside the image).
+# A plain restart no longer needs it — apply.sh writes /app/build/static too, so config.py's
+# startup rebuild reproduces the brand. Then: python3 tests/test_deployed.py.
 set -euo pipefail
 
 SECRET_ENV=/volume1/docker/openwebui/secret.env

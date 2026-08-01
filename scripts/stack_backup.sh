@@ -40,7 +40,20 @@ STAGING="$DEST/staging"
 
 log() { echo "[stack-backup] $*"; }
 
-[ -d "$(dirname "$DEST")" ] || { echo "target disk not mounted: $DEST" >&2; exit 1; }
+# The guard MUST be `mountpoint`, not `-d`.
+#
+# /media/SandiskSSD is an /etc/fstab entry, so the directory exists on the ROOT filesystem whether
+# or not the disk is mounted. A `-d` test therefore passes on an unmounted disk, mkdir -p happily
+# recreates the tree, and the whole nightly lands on the 82%-full NVMe this backup exists to
+# escape — while LAST_OK is stamped and the watchdog stays green. At ~300 MB/night that hides for
+# weeks. This box already has two proofs of the failure mode: /media/seagate16tb and
+# /media/WD18new are empty 755 dirs right now with nothing mounted.
+MOUNT="${STACK_BACKUP_MOUNT:-$(dirname "$DEST")}"
+mountpoint -q "$MOUNT" || {
+  echo "REFUSING: $MOUNT is not a mountpoint — the backup disk is not mounted." >&2
+  echo "Writing here would put the backup on the same disk as the original." >&2
+  exit 1
+}
 mkdir -p "$STAGING"/{openwebui,hermes,comfyui}
 
 # --- OpenWebUI ------------------------------------------------------------------------------
@@ -64,8 +77,14 @@ rsync -a "$OWUI/hermes_api_key" "$STAGING/openwebui/"
 # --- hermes-agent state (NOT the runtime — that is reinstallable) ---------------------------
 log "hermes state"
 for f in config.yaml .env alert_transports.env alert_contacts.json channel_directory.json \
-         owui_webhook_url gateway_state.json SOUL.md state.db kanban.db; do
+         owui_webhook_url gateway_state.json SOUL.md; do
   [ -e "$HERMES/$f" ] && rsync -a "$HERMES/$f" "$STAGING/hermes/"
+done
+# These two are SQLite and were being rsynced raw, which contradicted this file's own header —
+# a torn copy without its -wal is the "looks complete, restores corrupt" artifact. hermes writes
+# to state.db continuously (session/cron bookkeeping), so this is not theoretical.
+for db in state.db kanban.db; do
+  [ -f "$HERMES/$db" ] && sqlite3 "$HERMES/$db" ".backup '$STAGING/hermes/$db'"
 done
 for d in cron monitor-state sessions skills; do
   [ -d "$HERMES/$d" ] && rsync -a --delete "$HERMES/$d/" "$STAGING/hermes/$d/"
@@ -101,4 +120,10 @@ while IFS= read -r d; do
 done < <(cd "$DEST" && ls -1d daily-* 2>/dev/null | sort -r)
 
 date -Is > "$DEST/LAST_OK"
-log "OK — $(du -sh "$DEST/$TODAY" | cut -f1) in $TODAY, LAST_OK written"
+# Report APPARENT size and the disk cost this snapshot actually added. `du -sh` on one snapshot
+# counts hardlinked blocks in full, so it prints ~the whole payload every night and would never
+# reveal that --link-dest had stopped deduping. The pair does.
+apparent=$(du -sh "$DEST/$TODAY" | cut -f1)
+added=$(du -sh --exclude=staging "$DEST" | cut -f1)
+log "OK — $TODAY holds $apparent; whole backup set is $added on disk; LAST_OK written"
+log "target: $(findmnt -no SOURCE --target "$DEST")"

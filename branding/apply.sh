@@ -6,14 +6,29 @@
 #   ./branding/apply.sh --revert   # put the stock assets back
 #
 # Why a script and not a bind mount: this container's only bind mount is
-# /app/backend/data — the served assets live INSIDE the image. Anything written
-# here survives `docker restart` but is wiped by `docker rm` or an image pull,
-# so re-run it after either. It is idempotent; running it twice is a no-op.
+# /app/backend/data — the served assets live INSIDE the image, so `docker rm`
+# or an image pull wipes them. Re-run after either. Idempotent.
 #
-# Note the path. main.py:2567 mounts /static from STATIC_DIR, which env.py:240
-# resolves to /app/backend/open_webui/static — NOT /app/build/static. The
-# latter also exists, is a leftover of the front-end build, and is served to
-# nobody; writing branding there looks like it worked and changes nothing.
+# TWO directories, and BOTH are mandatory. This was learned the hard way on
+# 2026-08-01, when a plain `docker restart` silently reverted the skin:
+#
+#   /app/backend/open_webui/static   STATIC_DIR — what /static actually serves
+#                                    (main.py:2567 mounts it, env.py:240 resolves it)
+#   /app/build/static                the SOURCE it is rebuilt from on every start
+#
+# config.py:96-115 runs at import, i.e. on EVERY container start: it unlinks
+# every top-level FILE in STATIC_DIR, then copies /app/build/static/**/* over
+# it. Directories survive (which is why ohmz-fonts/ did) but every branded file
+# does not. An earlier revision of this header called /app/build/static "a
+# leftover served to nobody" — that was wrong, and acting on it is what broke
+# the skin: the branding was written to the served dir only, and the next
+# restart copied stock right back over it.
+#
+# So we write both. Writing STATIC_DIR makes it live immediately without a
+# restart; writing /app/build/static makes the startup rebuild reproduce the
+# brand instead of undoing it. Failure mode if you skip the second one is
+# nasty: index.html keeps its ?v= fingerprints while the files they point at
+# come back 200 OK and ZERO BYTES — invisible unless you check served length.
 #
 # Stock files are copied to .stock-backup on first run only, so a later re-run
 # never overwrites the pristine originals with branded ones.
@@ -23,6 +38,8 @@ set -euo pipefail
 CONTAINER="${OWUI_CONTAINER:-open-webui}"
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 STATIC=/app/backend/open_webui/static
+# The source STATIC_DIR is rebuilt from on every container start — see the header.
+BUILD_STATIC=/app/build/static
 # Brand webfonts go in their own directory: $STATIC/fonts already holds the
 # Noto family the PDF exporter needs, and must not be disturbed.
 FONTS="$STATIC/ohmz-fonts"
@@ -60,8 +77,13 @@ if [ "${1:-}" = "--revert" ]; then
   docker exec "$CONTAINER" test -d "$BACKUP" || die "no backup to revert to"
   # custom.css and loader.js ship empty — they exist purely as customisation
   # hooks — so truncating them IS the stock state, no backup copy needed.
+  # Both dirs, or the next start would copy the branded build dir back over the
+  # reverted served one — the same trap in reverse.
   docker exec "$CONTAINER" sh -c \
-    "cp -rp $BACKUP/. $STATIC/ && : > $STATIC/custom.css && : > $STATIC/loader.js && rm -rf $FONTS"
+    "cp -rp $BACKUP/. $STATIC/ && cp -rp $BACKUP/. $BUILD_STATIC/ \
+     && : > $STATIC/custom.css && : > $STATIC/loader.js \
+     && : > $BUILD_STATIC/custom.css && : > $BUILD_STATIC/loader.js \
+     && rm -rf $FONTS $BUILD_STATIC/ohmz-fonts"
   # Strip the fingerprints rather than restoring index.html from a backup:
   # deterministic, and it cannot resurrect a half-branded shell.
   docker exec "$CONTAINER" sh -c \
@@ -74,26 +96,34 @@ fi
 [ -f "$HERE/loader.js" ] || die "missing $HERE/loader.js"
 [ -d "$HERE/assets" ] || die "missing $HERE/assets (run: python3 branding/build_assets.py)"
 
+# Every file goes to BOTH the served dir (live now) and the build dir (so the
+# next container start rebuilds the brand instead of stock). See the header.
+install_both() {                       # install_both <local-file> <basename>
+  docker cp "$1" "$CONTAINER:$STATIC/$2"
+  docker cp "$1" "$CONTAINER:$BUILD_STATIC/$2"
+}
+
 echo "installing theme"
-docker cp "$HERE/ohmz.css" "$CONTAINER:$STATIC/custom.css"
+install_both "$HERE/ohmz.css" custom.css
 
 echo "installing app-name override"
-docker cp "$HERE/loader.js" "$CONTAINER:$STATIC/loader.js"
+install_both "$HERE/loader.js" loader.js
 
 echo "installing fonts"
-docker exec "$CONTAINER" mkdir -p "$FONTS"
+docker exec "$CONTAINER" mkdir -p "$FONTS" "$BUILD_STATIC/ohmz-fonts"
 for f in "$HERE"/fonts/*.woff2; do
   docker cp "$f" "$CONTAINER:$FONTS/$(basename "$f")"
+  docker cp "$f" "$CONTAINER:$BUILD_STATIC/ohmz-fonts/$(basename "$f")"
 done
 
 echo "installing brand assets"
 for a in "${ASSETS[@]}"; do
   [ -f "$HERE/assets/$a" ] || die "missing asset $a"
-  docker cp "$HERE/assets/$a" "$CONTAINER:$STATIC/$a"
+  install_both "$HERE/assets/$a" "$a"
 done
 
 # The served files must be readable by the app's uid.
-docker exec "$CONTAINER" sh -c "chmod -R a+r $STATIC && chmod a+rx $FONTS"
+docker exec "$CONTAINER" sh -c "chmod -R a+r $STATIC $BUILD_STATIC && chmod a+rx $FONTS"
 
 # Fingerprint the asset URLs in index.html.
 #
@@ -136,6 +166,15 @@ sidebar and the document title all say OhmzAI. Setting WEBUI_NAME instead
 would need the container recreated, and env.py:842-844 would render it as
 "OhmzAI (Open WebUI)" regardless.
 
-No restart is needed or wanted: these files are read per request, and
-WEBUI_SECRET_KEY is unset on this container, so a restart signs everyone out.
+No restart is needed: these files are read per request. A restart is now also
+SAFE — the assets are written to /app/build/static as well, so config.py's
+startup rebuild reproduces the brand instead of reverting it. Before that fix
+(2026-08-01) a plain "docker restart" silently served 0-byte custom.css and
+loader.js while index.html still asked for the fingerprinted URLs.
+
+Re-run after "docker rm" or an image pull, which wipe both directories.
+
+(NB: this heredoc is unquoted so the version stamp expands — never use
+backticks in it, they run as command substitution. Not hypothetical: the first
+draft of this very message executed "docker restart" and "docker rm".)
 DONE
