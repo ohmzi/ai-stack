@@ -6,6 +6,7 @@ required_open_webui_version: 0.5.0
 description: One model that decides - chats (with vision), makes a Krea 2 image (text or gentle image-to-image edit), or a Wan video. Non-blocking (async). Never uses the uncensored model.
 """
 import asyncio, aiohttp, requests, time, base64, hashlib, os, random, re, json, sqlite3, threading
+from pydantic import BaseModel, Field
 
 # Serialize the VRAM-manipulating generation section so two concurrent Assistant invocations
 # can't both free/reload models on the single 24 GB card and OOM each other.
@@ -176,6 +177,23 @@ IMG_T2I_LORA_STRENGTH = 1.0
 IMG_T2I_TRIGGER = ""         # prepended to the prompt when a LoRA is set
 IMG_T2I_W, IMG_T2I_H = 1024, 1024
 IMG_DENOISE = 0.30  # gentle Krea 2 img2img edit strength (lower = closer to the attached image)
+# Instruction-edit sampler tiers. Measured 2026-08-01, fixed seed, 10 renders on one source
+# (full table and the negative-prompt proof in UPGRADE_ROADMAP.md §1.3):
+#
+#              time    source fidelity (MAE)   grain kept   negative prompt
+#   best      152 s    16.04 whole / 9.99 wood     84.5%     works
+#   balanced   36 s     9.36 whole / 2.68 wood    100.8%     INERT
+#   fast       20 s     9.28 whole / 3.24 wood     98.5%     INERT
+#
+# The Lightning LoRA is cfg-distilled, so cfg MUST stay 1.0 with it: at 2.5 the negative only
+# half-bites and the render costs 68 s, and at 4.0 the LoRA plus the uncond pass OOMs the 24 GB
+# card outright. That is why the tier carries its own cfg rather than letting a caller pick.
+EDIT_TIERS = {
+    "best":     {"lightning": False, "steps": 20, "cfg": 4.0},
+    "balanced": {"lightning": True,  "steps": 8,  "cfg": 1.0},
+    "fast":     {"lightning": True,  "steps": 4,  "cfg": 1.0},
+}
+EDIT_LORA = "Qwen-Image-Edit-2509-Lightning-4steps-V1.0-bf16.safetensors"
 IMG_ENHANCE = True  # expand short prompts into richer ones via the local LLM (text-to-image only)
 IMG_VERIFY = True   # vision-check the result against the request; one corrected retry on mismatch
 # One JSON line per finished media job. The QA loop above can turn a 16 s render into a 3-minute one
@@ -316,7 +334,23 @@ _EDIT_FORMAT = {"type": "object",
 
 
 class Pipe:
+    class Valves(BaseModel):
+        # This pipe carried none of these as valves for its whole life — every knob above is a
+        # module constant needing a redeploy to change. Only the one measured tier knob is exposed
+        # here; the rest stay constants deliberately rather than becoming a wall of settings.
+        EDIT_QUALITY: str = Field(
+            default="balanced",
+            description="Instruction-edit tier. 'balanced' (~36 s, 8-step speed LoRA) is the "
+                        "default: measured, it tracks the source photo CLOSER than 'best' and "
+                        "keeps its film grain, at a quarter of the time. 'best' (~152 s) renders "
+                        "newly-added objects with finer micro-texture and is the only tier where "
+                        "the negative prompt does anything — style conversions, 'you barely "
+                        "changed it' retries and QA corrections always use it whatever this says. "
+                        "'fast' (~20 s, 4-step) trades a little more object detail again.",
+        )
+
     def __init__(self):
+        self.valves = self.Valves()
         self.comfy = "http://localhost:8188"
         self.ollama = "http://localhost:11434"
         # ONE MODEL FOR EVERYTHING. Chat, code, vision and the uncensored prompt helpers all run on
@@ -1702,11 +1736,18 @@ class Pipe:
         except Exception:
             return prompt
 
-    def _build_edit_wf(self, instruction, name, seed, cfg, steps, negative):
-        # Full-quality edit (no 4-step speed LoRA): 20 steps, cfg 4 → new elements blend into the
-        # scene's lighting/grain instead of looking pasted-on. ~2 min. (Fast path lives in the
-        # dedicated "Image" model's EDIT_QUALITY valve.)
-        return {
+    def _build_edit_wf(self, instruction, name, seed, cfg, steps, negative, lightning=False):
+        # The speed LoRA was previously rejected here on the belief that it made new elements look
+        # pasted-on — mismatched lighting and grain. Re-measured 2026-08-01 (EDIT_TIERS above) that
+        # premise is backwards: on an "add an object" edit the full 20-step/cfg-4 path REGENERATES
+        # more of the photo than it is asked to (1 seed in 3 recomposed the whole frame, wood MAE
+        # 30.9) and smooths the source's grain to 84.5%, while the LoRA holds it at ~100%.
+        #
+        # What the LoRA does cost is real but narrower: slightly waxier micro-texture on the newly
+        # synthesized object, and — proven byte-identical output with and without one — a totally
+        # INERT negative prompt, because the tier runs cfg 1.0. Callers that depend on the negative
+        # must pass lightning=False.
+        wf = {
           "u":    {"class_type": "UnetLoaderGGUF", "inputs": {"unet_name": "Qwen-Image-Edit-2509-Q4_K_M.gguf"}},
           "msaf": {"class_type": "ModelSamplingAuraFlow", "inputs": {"model": ["u", 0], "shift": 3.0}},
           "cfgn": {"class_type": "CFGNorm", "inputs": {"model": ["msaf", 0], "strength": 1.0}},
@@ -1723,6 +1764,16 @@ class Pipe:
           "d":    {"class_type": "VAEDecode", "inputs": {"samples": ["k", 0], "vae": ["v", 0]}},
           "s":    {"class_type": "SaveImage", "inputs": {"filename_prefix": "owui_edit", "images": ["d", 0]}},
         }
+        if lightning:  # speed LoRA slots between the raw unet and ModelSamplingAuraFlow
+            wf["lora"] = {"class_type": "LoraLoaderModelOnly",
+                          "inputs": {"model": ["u", 0], "lora_name": EDIT_LORA, "strength_model": 1.0}}
+            wf["msaf"]["inputs"]["model"] = ["lora", 0]
+        return wf
+
+    def _edit_tier(self):
+        """The configured tier, falling back to the full path on anything unrecognised."""
+        return EDIT_TIERS.get(str(getattr(self.valves, "EDIT_QUALITY", "")).strip().lower(),
+                              EDIT_TIERS["best"])
 
     def _build_t2i_wf(self, prompt, seed):
         # Krea 2 Turbo text-to-image (8-step; negative is zeroed conditioning, cfg 1).
@@ -1773,6 +1824,11 @@ class Pipe:
             instruction = prompt or "improve the overall quality, keep everything else the same"
             negative = ""
             style = self._style_conversion(prompt) if prompt else None
+            # A restyle is defined by what must NOT survive it, and a boost retry exists because the
+            # first attempt under-moved — both lean on the negative prompt, which only bites at
+            # cfg > 1. So both stay on the full path regardless of the tier valve; the valve steers
+            # the ordinary edit, which is the one that costs 152 s and happens most.
+            lightning = False
             if style:  # whole-image restyle: purpose-built instruction, hard sampler push
                 instruction, negative = style
                 instruction = self._style_enrich(instruction, msgs)  # before _free_vram (gemma)
@@ -1780,13 +1836,18 @@ class Pipe:
             else:
                 if prompt:  # rewrite BEFORE _free_vram so Gemma isn't unloaded and reloaded
                     instruction, negative = self._enhance_edit(instruction, msgs)
-                cfg, steps = (6.0, 24) if self._edit_boost(prompt) else (4.0, 20)
+                if self._edit_boost(prompt):
+                    cfg, steps = 6.0, 24
+                else:
+                    t = self._edit_tier()
+                    cfg, steps, lightning = t["cfg"], t["steps"], t["lightning"]
             self._free_vram()
             try:
                 name = self._upload(ref_b64)
             except Exception as e:
                 return f"⚠️ Could not upload the image to edit: {e}"
-            wf = self._build_edit_wf(instruction, name, random.randint(0, 2**31), cfg, steps, negative)
+            wf = self._build_edit_wf(instruction, name, random.randint(0, 2**31), cfg, steps,
+                                     negative, lightning)
             t_render = time.time()
             data, err, _ = self._submit_poll(wf, "s", "Edit", 1200)
             if err:

@@ -64,8 +64,9 @@ not read from a source" rule.
 Media routing is default-deny but the residual false-positive rate is ~35%, and a wrong render
 evicts the 18 GB chat tenant for minutes. `CONFIRM_RENDERS` in the pipe (`"never"` / `"video"` /
 `"all"`, default `"video"`) asks first, keyed on **measured cost** rather than the noun: video
-(186–386 s) and image *edits* (162 s median) are gated; a fresh Krea image (16 s) is not, unless
-set to `"all"`.
+(186–386 s) and image *edits* (~49 s since the speed-LoRA tier, was 162 s) are gated; a fresh Krea
+image (16 s) is not, unless set to `"all"`. The edit stayed gated through that 3× speed-up because
+the eviction, not the render, is what costs the user — it is the same 18 GB reload either way.
 
 It **always fails open** — no client to ask, a dead socket, an unsupported client or any exception
 all proceed. The gate is a courtesy to avoid wasted GPU, never a reason a correctly-routed render

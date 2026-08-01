@@ -346,11 +346,52 @@ positives and confirm none renders.
 
 ---
 
-#### 1.3 Fix the 162 s image-edit path with the LoRA already on disk
+#### 1.3 Fix the 162 s image-edit path with the LoRA already on disk — **DONE 2026-08-01**
+
+> **Shipped as `Valves.EDIT_QUALITY`, defaulting to `balanced`.** Live measurement through the
+> deployed pipe: **48.7 s end-to-end** (render 36 s + rewrite + upload) against the recorded 152.3 s
+> median — **3.1×**. `auto_assistant.py` also gained its first `Valves` class in the same change.
+>
+> **The recorded rejection was measured and found backwards.** The old comment said Lightning made
+> new elements look pasted-on through mismatched lighting and grain. Across 10 fixed-seed renders
+> (3 seeds × 3 tiers on an "add an object" edit, plus a material-fill case) the opposite held:
+>
+> | tier | time | whole-image MAE vs source | untouched-wood MAE | grain kept |
+> |---|---|---|---|---|
+> | `best` 20 steps cfg 4 | 152 s | 16.04 | 9.99 | **84.5 %** |
+> | `balanced` 8 steps cfg 1 + LoRA | 36 s | 9.36 | 2.68 | **100.8 %** |
+> | `fast` 4 steps cfg 1 + LoRA | 20 s | 9.28 | 3.24 | **98.5 %** |
+>
+> It is the **full-quality path** that drifts: on 1 seed in 3 it recomposed the entire frame
+> (wood MAE 30.9, camera pulled back, grain to 70.8 %), which for an *instruction editor* is the
+> more serious failure. The LoRA tiers held the source photo and its film grain almost exactly.
+>
+> **What the LoRA does cost, stated plainly:**
+> 1. **The negative prompt becomes completely inert.** Not weakened — inert. The same seed rendered
+>    with `negative=""` and with `negative="steam, smoke, vapour, mist"` produced **byte-identical**
+>    output (max abs pixel diff **0**); the same pair at cfg 4 differed (max 162). `_enhance_edit`
+>    emits a negative on *every* rewritten edit (`media_metrics.jsonl`: 10 edits, 0 `avoid_missing`),
+>    so this is a live condition on the default path, not a corner case.
+> 2. Slightly waxier micro-texture on the newly synthesised object — glossier, rounder chocolate
+>    chips against the full path's matte irregular ones. Visible on close inspection, not at a glance.
+> 3. One observed minor artifact: a faint ghost of the added object on a nearby glossy surface.
+>
+> **Why that is acceptable here:** the three callers that actually depend on the negative are pinned
+> to the full path regardless of the valve — style conversion (a restyle is *defined* by what must
+> not survive it), `_edit_boost` ("you barely changed it"), and the `IMG_VERIFY` QA correction round,
+> which already ran at cfg 6/24. That last one means a weak fast shot is **automatically** re-rendered
+> at full quality with a working negative, so the fast default has a backstop rather than a cliff.
+>
+> **cfg is pinned to 1.0 on both LoRA tiers, and that is load-bearing:** at cfg 2.5 the negative only
+> half-bites and the render costs 68 s (2.2×, not worth it); at cfg 4.0 the LoRA plus the uncond pass
+> **OOMs the 24 GB card outright**. `tests/test_edit_tiers.py` (32 checks, mutation-tested against 3
+> regressions) pins all of this.
+>
+> **Rollback:** set `EDIT_QUALITY` to `best` in the function's valves — no redeploy.
 
 **What.** `Qwen-Image-Edit-2509-Lightning-4steps-V1.0-bf16.safetensors` (849 MB) is sitting unused in
 `models/loras/` — `image_krea.py:69,439` uses it; `auto_assistant.py`'s `_build_edit_wf` deliberately
-does not (see the comment at `:938-941`). Wire it in **tiered**: Lightning 4–8 steps at cfg 1 by
+does not (see the comment on `_build_edit_wf`). Wire it in **tiered**: Lightning 4–8 steps at cfg 1 by
 default, full 20–24 steps at cfg 4–6 retained behind `_edit_boost` / style conversion.
 
 **Why.** Measured from 117 real ComfyUI jobs: Qwen-Image-Edit-2509 median **162.1 s** (n=26), against

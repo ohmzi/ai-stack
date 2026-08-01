@@ -13,8 +13,13 @@ for an answer would hang all four media cases in --tier full.
 
 Costs are keyed on measurement, not on the noun the user would use:
     Krea image        16.3 s (n=42)   cheap  -> only gated under "all"
-    Qwen image EDIT  162.1 s (n=26)   expensive
+    Qwen image EDIT    49 s           expensive  (was 162.1 s, n=26, before the speed-LoRA tier)
     Wan video        186-386 s        expensive
+
+The edit stays gated even though the LoRA tier cut it to ~49 s (UPGRADE_ROADMAP.md §1.3), because
+render seconds were never the dominant cost: any render evicts the 18 GB chat tenant and charges a
+full reload on the user's next turn. That eviction is identical at 36 s and at 162 s, so a 4x faster
+render does not make a wrongly-triggered one cheap.
 
 Usage:  python3 tests/test_confirm_gate.py [pipe_path]
 """
@@ -73,7 +78,7 @@ def main():
     print("--- cost, not the noun, decides what is gated ---")
     no = responder(False)
     check("video is gated under the default", ask(p, no, "video", True, "video") is False)
-    check("an image EDIT is gated under the default (162 s median)",
+    check("an image EDIT is gated under the default (~49 s, but evicts the chat tenant)",
           ask(p, no, "image edit", True, "video") is False)
     check("a fresh image is NOT gated under the default (16 s)",
           ask(p, no, "image", False, "video") is True)
