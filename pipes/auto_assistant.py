@@ -195,6 +195,13 @@ METRICS_PATH = os.environ.get("MEDIA_METRICS", "/app/backend/data/media_metrics.
 #
 # Split by route rather than by model tag: chat, code and vision all resolve to the SAME tag since
 # the 2026-07-26 consolidation, so the tag cannot discriminate. The coder guard can.
+# Per-request context sizing — see _fit_ctx. The floor is generous on purpose: --context-shift
+# means an under-sized window truncates SILENTLY rather than erroring, so the failure mode of
+# guessing low is a wrong answer, while guessing high is only wasted VRAM.
+CTX_FLOOR = 16384          # never ask for less, whatever the arithmetic says
+CTX_MAX = 32768            # OLLAMA_CONTEXT_LENGTH; asking beyond it buys nothing
+CTX_HEADROOM = 2048        # room for the reply and the system guard
+
 CHAT_OPTIONS = {"temperature": 0.45, "top_p": 0.9}
 CODER_OPTIONS = {"temperature": 0.15, "top_p": 0.9, "top_k": 20, "repeat_penalty": 1.05}
 # The harness measures behaviour, not dice. With this set, both routes go fully greedy from a fixed
@@ -2596,6 +2603,28 @@ class Pipe:
             opts.update(temperature=0, seed=EVAL_SEED)
         return opts
 
+    @staticmethod
+    def _fit_ctx(messages):
+        """A per-request num_ctx sized to the conversation, rounded UP to a power-of-two step.
+
+        OLLAMA_CONTEXT_LENGTH=32768 is allocated for every turn regardless of how short it is,
+        and the KV cache is sized from it — so a two-line question reserves the same VRAM as a
+        30k-token thread. Sizing per request hands that back on short turns, which is most of
+        them, at measured-zero throughput cost (the coder is flat 123-125 tok/s from 4k to 32k).
+
+        ROUND UP ONLY, and never below CTX_FLOOR. Ollama runs with --context-shift, so an
+        under-sized window does not error — it silently evicts the front of the conversation, and
+        the model answers a question it can no longer fully see. A too-small ctx is therefore far
+        worse than a too-large one, which is only wasted VRAM. The 3.2 chars/token estimate is
+        deliberately pessimistic (real English is ~4) and the doubling step absorbs the rest.
+        """
+        chars = sum(len(str(m.get("content") or "")) for m in messages)
+        need = int(chars / 3.2) + CTX_HEADROOM
+        n = CTX_FLOOR
+        while n < need and n < CTX_MAX:
+            n *= 2
+        return min(n, CTX_MAX)
+
     async def _achat_stream(self, messages, guard_text=None, keep_system=False, force_model=None):
         """Streamed Ollama chat.
 
@@ -2665,7 +2694,8 @@ class Pipe:
                 async with s.post(f"{self.ollama}/api/chat",
                                   json={"model": model, "messages": messages,
                                         "stream": True, "think": False,
-                                        "options": self._sampling(guard_text)}) as r:
+                                        "options": {**self._sampling(guard_text),
+                                                    "num_ctx": self._fit_ctx(messages)}}) as r:
                     if r.status != 200:
                         body = (await r.text())[:300]
                         yield f"⚠️ Ollama HTTP {r.status} from {model}: {body}"
@@ -3099,6 +3129,24 @@ class Pipe:
                         and self._WANTS_ALERT.search(text or "")
                         and not self._contact(handle).get("phone")):
                     return self._say(self._phone_prompt(handle, text))
+                # Confirm ONLY a genuinely new, heuristically-detected job. Delegating loads the
+                # 65536-ctx agent runner, which cannot co-reside with the 32768-ctx chat tenant —
+                # so a false positive costs the user an eviction plus a reload for a job they
+                # never asked for. Same fail-open contract as the render gate.
+                #
+                # Deliberately NOT gated, each for its own reason:
+                #   /research, /agent   already explicit user intent (returns above, :3076)
+                #   phone-number reply  answered above (:3086) — a bare number matches nothing else
+                #   followup            continuing an exchange the user already consented to;
+                #                       re-asking on "yes reenable" would be absurd
+                #   manage verbs        list/pause/cancel are cheap and run no agent job
+                if not followup and not is_manage:
+                    if not await self._confirm_render(
+                            confirm, "background task",
+                            f"Schedule a background task: “{(text or '')[:120]}”"):
+                        return self._say(
+                            "Okay — nothing scheduled. If you just wanted an answer rather than a "
+                            "recurring job, ask it directly and I'll answer here.")
                 sent = text
                 if followup:
                     # "yes reenable" is meaningless alone — hand hermes what it just asked.

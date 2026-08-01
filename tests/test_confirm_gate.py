@@ -85,6 +85,34 @@ def main():
     check("names what did not happen", "no video generated" in msg.lower(), msg)
     check("offers the alternative the user probably wanted", "ask" in msg.lower(), msg)
 
+    print("--- background-task delegation is gated on the same contract ---")
+    # Delegating loads the 65536-ctx agent runner, which cannot co-reside with the 32768-ctx chat
+    # tenant — so a heuristic false positive costs an eviction plus a reload for a job nobody
+    # asked for. expensive=True is explicit: under CONFIRM_RENDERS="video" the default-off path
+    # (expensive=False) would silently never ask.
+    check("a background task is gated under the default setting",
+          ask(p, responder(False), "background task", True, "video") is False)
+    check("...and proceeds when confirmed",
+          ask(p, responder(True), "background task", True, "video") is True)
+    check("...and still fails open with no client",
+          ask(p, None, "background task", True, "video") is True)
+    src = open(PIPE_PATH, encoding="utf-8").read()
+    check("only NEW heuristic jobs are gated, never followups or manage verbs",
+          "if not followup and not is_manage:" in src)
+    check("the /research slash command is not gated (explicit intent already)",
+          src.index('startswith(("/research"') < src.index("if not followup and not is_manage:"))
+
+    print("--- per-request num_ctx rounds UP and never under-sizes ---")
+    fit = mod.Pipe._fit_ctx
+    check("floor holds for a one-line question", fit([{"content": "hi"}]) == mod.CTX_FLOOR)
+    check("never exceeds the server's context length",
+          fit([{"content": "x" * 10 ** 7}]) == mod.CTX_MAX)
+    check("grows for a long thread", fit([{"content": "x" * 200000}]) > mod.CTX_FLOOR)
+    # context-shift means an under-sized window truncates SILENTLY, so rounding down would answer
+    # a question the model can no longer fully see. Rounding up only wastes VRAM.
+    need = int(60000 / 3.2) + mod.CTX_HEADROOM
+    check("rounds UP past the estimate, never down", fit([{"content": "x" * 60000}]) >= need)
+
     print("--- the shape OpenWebUI's client actually renders ---")
     seen = {}
 
