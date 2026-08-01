@@ -366,7 +366,48 @@ async def unload_all(mod):
 
 
 # ------------------------------------------------------------------------------------------- main
+def preflight_deploy_check(pipe_path, skip=False):
+    """Refuse to run against a pipe that is not what OpenWebUI is actually serving.
+
+    This runner loads the pipe from DISK (load_pipe) and never touches the DB, so a fully green
+    eval says nothing about production: editing pipes/live/*.py does not update the installed
+    Function, and the only guard was a manual instruction to run test_deployed.py. That is exactly
+    the gap that once let a fix be "written, tested, reviewed and committed" while the server ran
+    the previous build. A green suite has to be a statement about what users hit.
+
+    Skipped automatically when --pipe points somewhere other than pipes/live/ (deliberately
+    testing a candidate file), and by --no-deploy-check for the same reason explicitly.
+    """
+    if skip:
+        print("deploy  : SKIPPED (--no-deploy-check)")
+        return True
+    if os.path.join("pipes", "live") not in os.path.abspath(pipe_path):
+        print(f"deploy  : skipped — {pipe_path} is not the deployed copy")
+        return True
+    checker = os.path.join(ROOT, "tests", "test_deployed.py")
+    if not os.path.exists(checker):
+        print("deploy  : skipped — tests/test_deployed.py not found")
+        return True
+    r = subprocess.run([sys.executable, checker], capture_output=True, text=True, timeout=120)
+    if r.returncode == 0:
+        print("deploy  : OK — the DB is running this repo's code")
+        return True
+    print("deploy  : DRIFT — OpenWebUI is NOT running the code under test")
+    print(r.stdout.strip()[-800:])
+    print("\nRefusing to run: results would describe a file the server has never loaded.")
+    print("Deploy the pipe (or pass --no-deploy-check if that is genuinely what you want).")
+    return False
+
+
 async def main(a):
+    if not preflight_deploy_check(a.pipe, a.no_deploy_check):
+        return 2
+    # The gpuguard plugin is version-controlled and symlinked into ~/.hermes; a broken link means
+    # cron is silently running the stock unguarded ticker while the tests still pass.
+    gg = os.path.expanduser("~/.hermes/plugins/gpuguard")
+    if os.path.exists(gg) and not os.path.realpath(gg).startswith(ROOT):
+        print(f"  !! WARNING: gpuguard resolves outside the repo ({os.path.realpath(gg)})")
+
     suite = json.load(open(CASES_FILE))
     models = suite["models"]
     # cases.json declares the judge explicitly so it can be a DIFFERENT family from the models under
@@ -549,6 +590,8 @@ if __name__ == "__main__":
                     help="comma-separated skill names from docs/skills/ to attach to EVERY case, "
                          "as OpenWebUI would under legacy function calling")
     ap.add_argument("--judge", help="override judge model")
+    ap.add_argument("--no-deploy-check", action="store_true",
+                    help="run even if the deployed Function differs from the file under test")
     ap.add_argument("--save-baseline", action="store_true")
     ap.add_argument("--compare", action="store_true")
     ap.add_argument("--repeat", type=int, default=1,

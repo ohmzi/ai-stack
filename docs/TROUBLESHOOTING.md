@@ -141,3 +141,18 @@ is the same restart. A revoked device also skips the automatic retry, which cann
 costs ~50 s of pointless VRAM-unload waiting.
 
 Covered by `tests/test_gpu_diagnosis.py`.
+
+## LAN exposure — the deliberate list (2026-08-01)
+
+Docker-published ports **bypass ufw**, so the firewall is not the control here; the bind address
+is. Reviewed once, deliberately, rather than closed ad hoc:
+
+| Listener | Decision |
+|---|---|
+| ComfyUI `8188` | **Closed** — was `0.0.0.0` with no auth and a `/interrupt` that kills whoever is rendering. Now `127.0.0.1` (`compose/comfyui/run.sh`). Do not touch the in-container `--listen 0.0.0.0`: that is the bridge-namespace bind the docker-proxy needs. |
+| OpenWebUI `4567` | **Kept on `0.0.0.0`** — owner decision, LAN devices open it directly. Public signup is also deliberately left **open**. Recorded in `compose/openwebui/run.sh`. |
+| host `redis-server *:6379` | **Left as-is, flagged.** Not a container (`/usr/bin/redis-server`, pid on the host, no systemd unit found). It answers from the LAN IP with `-DENIED … protected mode`, so it refuses commands without a password — and every established client is `127.0.0.1`. Binding it to loopback would therefore break nothing observed, but it is not part of this stack, so it is the owner's call. |
+| `hermes_api_key` | **Fixed** — was `0644` (any local user could read the key that authenticates to the agent gateway). Now `0640 root:ohmz` — world-read removed, owner and the uid-0 container both still read it. (0600 also works for the container but locks the owner out of host-side debugging for no gain.) |
+| cloudflared token | **Flagged, not moved.** Visible in `ps aux`, so any local user can read the tunnel credential. Fixing means reconfiguring a working tunnel to use a credentials file — worth doing, but not worth breaking remote access unattended. |
+
+The `~/.hermes/.env` (which holds the real gateway secret) was already `0600`.

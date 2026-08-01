@@ -33,7 +33,11 @@ services:
   # settings.yml MUST enable the json format — upstream ships [html] only and webapp.py returns 404
   # for format=json otherwise. That is the single most common SearXNG-with-OWUI failure.
   searxng:
-    image: searxng/searxng:latest
+    # Pinned to a digest, not :latest. This is the stack's own search dependency — an upstream
+    # push that changes the JSON shape or the engine roster degrades web search SILENTLY: the
+    # assistant answers from training data and still looks grounded. Bump deliberately, and
+    # re-run tests/test_websearch.py after.  (digest captured 2026-08-01, image built 2026-07-25)
+    image: searxng/searxng@sha256:3bc6ae0e872ecd4b003e97e9cb58ec0fb56b02d46ad97ea67e2fa4ff2e8ff759
     container_name: searxng
     restart: unless-stopped
     ports:
