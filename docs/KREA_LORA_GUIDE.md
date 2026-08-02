@@ -4,6 +4,12 @@ This is the one part that isn't automated, because it uses **your** account, car
 It's a one-time ~**$3** step. Everything after you download the file is handled locally by the
 Krea LoRA Converter node + the "Image" pipe. Based on the Pixaroma Ep26 method.
 
+> **Still current after the 2026-08-02 RedCraft swap.** The text-to-image checkpoint is now
+> `redcraft23INT8INT4FP8_30Krea2.safetensors`, which is built on a **Krea 2 base** — the
+> architecture a fal.ai Krea 2 LoRA targets — so LoRAs trained this way load and apply
+> exactly as before, through the same `LoraLoaderModelOnly` node and the same valves.
+> RedCraft itself has no trigger word; yours still works the way it always did.
+
 ---
 
 ## 1. Prepare your images (most important step)
@@ -66,11 +72,17 @@ Make up a rare token so it doesn't collide with normal words, e.g. `pixag1rl26`,
 
 ## 5. Using it day-to-day
 
-- In OpenWebUI, select **Image** (or just ask the 🪄 Assistant to "draw…").
-- Include your **trigger word** in the request for the LoRA look; omit it for plain Krea 2.
-- **Gentle edits:** attach a generated image and describe a small change ("same but warmer light,
-  add a red scarf"). It re-renders at low strength so ~90% stays the same. Lower the **EDIT_DENOISE**
-  valve for even smaller changes, raise it for bigger ones.
+- In OpenWebUI, select **Image** (or just ask the Ω Assistant to "draw…").
+- Include your **trigger word** in the request for the LoRA look; omit it for plain RedCraft.
+- **Edits:** attach an image — or just keep talking after one was generated — and describe the
+  change ("give him a red scarf", "make this picture realistic"). That runs **Qwen-Image-Edit**,
+  a true instruction editor that changes what you asked and leaves the rest alone. There is no
+  denoise dial to tune: the old Krea img2img path (and its `EDIT_DENOISE` valve) was retired
+  because no single denoise value can both apply an edit and preserve a face. Quality/speed is
+  the `EDIT_QUALITY` valve instead — `best` | `balanced` | `fast`.
+- **The LoRA does not apply to edits**, by design. A LoRA bakes a subject into the *generator*;
+  an edit is conditioned on the photo you handed over. Keeping a trained face across an edit is
+  the edit path's job (`pipes/shared/identity_edit.py`), not the LoRA's.
 - If the LoRA is slightly too strong/weak, adjust **LORA_STRENGTH** instead of retraining.
 
 ---

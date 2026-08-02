@@ -877,6 +877,17 @@ with only a log line — the same failure class as the Phase 5 whisper cache.
 
 #### 3.2 The ComfyUI acceleration chain: cu130 → SageAttention 2.2 → int8_convrot
 
+> **Partially overtaken by events, 2026-08-02.** Step (c) has effectively happened by another
+> route: the text-to-image checkpoint is now **RedCraft**
+> (`krea2/redcraft23INT8INT4FP8_30Krea2.safetensors`), a Krea 2-base merge the creator
+> describes as an INT8-Convrot architecture remaster (INT8/INT4/FP8-scaled). So the file this
+> box loads is no longer the fp8 one this item was written to replace. Steps (a) and (b) —
+> cu130 and SageAttention 2.2 — are **untouched and still the actual blocker**: with
+> comfy-kitchen's `cuda`/`triton` backends still `disabled: True`, an int8 file cannot reach
+> the optimized path either, so the speedup this item promises has *not* been collected.
+> Re-measure before doing more work here; the swap was made for output quality, not speed,
+> and the ~14–21 s render time did not move.
+
 **What.** One coupled project, in this order: (a) rebuild the ComfyUI image on a cu130 torch triple;
 (b) build SageAttention 2.2 for sm_86 in the same image; (c) swap Krea 2's
 `krea2_turbo_fp8_scaled.safetensors` for the official `Comfy-Org/Krea-2` →
