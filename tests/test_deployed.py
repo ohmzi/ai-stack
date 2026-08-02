@@ -36,6 +36,21 @@ SOURCES = {
     "adaptive_memory": "filters/adaptive_memory.py",
 }
 
+# The hop BEFORE the one above, which nothing checked until now. `pipes/live/` is gitignored,
+# so the chain is actually tracked source -> live copy -> DB row, and the checks above only
+# ever covered the second link. The first was held together by the convention that whoever
+# edited a pipe remembered to copy it across — which is the same convention that failed on
+# 2026-07-28 and is the reason this file exists.
+#
+# The shared module has the same shape: pipes cannot import a repo-relative file, so
+# identity_edit.py is copied into OpenWebUI's data volume and imported from there. If that
+# copy drifts, photoreal.py silently falls back to the old drifting SDXL path — it is written
+# to degrade rather than crash, which means nothing would surface it except this check.
+TWINS = {
+    "pipes/photoreal.py": "pipes/live/uncensored.py",
+    "pipes/shared/identity_edit.py": "/volume1/docker/openwebui/config/identity_edit.py",
+}
+
 results = []
 
 
@@ -93,6 +108,21 @@ def main():
     for fid, rel in SOURCES.items():
         if fid not in installed and os.path.exists(os.path.join(ROOT, rel)):
             print(f"  [ .. ] {rel} has no installed function called {fid!r} — not deployed")
+
+    print("\n  tracked source → deployed copy")
+    for tracked, twin in TWINS.items():
+        tpath = os.path.join(ROOT, tracked)
+        wpath = twin if os.path.isabs(twin) else os.path.join(ROOT, twin)
+        if not os.path.exists(tpath):
+            continue
+        tsrc = open(tpath).read()
+        if not os.path.exists(wpath):
+            check(f"{tracked} → {twin}", False, "the deployed copy does not exist")
+            continue
+        wsrc = open(wpath).read()
+        check(f"{tracked} → {twin}", tsrc == wsrc,
+              "" if tsrc == wsrc else f"repo={sha8(tsrc)} ({len(tsrc)}B) "
+                                      f"deployed={sha8(wsrc)} ({len(wsrc)}B) — copy it across")
 
     fails = sum(1 for _, ok, _ in results if not ok)
     if fails:
