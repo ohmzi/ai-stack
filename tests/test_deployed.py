@@ -127,7 +127,8 @@ def main():
     fails = sum(1 for _, ok, _ in results if not ok)
     if fails:
         print("\nOpenWebUI is running code that differs from this repo.")
-        print("Deploy: Workspace → Functions → edit the function → paste the repo file → Save.")
+        print("Deploy: python3 scripts/deploy_pipe.py <function-id>")
+        print("        (or by hand: Workspace → Functions → edit → paste the repo file → Save)")
     print(f"\n{len(results)} checks — {'ALL PASS' if not fails else str(fails) + ' FAILURE(S)'}")
     return 1 if fails else 0
 

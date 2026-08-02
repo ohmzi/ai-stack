@@ -26,3 +26,6 @@ compose/ntfy/
 
 # identity-drift harness artifacts — generated PNGs, regenerate with tests/test_identity_drift.py
 .identity-drift/
+
+# deploy backups — copies of the previously-deployed function rows, kept for rollback
+.deploy-backups/
