@@ -29,3 +29,7 @@ compose/ntfy/
 
 # deploy backups — copies of the previously-deployed function rows, kept for rollback
 .deploy-backups/
+
+# Claude Code local state — settings.local.json is machine-specific, and worktrees/
+# holds full working copies of this repo (2+ MB of duplicate tree)
+.claude/
