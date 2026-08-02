@@ -267,6 +267,69 @@ resident with **zero eviction churn**, and retires `gemma4:31b` (19.87 GB disk) 
 
 ---
 
+### 1.4 Photoreal edits stopped returning a different person — DONE 2026-08-01
+
+**The complaint:** attach a photo, ask for an edit, get a stranger in the same pose.
+
+**Three defects, all in `pipes/photoreal.py`'s img2img branch, ranked by contribution.**
+
+1. *Whole-frame `denoise 0.65`.* The reference's only influence was the initial latent, and at
+   that strength sampling starts above the sigma where facial identity lives, so the face was
+   resampled from Lustify's prior rather than reconstructed. **No denoise value fixes this** —
+   below ~0.35 the edit does not land, above ~0.55 the person changes, and a structural edit
+   needs the high end. One scalar cannot be low where the face is and high where the jacket is.
+2. *The rewriter was skipped exactly when a reference was attached* (`if not ref_b64`), so a raw
+   instruction reached `CLIPTextEncode`. SDXL cannot follow instructions — it renders a
+   description of a finished image — so "keep her the same" was read as generic subject tags,
+   which is an active pull toward the checkpoint's average face.
+3. *Nothing carried identity at all.* Qwen-Image-Edit puts the reference into **both** text
+   encoders as conditioning; SDXL img2img has nowhere to put it.
+
+**What shipped.** A shared module (`pipes/shared/identity_edit.py`, pure functions only —
+three pipes import it, so a fault there breaks all three) carrying the Qwen edit graph, the tier
+table that previously existed in two copies, seed parsing, and the SDXL rewrite prompt. Edits now
+default to **Qwen-Image-Edit** (`EDIT_ENGINE` valve); SDXL is kept as the uncensored fallback and
+now gets a **vision** rewrite that restates the traits it can see in the source. Seeds are parsed
+from the prompt, surfaced in the status line, and logged — nothing here was falsifiable before
+that. The output node is a parameter now; it was hardcoded to `"9"`, which the Qwen graph does
+not have.
+
+**Measured** (seed 20260801, synthetic subject, "change the background to a sunlit green garden",
+`tests/eval/identity_baseline.json`):
+
+| engine | time | face cos | skin dE | eye dE | hair dE | verdict |
+|---|---|---|---|---|---|---|
+| Qwen-Image-Edit balanced | 44 s | **0.958** | 1.6 | 8.4 | 2.9 | same person |
+| SDXL img2img, raw prompt | 13 s | 0.753 | 6.4 | 15.5 | 15.1 | **different person** |
+| SDXL img2img + vision rewrite | 27 s | 0.853 | 3.8 | 7.9 | 11.4 | closer, still not them |
+
+The middle row is the reported bug, reproduced: different ethnicity, green eyes for brown,
+light-brown hair for near-black, mole gone. The rewrite recovers the **colour** drift (eye dE
+15.5 → 7.9) but not the **geometry** (cosine 0.853, under the 0.90 gate) — which is the
+resolution/denoise problem, and is what masking or ControlNet would be for.
+
+**Two traps found while building the metric** (`tests/identity_metrics.py`, OpenCV SFace — no
+InsightFace, no onnxruntime, no GPU, so the risky ONNX stack stays out of the ComfyUI container):
+
+- **SFace's published 0.363 threshold is useless here.** It is a *verification* threshold, tuned
+  for photographic variation and near-blind to anything but geometry. It scored the obviously
+  different person above at 0.753 — a comfortable pass. The gate is 0.90 plus colour deltas.
+- **Absolute colour distance cannot tell "different eyes" from "different light".** A correct
+  Qwen edit into a sunlit garden scored skin dE 17.2 / eye dE 14.4 while being unmistakably the
+  same person. Eye and hair are therefore measured *relative to that image's own skin*, sampled
+  at *that image's own landmarks* — sampling both images at the source's coordinates scored the
+  correct render worse than the drifted one, exactly backwards.
+
+**Not done, deliberately:** masking (needs a 5.42 MB MediaPipe download into a `models/detection/`
+dir that does not exist, plus a container restart — and `MediaPipeFaceMask` fails *silently* to an
+all-zero mask, which inverts to a full-frame re-render, so it needs a coverage probe gating it
+before it can be trusted). ControlNet, IP-Adapter/InstantID/PuLID, and an SDXL LoRA loader are
+Stages 4-6 of the plan and unstarted. Measure first: on these numbers Qwen may close it out.
+
+**Rollback:** set the `EDIT_ENGINE` valve to `sdxl` — no redeploy.
+
+---
+
 ## 2. What is left from the original plan
 
 | Original item | Real status today | Verdict |

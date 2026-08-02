@@ -28,6 +28,18 @@ Make up a rare token so it doesn't collide with normal words, e.g. `pixag1rl26`,
 
 ## 3. Train on fal.ai
 
+> **This guide produces Krea 2 LoRAs, which work in the "Image" pipe and nowhere else.**
+> They are architecturally incompatible with Lustify SDXL, so they will not load in
+> **Photoreal** — a Krea 2 LoRA cannot give that pipe a consistent recurring character.
+> Photoreal has no LoRA loader node at all today; wiring one up needs an SDXL trainer, not
+> this one.
+>
+> Also worth being clear about what a LoRA is for, because the two get conflated constantly:
+> a LoRA bakes **one** subject into the model so you can summon them by trigger word in a
+> **fresh** generation. It does nothing to keep the person in a photo you hand over for
+> editing — that is the edit path's job (see `pipes/shared/identity_edit.py`), and no amount
+> of LoRA training will fix an edit that changes who is in the picture.
+
 1. Go to **<https://fal.ai/models/fal-ai/krea-2-trainer>** and sign in (add a little credit; ~$3/run).
 2. Upload your images (or a .zip of them).
 3. Settings (the creator's proven starting points):
