@@ -50,8 +50,8 @@ def build(pipe, prompt, style=None, enhanced=("EDIT", "AVOID-TRAITS")):
     pipe._free_vram = lambda *a, **k: None
     pipe._upload = lambda *a, **k: "ref.png"
     pipe._style_conversion = lambda p: style
-    pipe._style_enrich = lambda i, m=None: i
-    pipe._enhance_edit = lambda i, m=None: enhanced
+    pipe._style_enrich = lambda i, m=None, **kw: i
+    pipe._enhance_edit = lambda i, m=None, **kw: enhanced
     pipe._metric = lambda **k: None
 
     real = pipe._build_edit_wf

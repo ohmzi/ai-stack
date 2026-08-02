@@ -1,12 +1,23 @@
 """
 title: Assistant (auto)
 author: local
-version: 0.5.0
+version: 0.6.0
 required_open_webui_version: 0.5.0
-description: One model that decides - chats (with vision), makes a Krea 2 image (text or gentle image-to-image edit), or a Wan video. Non-blocking (async). Never uses the uncensored model.
+description: One model that decides - chats (with vision), makes a RedCraft image (with follow-up edits that stay anchored to the previous picture), or a Wan video. Background-task calls never render; QA checks edits against the original ask and the original image. Non-blocking (async). Never uses the uncensored model.
 """
-import asyncio, aiohttp, requests, time, base64, hashlib, os, random, re, json, sqlite3, threading
+import asyncio, aiohttp, requests, time, base64, hashlib, os, random, re, json, sqlite3, sys, threading
 from pydantic import BaseModel, Field
+
+# Conversation continuity for the media paths (task guard, persistent last-image store,
+# reference recovery, official-guidance prompt contracts). Source of truth is
+# pipes/shared/media_session.py; a copy lives on the OpenWebUI data mount because OWUI
+# execs each Function standalone. Degrade to the old in-memory behaviour when missing.
+try:
+    if "/app/backend/data" not in sys.path:
+        sys.path.insert(0, "/app/backend/data")
+    import media_session as ms
+except Exception:  # noqa: BLE001 - the pipe must always load
+    ms = None
 
 # Serialize the VRAM-manipulating generation section so two concurrent Assistant invocations
 # can't both free/reload models on the single 24 GB card and OOM each other.
@@ -379,8 +390,11 @@ class Pipe:
         # _GEN_LOCK for the stream — and because splitting them again later should be a one-line
         # change, not a refactor.
         self.coder_model = "hermes-genesis:apex-compact"
-        # (OpenWebUI's own title/tag/query task model is gemma4:e2b, configured at the server level —
-        # this pipe does not call it directly, so no task_model attribute is kept here.)
+        # OpenWebUI's title/tag/query tasks are CONFIGURED to run on a small model, but the
+        # server silently falls back to the chat's model (this pipe) whenever that id is
+        # missing from the visible model registry — observed in media_metrics.jsonl as real
+        # GPU renders of '### Task:' boilerplate. pipe() now guards on __task__ / the text
+        # prefix and answers them as plain text; see media_session.is_task_request.
         self._recent = {}        # chat_id -> last produced image b64 (for follow-up edits without re-upload)
         self._recent_video = {}  # chat_id -> (prompt, seed) of the last produced video (for follow-up changes)
 
@@ -1055,6 +1069,11 @@ class Pipe:
         raw = t.lower()
         if self._FIGURATIVE.search(raw):
             return False
+        # "make this picture realistic / that photo brighter" is about the EXISTING image —
+        # never a fresh generation. Without this, a follow-up whose reference could not be
+        # recovered fell through to a from-scratch t2i of the literal follow-up words.
+        if re.search(r"\b(this|that|it)\s+(image|picture|photo|pic|drawing|one)\b", raw):
+            return False
         # explicit generation verb + an image object → a request even if phrased as a question
         if re.search(r"\b(create|creating|generate|make|design|produce|render|draw|sketch|paint|"
                      r"illustrate|show me|give me|i want|can you make|could you make)\b"
@@ -1124,8 +1143,8 @@ class Pipe:
                         url = (part.get("image_url") or {}).get("url", "")
                         if url.startswith("data:") and "," in url:
                             return "image", url.split(",", 1)[1]
-            elif role == "assistant" and isinstance(c, str):
-                if "data:video/" in c:
+            elif role == "assistant":
+                if isinstance(c, str) and "data:video/" in c:
                     v = re.search(r'<video[^>]*data-p64="([A-Za-z0-9+/=]*)"[^>]*data-seed="(\d+)"'
                                   r'(?:[^>]*data-opts="([^"]*)")?', c)
                     if v:
@@ -1136,7 +1155,11 @@ class Pipe:
                         return "video", (prompt, int(v.group(2)), self._parse_opts(v.group(3)))
                     cap = re.search(r"\*🎬 (.+?)\*", c)
                     return "video", ((cap.group(1) if cap else ""), None, None)
-                b = self._extract_b64(c)
+                # Images: handle every shape OWUI 0.10 delivers — str content, list-of-parts
+                # content, and the raw message.output items (pipe replies arrive with
+                # content='' on some paths, the markdown living only in output). The old
+                # str-only check is why generated images were invisible to the next turn.
+                b = (ms.image_from_message(m) if ms else self._extract_b64(c))
                 if b:
                     return "image", b
         return None, None
@@ -1185,8 +1208,17 @@ class Pipe:
         # small talk / acknowledgment → chat  (checked BEFORE edit verbs)
         if self._is_smalltalk(low):
             return False
-        # question / info request / write-verbs → chat  (translate/write/compose/summarize/draft)
-        if self._is_question(low):
+        # "have them use chopsticks" / "let her hold it" is an imperative scene direction —
+        # _QUESTION's leading 'have' would otherwise classify it as a question → chat, and the
+        # user's edit silently never ran.
+        if re.match(r"(have|let)\s+(him|her|them|it|the|his|their)\b", low):
+            return True
+        # question / info request / write-verbs → chat  (translate/write/compose/summarize/draft).
+        # A trailing '?' on an imperative edit ("can you make it brighter?") is politeness, not
+        # a question — only redirect when it doesn't carry an edit verb.
+        if self._QUESTION.match(low):
+            return False
+        if low.endswith("?") and not self._is_edit_request(low):
             return False
         # explicit edit verb (change/remove/bigger/…) → edit
         if self._is_edit_request(low):
@@ -1239,6 +1271,8 @@ class Pipe:
         realistic instead', 'turn this into a cartoon') — else None. The generic edit rewriter
         can't handle these: it ends every instruction with 'keep identity/background/lighting
         unchanged', which fights a global restyle, so we build the instruction directly."""
+        if ms:
+            return ms.style_conversion(text)
         t = (text or "").lower()
         if re.search(r"\b(video|clip|gif|footage|animate|move|moving|motion)\b", t):
             return None  # motion request, not a still restyle
@@ -1253,34 +1287,41 @@ class Pipe:
         # last-mentioned style wins ('make the cartoon realistic' → realistic); on a tie
         # ('watercolor painting' ends where 'painting' ends) the more specific earlier entry wins
         _, target, negative = max(hits, key=lambda h: h[0])
-        return (f"Convert this image into {target}. Keep the exact same scene: the same people — same "
-                f"count, ages, genders, ethnicity and skin tone — the same poses, expressions, clothing "
-                f"and colors, and the same composition, background and framing. Change ONLY the rendering "
-                f"style, and apply the new style emphatically to the ENTIRE image.", negative)
+        # Subject-AGNOSTIC preservation wording: the old text hard-coded "the same people —
+        # ages, genders, ethnicity" into every restyle, handing the editor an instruction
+        # about people even when the picture contains a cat.
+        return (f"Transform the entire image into {target}. Keep the composition and every "
+                f"subject exactly as they are — the same subjects, poses, expressions, clothing "
+                f"or markings, colors and framing — changing ONLY the rendering style, applied "
+                f"consistently across the whole image.", negative)
 
-    def _style_enrich(self, instruction, msgs):
-        """Restate the concrete subjects (from chat context) inside a style-conversion
-        instruction — on big style jumps the editor drifts ethnicity/identity when the
-        instruction only says 'same ethnicity' generically (observed: Pakistani father came
-        out a different ethnicity on cartoon→photo). Falls back to the generic instruction."""
+    def _style_enrich(self, instruction, msgs, ref_b64=None):
+        """Restate the concrete subjects inside a style-conversion instruction — on big style
+        jumps the editor drifts identity when the instruction only says 'the same subjects'
+        generically (observed: a father came out a different ethnicity on cartoon→photo).
+        The rewriter now SEES the image when available, so the subjects it names are the ones
+        actually in the picture — a cat stays 'the orange tabby cat', never a guessed person.
+        Falls back to the generic instruction."""
         ctx = self._edit_context(msgs)
-        if not ctx:
+        if not ctx and not ref_b64:
             return instruction
         try:
             r = requests.post(f"{self.ollama}/api/generate", json={
                 "model": self.chat_model,
-                "system": ("You tighten image style-conversion instructions. Using the conversation, "
-                           "rewrite the instruction so every person is named concretely — age, gender, "
-                           "ethnicity and skin tone (e.g. 'the Pakistani father, a South Asian man in "
-                           "his 30s with brown skin, and his 10-year-old South Asian son') — instead of "
-                           "generic wording like 'the same people'. Keep the conversion command, the "
-                           "style description, and the 'Change ONLY the rendering style' ending intact. "
-                           "ONE instruction under 110 words. Output ONLY the instruction text."),
+                "system": ("You tighten image style-conversion instructions. Name every subject "
+                           "concretely AS IT ACTUALLY APPEARS in the image/conversation — species "
+                           "or kind, colors or markings, and for people their age, gender, "
+                           "ethnicity and skin tone — instead of generic wording like 'every "
+                           "subject'. NEVER introduce a subject that is not visibly there. Keep "
+                           "the conversion command, the style description, and the 'changing ONLY "
+                           "the rendering style' ending intact. ONE instruction under 110 words. "
+                           "Output ONLY the instruction text."),
                 "prompt": f"Conversation:\n{ctx}\n\nInstruction:\n{instruction}\n\nRewritten instruction:",
+                **({"images": [ref_b64]} if ref_b64 else {}),
                 "stream": False, "think": False, "keep_alive": 0,
                 "options": {"temperature": 0.3, "num_predict": 260}}, timeout=240)
             out = (r.json().get("response") or "").strip().strip('"')
-            if out and "convert" in out.lower() and len(out) < 1200:
+            if out and ("transform" in out.lower() or "convert" in out.lower()) and len(out) < 1200:
                 return out
         except Exception:
             pass
@@ -1293,30 +1334,32 @@ class Pipe:
             r"didn'?t (?:change|work|do|listen)|doesn'?t (?:look|seem)|"
             r"(?:way|much) (?:more|older|younger|bigger|smaller))\b", (text or "").lower()))
 
+    # Fallback rewrite contract, used only when the media_session sidecar is missing or no
+    # reference image is available. The shipped path is ms.EDIT_REWRITE_VISION_SYS with the
+    # reference image ATTACHED — the official Qwen edit enhancer is a VLM, and a text-only
+    # rewriter is exactly what invents subjects. The old prompt's worked examples ('the young
+    # woman on the right', ethnicity lists) were copied verbatim by the model onto non-people
+    # images; this fallback names its rules without example subjects.
     _EDIT_REWRITE_SYS = (
-        "You rewrite photo-editing requests into instructions for the Qwen-Image-Edit model, which sees "
-        "the photo alongside your instruction. You are given the conversation so far; rewrite ONLY the "
-        "last user request. Rules: ONE imperative instruction under 80 words. Use absolute, concrete "
-        "visual terms for the target state, never relative wording — e.g. \"make the son a bit older, "
-        "like 18\" becomes \"Change the boy into an 18-year-old young man: adult height and build, mature "
-        "facial features, light stubble, defined jawline.\" Name the subject as it appears in the photo "
-        "(\"the boy\", \"the young woman on the right\"), never \"it\" or \"him\". The editor is "
-        "conservative and under-applies changes, so state the change emphatically. When transforming a "
-        "person, RESTATE the traits that must survive the change — ethnicity and skin tone (take them "
-        "from the conversation, e.g. Pakistani/South Asian), hair colour, family resemblance, clothing — "
-        "the editor drifts to a generic different-looking person if you don't. For age changes name the "
-        "life stage and bracket it: \"a 10-year-old school-age girl — clearly older than a toddler, "
-        "clearly younger than a teenager\". End the instruction with what must stay unchanged (identity, "
-        "clothing, background, lighting) unless the user asked to change those too. Then output a second "
-        "line: \"AVOID: \" plus 3-8 comma-separated visual traits the RESULT must not contain — for age "
-        "changes bracket BOTH sides (e.g. for 10 years old: toddler, preschooler, teenager, adult woman) "
-        "and add ethnicity-drift terms when ethnicity must be kept (e.g. East Asian features). Output "
-        "EXACTLY two lines:\nEDIT: <instruction>\nAVOID: <traits>"
+        "You rewrite a photo-editing request into ONE imperative instruction under 80 words "
+        "for the Qwen-Image-Edit model, which sees the photo alongside your instruction. You "
+        "are given the conversation so far; rewrite ONLY the last user request. Keep the core "
+        "intention unchanged — only make it clearer, concrete and visually feasible. Refer to "
+        "subjects the way the conversation describes them; NEVER introduce a subject the "
+        "conversation does not mention. Use absolute target states, not relative wording "
+        "('a bit older' becomes a concrete age and its visible traits). When changing a "
+        "person, restate the traits that must survive (skin tone, hair, clothing, build). "
+        "End with what must stay unchanged. Then a second line 'AVOID: ' plus 3-8 "
+        "comma-separated visual traits the RESULT must not contain, drawn from the actual "
+        "request. Output EXACTLY two lines:\nEDIT: <instruction>\nAVOID: <traits>"
     )
 
     def _edit_context(self, msgs, limit=8):
         """Compact 'user:/assistant:' transcript (media scrubbed) so the rewriter can resolve
-        references like 'the son' from earlier turns."""
+        references like 'the son' from earlier turns. Injected blocks (memory filter, code
+        interpreter) are stripped from user lines — OpenWebUI PREPENDS them to the user's
+        message, so without stripping the 300-char cap kept the injection and DROPPED the
+        user's actual words, feeding the rewriter memories instead of the request."""
         lines = []
         for m in (msgs or [])[-limit:]:
             role, c = m.get("role"), m.get("content", "")
@@ -1328,6 +1371,8 @@ class Pipe:
                     t = (t + " [attached image]").strip()
             else:
                 t = str(c or "")
+            if role == "user":
+                t = self._strip_injected_context(t)
             t = self._scrub(t).strip()
             if t:
                 lines.append(f"{role}: {t[:300]}")
@@ -1439,6 +1484,33 @@ class Pipe:
         except Exception:
             return True, ""
 
+    def _verify_edit(self, original_ask, instruction, ref_b64, result_b64):
+        """(ok, fix) for an EDIT — the checker sees BOTH images (original first, result
+        second) and judges against the user's ORIGINAL ask, not the rewritten instruction.
+
+        This is the check the father+son incident sailed through: the old single-image QA
+        verified the result against its own (possibly derailed) instruction, so an edit
+        that swapped the subjects entirely passed with qa_rounds=0. Judging adherence to
+        the original ask AND preservation against the original image catches both a bad
+        rewrite and a wrong reference. Falls back to the single-image check without the
+        sidecar; fails open on errors, counted like _verify_image."""
+        if not ms or not ref_b64:
+            return self._verify_image(original_ask or instruction, result_b64)
+        try:
+            out = self._generate(
+                {"model": self.vision_model, "system": ms.VERIFY_EDIT_SYS,
+                 "prompt": ms.edit_qa_user_prompt(original_ask, instruction),
+                 "images": [ref_b64, result_b64], "stream": False, "think": False,
+                 "keep_alive": 0, "options": {"temperature": 0.1, "num_predict": 220}},
+                fmt=_VERIFY_FORMAT, timeout=300).strip()
+            d = _extract_json(out)
+            if isinstance(d, dict) and isinstance(d.get("ok"), bool):
+                fix = str(d.get("fix") or "").strip()
+                return d["ok"], ("" if fix.lower().startswith("none") else fix)
+            return self._parse_verdict(out)
+        except Exception:
+            return True, ""
+
     def _generate(self, payload, fmt=None, timeout=180):
         """POST /api/generate, optionally schema-constrained, with a one-shot self-heal.
 
@@ -1471,16 +1543,21 @@ class Pipe:
         fix = (f.group(1).strip().strip("*").strip() if f else "")
         return ok, ("" if fix.lower().startswith("none") else fix)
 
-    def _enhance_edit(self, instruction, msgs):
-        """(explicit_instruction, negative) via the local LLM. Vague relative asks ('a bit older')
-        under-move the identity-preserving editor; explicit absolute target states move it properly.
+    def _enhance_edit(self, instruction, msgs, ref_b64=None):
+        """(explicit_instruction, negative) via the local VLM, which SEES the reference image
+        (this tenant ships a real projector). Grounding the rewrite in the actual picture is
+        what stops it naming subjects that aren't there — the official Qwen edit enhancer is
+        a VLM for exactly this reason. Vague relative asks ('a bit older') under-move the
+        identity-preserving editor; explicit absolute target states move it properly.
         Falls back to the original instruction and no negative."""
         ctx = self._edit_context(msgs)
-        prompt = (f"Conversation:\n{ctx}\n\nRewrite the last user request."
+        prompt = (f"Conversation:\n{ctx}\n\nRewrite the last user request: {instruction}"
                   if ctx else f"Request: {instruction}\n\nRewrite this request.")
+        rewrite_sys = ms.EDIT_REWRITE_VISION_SYS if (ms and ref_b64) else self._EDIT_REWRITE_SYS
         try:
             out = self._generate(
-                {"model": self.chat_model, "system": self._EDIT_REWRITE_SYS, "prompt": prompt,
+                {"model": self.chat_model, "system": rewrite_sys, "prompt": prompt,
+                 **({"images": [ref_b64]} if ref_b64 else {}),
                  "stream": False, "think": False, "keep_alive": 0,
                  # 220 was too small before any of this: an 80-word instruction is ~110 tokens on
                  # its own, before 3-8 AVOID traits and their separators. A truncated reply loses
@@ -1682,26 +1759,24 @@ class Pipe:
                               f"`docker restart comfyui`, then try again."), {}
         return None, f"⚠️ {kind} generation failed: {err}", {}
 
+    # Fallback enhancement contract if the media_session sidecar is missing. The shipped
+    # version (ms.T2I_ENHANCE_SYS) follows the RedCraft/Krea-2 guidance: photographic
+    # register by default, style words ONLY when the user names one, and NO style examples
+    # in the prompt. The old prompt contained a literal cartoon example, and the model
+    # copied it — "a cat jumping off a burning building" (no style named) was generated as
+    # "a vibrant 3D animated cartoon-style illustration". That example is gone for good.
+    _T2I_ENHANCE_FALLBACK = (
+        "You expand a user's idea into ONE natural-language prompt for a photorealistic "
+        "image model. Keep every subject, count, age, gender, ethnicity, object and action "
+        "exactly as stated — never add or substitute subjects. Elaborate ONLY along "
+        "photographic axes (setting, composition, lighting, materials, camera and lens). "
+        "Use style words (cartoon, anime, painting) ONLY if the user used them. Under 100 "
+        "words. Output ONLY the prompt text."
+    )
+
     def _enhance(self, prompt):
         """Expand a short idea into a vivid image prompt via the local LLM. Falls back to the original."""
-        sys = (
-            "You are a prompt engineer for the Krea 2 image model. Rewrite the user's idea "
-            "as ONE vivid, richly detailed image prompt: subject, setting, lighting, mood, composition, "
-            "style, and camera/lens where useful. The user's explicit specifications are HARD requirements: "
-            "every person, count, age, gender, ethnicity, object, relationship AND art style they name "
-            "MUST be kept exactly — none added, dropped, or aged up or down. If the user names an art "
-            "style or medium ('animated picture', 'cartoon', 'anime', 'watercolor', 'oil painting', "
-            "'pixel art' …), OPEN the prompt by stating that style emphatically (e.g. 'A vibrant 3D "
-            "animated cartoon-style illustration, stylized characters with expressive faces, NOT "
-            "photorealistic') and use that style's vocabulary throughout — no camera or lens language. "
-            "Only when no style is named, write it photorealistic with camera/lens detail. Describe EACH "
-            "named person as their own clause with concrete age cues (e.g. '10 year old son' becomes "
-            "'their 10-year-old son, a school-age boy a head shorter than the adults'; '20 year old "
-            "daughter' becomes 'their 20-year-old daughter, a young adult woman'), repeating the "
-            "ethnicity for each person, and state the total number of people ('exactly four people'). "
-            "When several people are specified keep every face in sharp focus — no shallow depth of "
-            "field. Keep it under 100 words. Output ONLY the prompt text — no preamble, no quotes, no lists."
-        )
+        sys = ms.T2I_ENHANCE_SYS if ms else self._T2I_ENHANCE_FALLBACK
         try:
             r = requests.post(f"{self.ollama}/api/generate",
                 json={"model": self.chat_model, "system": sys, "prompt": prompt, "stream": False,
@@ -1776,11 +1851,12 @@ class Pipe:
                               EDIT_TIERS["best"])
 
     def _build_t2i_wf(self, prompt, seed):
-        # Krea 2 Turbo text-to-image (8-step; negative is zeroed conditioning, cfg 1).
+        # RedCraft (Krea 2 base) text-to-image (8-step; negative is zeroed conditioning, cfg 1).
+        # krea2_turbo_fp8_scaled.safetensors stays on disk beside it — swap back to revert.
         # LoRA + size mirror the "Image" pipe's valves so both produce the same subject (F14).
         model_ref = ["u", 0]
         wf = {
-          "u":   {"class_type": "UNETLoader", "inputs": {"unet_name": "krea2/krea2_turbo_fp8_scaled.safetensors", "weight_dtype": "default"}},
+          "u":   {"class_type": "UNETLoader", "inputs": {"unet_name": "krea2/redcraft23INT8INT4FP8_30Krea2.safetensors", "weight_dtype": "default"}},
           "c":   {"class_type": "CLIPLoader", "inputs": {"clip_name": "qwen3vl_4b_fp8_scaled.safetensors", "type": "krea2", "device": "default"}},
           "v":   {"class_type": "VAELoader", "inputs": {"vae_name": "qwen_image_vae.safetensors"}},
           "pos": {"class_type": "CLIPTextEncode", "inputs": {"text": prompt, "clip": ["c", 0]}},
@@ -1815,7 +1891,11 @@ class Pipe:
         except Exception:
             pass  # instrumentation must never cost a user their generation
 
-    def _gen_image(self, prompt, ref_b64, msgs=None):
+    def _gen_image(self, prompt, ref_b64, msgs=None, original=None):
+        # `original` is the user's verbatim ask (pre-instruction-stripping) — QA judges
+        # against it, never against the rewritten instruction alone: the rewrite may itself
+        # be the thing that derailed. Falls back to `prompt` for older callers.
+        original = original or prompt
         # Free ComfyUI's VRAM up front so the dolphin/gemma prompt-rewrite helpers below don't load
         # into a card ComfyUI still occupies (~13.7 GB) and run partly on CPU.
         self._comfy_free()
@@ -1831,11 +1911,13 @@ class Pipe:
             lightning = False
             if style:  # whole-image restyle: purpose-built instruction, hard sampler push
                 instruction, negative = style
-                instruction = self._style_enrich(instruction, msgs)  # before _free_vram (gemma)
+                # The enricher SEES the image (before _free_vram, model still resident), so
+                # the subjects it names are the ones actually in the picture.
+                instruction = self._style_enrich(instruction, msgs, ref_b64=ref_b64)
                 cfg, steps = 6.0, 24
             else:
-                if prompt:  # rewrite BEFORE _free_vram so Gemma isn't unloaded and reloaded
-                    instruction, negative = self._enhance_edit(instruction, msgs)
+                if prompt:  # rewrite BEFORE _free_vram so the model isn't unloaded and reloaded
+                    instruction, negative = self._enhance_edit(instruction, msgs, ref_b64=ref_b64)
                 if self._edit_boost(prompt):
                     cfg, steps = 6.0, 24
                 else:
@@ -1855,7 +1937,9 @@ class Pipe:
                              err=err[:160])
                 return err
             render_s = round(time.time() - t_render, 1)
-            # Vision QA: did the edit deliver what was asked? Up to two harder retries if not.
+            # Vision QA: judged against the user's ORIGINAL ask, with BOTH images (original
+            # first, result second) — a result that satisfied a derailed instruction but
+            # swapped the subjects now fails. Up to two harder retries if not.
             qa_note = ""
             qa_rounds, first_fix = 0, None
             t_qa = time.time()
@@ -1863,7 +1947,8 @@ class Pipe:
                 cur = instruction
                 for _round in (1, 2):
                     self._comfy_free()
-                    ok, fix = self._verify_image(instruction, base64.b64encode(data).decode())
+                    ok, fix = self._verify_edit(original, cur, ref_b64,
+                                                base64.b64encode(data).decode())
                     if ok:
                         break
                     if not fix:
@@ -2818,10 +2903,10 @@ class Pipe:
         inner = self._achat_stream(messages, guard_text=guard, keep_system=True, force_model=model)
         return self._locked_stream(inner) if entry == "coder" else inner
 
-    async def _gen_and_cache(self, cid, prompt, ref, msgs=None):
+    async def _gen_and_cache(self, cid, prompt, ref, msgs=None, original=None):
         def run():
             with _gpu_lock():  # only one VRAM-manipulating pipeline at a time
-                return self._gen_image(prompt, ref, msgs)
+                return self._gen_image(prompt, ref, msgs, original=original)
         result = await asyncio.to_thread(run)
         b64 = self._extract_b64(result)
         if b64:  # remember the produced image so a later "make it bigger" can edit it (true LRU)
@@ -2829,6 +2914,8 @@ class Pipe:
             self._recent[cid] = b64
             while len(self._recent) > 30:
                 self._recent.pop(next(iter(self._recent)))
+            if ms:  # write-through to the persistent per-chat store: survives deploys and
+                ms.remember_image(cid, b64)  # is visible to the Image/Photoreal pipes too
         return result
 
     def _cache_video(self, cid, prompt, seed, opts=None):
@@ -2992,12 +3079,20 @@ class Pipe:
         return result
 
     async def pipe(self, body: dict, __metadata__=None, __event_emitter__=None, __event_call__=None,
-                   __user__=None):
+                   __user__=None, __task__=None):
         emitter = __event_emitter__
         # None whenever nothing can be asked (direct API, eval harness); _confirm_render fails open.
         confirm = __event_call__
         msgs = body.get("messages", [])
         text, ref = self._last_user(msgs)
+        # OpenWebUI background tasks (title / follow-up / tags / web-search decisions) arrive
+        # through this pipe whenever the configured task model isn't visible in the model
+        # registry. Before this guard each one ran the FULL router — real 14-174 s GPU renders
+        # of '### Task:' boilerplate (see media_metrics.jsonl) that also overwrote the chat's
+        # last-image cache with junk, which is how "make this picture realistic" got applied
+        # to a stranger's photo. Answer them as plain text on the small task model instead.
+        if __task__ or (ms and ms.is_task_request(text)):
+            return ms.answer_task(self.ollama, msgs) if ms else ""
         # OpenWebUI PREPENDS retrieved file/knowledge context to the LAST USER message (RAG_SYSTEM_CONTEXT
         # defaults false), so `text` can be a multi-kB document blob. Every routing predicate below reads
         # `text`, and _is_image_request/_is_video_request fire on a bare "picture of"/"draw"/"video"
@@ -3022,13 +3117,19 @@ class Pipe:
         if entry != "auto":
             return self._entry_chat_stream(entry, self._ollama_messages(msgs))
         cid = self._chat_id(body, __metadata__)
-        # What media does this conversation currently revolve around?
+        # What media does this conversation currently revolve around? History first, then the
+        # in-memory caches, then the persistent per-chat store — the last one survives deploys
+        # and mid-chat model switches (it is shared with the Image and Photoreal pipes).
         kind, media = self._recent_media(msgs)
         if kind is None:  # history scan found nothing → in-memory caches (this conversation only)
             if cid in self._recent_video:
                 kind, media = "video", self._recent_video[cid]
             elif cid in self._recent:
                 kind, media = "image", self._recent[cid]
+            elif ms:
+                persisted = ms.recall_image(cid)
+                if persisted:
+                    kind, media = "image", persisted
         # "make it animated / a cartoon" while an image is on the table is a STYLE EDIT of that
         # image, not a video ("make a video of it / animate this / make it move" still are).
         style_edit = kind == "image" and text and not ref and self._style_conversion(text)
@@ -3081,7 +3182,7 @@ class Pipe:
             result, el = await self._tracked(emitter, "Generating image",
                                              self._gen_and_cache(cid, cleaned_img, None))
             return await self._finish(emitter, result, "Generated", el,
-                                      f"Krea 2 · {IMG_T2I_W}×{IMG_T2I_H} · 8 steps")
+                                      f"RedCraft · {IMG_T2I_W}×{IMG_T2I_H} · 8 steps")
         # Follow-up about the most recent VIDEO → regenerate it with the change folded into the
         # original prompt, SAME seed (keeps the scene recognizably similar). Multi-shot histories
         # (shots joined with ' || ') are re-planned with the change applied.
@@ -3129,8 +3230,11 @@ class Pipe:
             # expensive=True: 162 s median, the slowest per-result operation on the box.
             if not await self._confirm_render(confirm, "image edit", f"Edit the image: “{instruction[:120]}”"):
                 return self._declined("image edit")
+            # `original=text`: QA must judge against the user's verbatim ask, not the
+            # stripped/rewritten instruction chain.
             result, el = await self._tracked(emitter, "Editing image",
-                                             self._gen_and_cache(cid, instruction, img, msgs))
+                                             self._gen_and_cache(cid, instruction, img, msgs,
+                                                                 original=text))
             return await self._finish(emitter, result, "Edited", el, "Qwen-Image-Edit")
         # Chat. If the conversation revolves around an image the pipe GENERATED and this turn is a
         # question about it, attach the pixels to the last user message so the vision model (gemma4)

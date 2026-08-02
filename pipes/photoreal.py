@@ -1,9 +1,9 @@
 """
 title: Uncensored
 author: local
-version: 0.5.0
+version: 0.6.0
 required_open_webui_version: 0.5.0
-description: Photorealistic uncensored images (Lustify SDXL) via local ComfyUI. Reference-image edits run through Qwen-Image-Edit so the subject stays the same person. Non-blocking (async); auto-frees GPU VRAM.
+description: Photorealistic uncensored images (Lustify SDXL) via local ComfyUI. Reference-image edits run through Qwen-Image-Edit so the subject stays the same person; follow-ups ("make this picture animated", "remove the hat") keep editing the previous picture instead of generating a stranger, and background-task calls never render. Non-blocking (async); auto-frees GPU VRAM.
 """
 import asyncio, base64, os, random, re, sys, time
 import requests
@@ -36,6 +36,14 @@ except Exception as _e:                                       # noqa: BLE001 - m
 
     def metric(path, **fields):
         pass
+
+# Conversation continuity (task guard, persistent last-image store, reference recovery,
+# style-conversion instructions) — same deployment story as identity_edit above, same
+# degrade-gracefully contract: without it the pipe behaves like the pre-continuity build.
+try:
+    import media_session as ms
+except Exception:  # noqa: BLE001 - must never raise
+    ms = None
 
 NEG = ("cartoon, anime, drawing, painting, illustration, 3d, render, cgi, sketch, "
        "deformed, disfigured, bad anatomy, bad hands, extra fingers, mutated hands, "
@@ -102,11 +110,13 @@ class Pipe:
 
     # ---- helpers ----
     def _parse(self, messages):
-        """(text, reference_image_b64_or_None). Text comes from the latest user message; if that
-        message carries no image, reuse the most recent image from the last ~6 user turns — OpenWebUI
-        keeps an upload attached to its ORIGINAL message, so a follow-up turn has no image_url part
-        and this pipe would otherwise silently drop img2img back to txt2img."""
-        text, img, seen = None, None, 0
+        """(text, reference_image_b64_or_None, ref_is_current). Text comes from the latest user
+        message; if that message carries no image, reuse the most recent upload from the last ~6
+        user turns — OpenWebUI keeps an upload attached to its ORIGINAL message, so a follow-up
+        turn has no image_url part. ref_is_current says whether the image was attached to THIS
+        message: an old upload must not silently hijack a fresh t2i request into img2img, so the
+        caller only uses a non-current reference when the text actually asks for a modification."""
+        text, img, seen, current = None, None, 0, False
         for m in reversed(messages or []):
             if m.get("role") != "user":
                 continue
@@ -129,9 +139,40 @@ class Pipe:
                 text = (cur_text or "").strip()
             if cur_img and img is None:  # most recent image within the window is the reference
                 img = cur_img
+                current = seen == 1
             if img is not None or seen >= 6:
                 break
-        return (text or ""), img
+        return (text or ""), img, current
+
+    # Fresh-request phrasing ("create/draw a …", "another one") that must stay t2i even
+    # when a previous image exists. Everything else with edit intent modifies the picture
+    # on the table.
+    _FRESH = re.compile(
+        r"\b(create|generate|draw|sketch|paint|illustrate|design|produce|render)\b"
+        r".{0,30}\b(image|picture|photo|pic|portrait|scene|of)\b"
+        r"|\b(another|new)\s+(one|image|picture|photo)\b", re.I)
+    _EDIT_INTENT = re.compile(
+        r"\b(edit|change|replace|remove|delete|erase|swap|add|put|turn|recolou?r|adjust|"
+        r"retouch|modify|fix|crop|rotate|blur|bigger|smaller|larger|zoom|brighter|darker|"
+        r"get rid of|without|instead of|undress|dress|wearing|naked|nude|topless)\b", re.I)
+    _DEICTIC = re.compile(
+        r"\b(this|that|it)\s+(image|picture|photo|pic|drawing|one)\b"
+        r"|\b(make|turn|keep)\s+(it|this|that|him|her|them)\b", re.I)
+
+    def _wants_edit_followup(self, text):
+        """A text-only follow-up that modifies the previous picture rather than asking
+        for a new one. Style conversions ('make this picture animated') and deictic
+        references ('make this guy…') count; fresh 'create a picture of…' does not."""
+        t = (text or "").strip()
+        if not t:
+            return False
+        if ms and ms.style_conversion(t):
+            return True
+        if self._DEICTIC.search(t):
+            return True
+        if self._FRESH.search(t):
+            return False
+        return bool(self._EDIT_INTENT.search(t))
 
     def _upload(self, img_b64):
         raw = base64.b64decode(img_b64)
@@ -321,6 +362,7 @@ class Pipe:
 
         # All LLM work happens BEFORE _free_vram, or we evict the model we are about to call.
         avoid = ""
+        qwen_negative = ""
         if ref_b64:
             if engine == "qwen":
                 tier = resolve_tier(getattr(self.valves, "EDIT_QUALITY", "balanced"))
@@ -328,6 +370,16 @@ class Pipe:
                 # Qwen takes an imperative instruction natively, so the raw request is already the
                 # right shape. No rewrite — the wrong rewrite (SDXL tag soup) would actively hurt.
                 instruction = prompt or "improve the overall quality, keep everything else the same"
+                # EXCEPT whole-image restyles ("make this picture animated"): those get the
+                # purpose-built instruction, and always the full non-Lightning tier — the
+                # negative (the style being left behind) only bites at cfg > 1. Note the pipe's
+                # SDXL NEG (which bans cartoon/anime for t2i) is NOT used here, so a requested
+                # style is never fought by the pipe's own negative prompt.
+                style = ms.style_conversion(prompt) if (ms and prompt) else None
+                if style:
+                    instruction, qwen_negative = style
+                    tier = resolve_tier("best")
+                    meta["tier"] = "best"
             else:
                 instruction = prompt or "photorealistic, highly detailed, sharp focus, natural lighting"
                 if getattr(self.valves, "REWRITE", True) and prompt:
@@ -345,7 +397,7 @@ class Pipe:
                 return f"⚠️ Could not upload reference image: {e}", meta
             if engine == "qwen":
                 wf = build_qwen_edit_wf(instruction, ref_name, seed, tier["cfg"], tier["steps"],
-                                        negative="", lightning=tier["lightning"])
+                                        negative=qwen_negative, lightning=tier["lightning"])
                 out_node = "s"
             else:
                 neg = f"{NEG}, {avoid}" if avoid else NEG
@@ -360,7 +412,8 @@ class Pipe:
         metric(METRICS_PATH, job="photo_edit" if ref_b64 else "photo_t2i", ok=not err,
                engine=meta["engine"], seed=seed, tier=meta.get("tier"),
                denoise=DENOISE if (ref_b64 and engine == "sdxl") else 1.0,
-               rewrote=bool(avoid), render_s=meta["render_s"], err=(err or "")[:160] or None)
+               rewrote=bool(avoid), render_s=meta["render_s"],
+               request=(prompt or "")[:160], err=(err or "")[:160] or None)
         if err:
             return err, meta
         # Seed in the alt-text so it survives a page reload and a copy-paste, matching the
@@ -413,15 +466,37 @@ class Pipe:
             warn = " · Qwen unavailable, identity may drift"
         return f"Lustify SDXL img2img · d{DENOISE} · 30 steps · {seed}{warn}"
 
-    async def pipe(self, body: dict, __event_emitter__=None):
+    async def pipe(self, body: dict, __event_emitter__=None, __metadata__=None, __task__=None):
         emitter = __event_emitter__
-        text, ref = self._parse(body.get("messages", []))
+        msgs = body.get("messages", [])
+        text, ref, ref_is_current = self._parse(msgs)
+        # OpenWebUI background tasks (title/tags/follow-ups/search decisions) must never
+        # render — they used to run real SDXL jobs on task boilerplate through this pipe.
+        if ms and ms.is_task_request(text, __task__):
+            return ms.answer_task(self.ollama, msgs)
         if not text and not ref:
             return "Type what you'd like me to create (and optionally attach a reference image)."
+        cid = ms.chat_id_of(body, __metadata__) if ms else "default"
+        wants_edit = self._wants_edit_followup(text)
+        # A stale upload from an earlier turn must not hijack a fresh request into img2img.
+        if ref is not None and not ref_is_current and not wants_edit:
+            ref = None
+        # Follow-up modification with no attached image → edit the most recent picture in
+        # this chat: history first (any OWUI message shape, generated images included),
+        # then the persistent per-chat store (survives deploys and model switches). This
+        # is the fix for "make this picture animated" generating an unrelated stranger —
+        # the request now EDITS the previous image via Qwen instead of running a fresh t2i
+        # with the follow-up words as the whole prompt.
+        if ref is None and text and wants_edit and ms:
+            ref = ms.find_recent_image(msgs) or ms.recall_image(cid)
         text, seed = parse_seed(text)
         editing = ref is not None
         label = "Editing image" if editing else "Generating image"
         (result, meta), el = await self._tracked(
             emitter, label, asyncio.to_thread(self._generate, text, ref, seed))
+        if ms and isinstance(result, str):
+            m = re.search(r"data:image/[^;]+;base64,([A-Za-z0-9+/=]+)", result)
+            if m:
+                ms.remember_image(cid, m.group(1))
         return await self._finish(emitter, result, "Edited" if editing else "Generated", el,
                                   self._detail(meta, editing))
