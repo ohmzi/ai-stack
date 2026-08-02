@@ -23,3 +23,6 @@ compose/.env
 
 # ntfy runtime state — auth.db holds password/token hashes; never in git
 compose/ntfy/
+
+# identity-drift harness artifacts — generated PNGs, regenerate with tests/test_identity_drift.py
+.identity-drift/

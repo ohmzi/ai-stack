@@ -1,0 +1,53 @@
+{
+  "_why": "Baseline for the identity-preserving edit path. Regenerate with tests/test_identity_drift.py.",
+  "_measured": "2026-08-01, RTX 3090, seed 20260801, edit='change the background to a sunlit green garden'",
+  "_subject": "synthetic SDXL txt2img portrait, face 28.7% of frame (an EASY case - the reported failure had a face at ~5-10%)",
+  "_gate": {
+    "cosine_min": 0.9,
+    "skin_de_max": 12.0,
+    "eye_de_max": 12.0,
+    "hair_de_max": 14.0,
+    "_note": "SFace's published 0.363 verification threshold is NOT the gate - it passed edit_sdxl.png, which is visibly a different person."
+  },
+  "results": {
+    "edit_qwen.png": {
+      "face_cosine": 0.958,
+      "geometry_ok": true,
+      "same_person": true,
+      "sface_verify_would_pass": true,
+      "note": "",
+      "skin_de": 1.556,
+      "eye_de": 8.42,
+      "hair_de": 2.863,
+      "face_mae": 32.489,
+      "whole_mae": 36.944,
+      "grain_kept": 104.412
+    },
+    "edit_sdxl.png": {
+      "face_cosine": 0.753,
+      "geometry_ok": false,
+      "same_person": false,
+      "sface_verify_would_pass": true,
+      "note": "",
+      "skin_de": 6.363,
+      "eye_de": 15.542,
+      "hair_de": 15.065,
+      "face_mae": 29.964,
+      "whole_mae": 28.567,
+      "grain_kept": 376.169
+    },
+    "edit_sdxl_rewritten.png": {
+      "face_cosine": 0.853,
+      "geometry_ok": false,
+      "same_person": false,
+      "sface_verify_would_pass": true,
+      "note": "",
+      "skin_de": 3.814,
+      "eye_de": 7.892,
+      "hair_de": 11.449,
+      "face_mae": 22.068,
+      "whole_mae": 20.364,
+      "grain_kept": 275.635
+    }
+  }
+}
