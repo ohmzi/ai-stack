@@ -49,6 +49,7 @@ SOURCES = {
 TWINS = {
     "pipes/photoreal.py": "pipes/live/uncensored.py",
     "pipes/shared/identity_edit.py": "/volume1/docker/openwebui/config/identity_edit.py",
+    "pipes/shared/media_session.py": "/volume1/docker/openwebui/config/media_session.py",
 }
 
 results = []

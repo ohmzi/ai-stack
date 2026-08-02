@@ -65,6 +65,7 @@ PIPES = {
 # its own.
 SIDECARS = {
     "pipes/shared/identity_edit.py": "/app/backend/data/identity_edit.py",
+    "pipes/shared/media_session.py": "/app/backend/data/media_session.py",
 }
 
 REPLACEMENTS = ("from utils", "from apps", "from main", "from config")
