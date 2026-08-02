@@ -185,6 +185,23 @@ take on the correction rate once there is enough traffic to read one — which i
 
 Percentiles, not means: the mean of a bimodal distribution describes nothing that ever happens.
 
+The file earns its keep in a second way, unplanned: it is what **diagnosed** the 2026-08-02
+continuation failure. Reading it back showed dozens of `job=image` / `job=edit` rows whose
+`request` field was Open WebUI's own `### Task:` boilerplate — background title/tag/follow-up
+prompts running as 14–174 s GPU renders, and overwriting each chat's last-image memory in the
+process. No test asserted that, and no symptom named it; the log simply had the evidence
+sitting in it. Instrumentation that records the *request* alongside the timing is the reason
+that was a ten-minute diagnosis instead of a week of guessing.
+
+That failure mode now has a standing check — any `### Task` row is a regression:
+
+```bash
+grep -c '### Task' /volume1/docker/openwebui/config/media_metrics.jsonl   # must be 0
+```
+
+`image_krea` was writing no metrics at all until then, so its share of that waste was
+invisible; it emits rows now.
+
 ### 1.7 Sampling, and why CO01 stopped being flaky
 
 The pipe sent no `options` to Ollama and `hermes-genesis` carries no `PARAMETER` lines, so every
@@ -250,7 +267,8 @@ Some checks are standalone harnesses rather than `cases.json` cases:
 |---|---|
 | `tests/test_websearch.py` | Live SearXNG round trip, grounded answer, `[id]` citations preserved |
 | `tests/test_gpu_diagnosis.py` | A revoked GPU is reported as such, not as a wedged allocator (see `TROUBLESHOOTING.md`) |
-| `tests/test_deployed.py` | **OpenWebUI is running the code in this repo** — see below |
+| `tests/test_deployed.py` | **OpenWebUI is running the code in this repo** — pipes *and* the shared sidecar modules (`identity_edit`, `media_session`) — see below |
+| `tests/test_continuation.py` | The follow-up-after-an-image contract (49 checks, no GPU): `### Task:`/`__task__` detection and that `pipe()` short-circuits on it in all three image pipes; reference recovery across every message shape OpenWebUI 0.10 sends (str content, list parts, and the `output` field a pipe reply actually lands in); the persistent per-chat store; style-conversion detection and its subject-agnostic instruction; and the routing guards — `"make this picture realistic"` is never a fresh render, `"can you make it brighter?"` and `"have them use chopsticks"` edit rather than falling to chat |
 | `tests/test_alert_templates.py` | Every alert kind renders a real sentence inside the SMS budget; degenerate payloads still deliver; page titles cannot inject markup |
 | `tests/test_alert_setup.py` | The alert setup gate: phone asked for before scheduling, parked request survives the turn, E.164 rule identical on both sides of the container boundary |
 | `tests/test_price_watch.py` | Price extraction: confidence ranking, Amazon's JS-rendered buy box, first-run alerts, repeat dampening, fetch failure as a reported outcome |
@@ -444,6 +462,16 @@ it trains you to ignore a red result.*
 - **No calibration set.** Judge verdicts have not been checked against human ratings. For a
   personal stack that is proportionate; treat `judge` results as weaker evidence than `execute` or
   `regex`.
+- **Multi-turn media continuity is only tested at the routing layer.** `tests/test_continuation.py`
+  proves the pipe picks the right reference image and the right branch; it does not prove the
+  *render* preserved the subject, because that needs a GPU and a VQA judgement. The 2026-08-02
+  regression was verified by hand — generate, follow up, look at both images — and the single
+  `media-editing` case (ME01) is the only automated coverage of an edit's content. The natural
+  extension is a two-turn case whose grader asks the vision model "same subject, new style?"
+  against the *pair*, which is exactly what the new `VERIFY_EDIT_SYS` prompt does in production.
+- **The style-conversion failure mode is unmeasured.** Anime→photorealistic can drift a subject's
+  species or identity on the way (observed once: a leaping cat came back slightly dog-like, and QA
+  accepted it). No case pins how often; a `--repeat` run over a restyle pair would.
 
 ---
 

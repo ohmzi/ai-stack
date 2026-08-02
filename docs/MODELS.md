@@ -139,6 +139,9 @@ on — but it costs accuracy. Cutting context buys more, for free.
 
 ## Task model: `think: false`
 
+*(Historical — the live task model is `gemma3:1b`, which does not think. Kept because the
+mechanism still applies to any thinking model put in this slot.)*
+
 `gemma4:e2b` is a thinking model and OpenWebUI's task calls don't pass `think:false`, so by default
 it "thought" through every chat title (~1.4 s, ~871 hidden reasoning chars) and could return empty
 output on a tight token budget. There is no Modelfile switch — `PARAMETER think false` is rejected.
@@ -151,6 +154,40 @@ model row `gemma4:e2b` → advanced params → { "think": false }
 ```
 
 Verified: titles now generate in **~0.04 s** warm with zero thinking.
+
+## ⚠️ A task model that isn't *visible* silently becomes the chat model (2026-08-02)
+
+`task.model.default` / `task.model.external` are not honoured unconditionally.
+`get_task_model_id` (`utils/task.py:16-27`) only uses the configured id **if that id is
+present in the loaded model registry**; otherwise it falls back to the chat's current model —
+which, for a chat on a pipe, is *the pipe*. And a raw Ollama tag with no `model` row is
+admin-only in 0.10.2, so `gemma3:1b` was invisible and every title/tag/follow-up/search-query
+prompt was executed by the media pipes.
+
+That is not merely wasteful, though it was that too — `media_metrics.jsonl` showed 14–174 s
+**GPU renders** of `### Task:` boilerplate. Those renders also overwrote each chat's
+last-image memory, which is what made a follow-up edit act on the wrong picture. Full
+incident: [IMAGE_CONTINUATION.md](IMAGE_CONTINUATION.md).
+
+The pipes now defend themselves: each declares `__task__` in `pipe()` and answers task
+prompts as plain text on `gemma3:1b` (OpenWebUI pops `metadata` before the pipe sees the
+body, so the kwarg is the only usable marker). Giving `gemma3:1b` a real `model` row plus an
+access grant would additionally fix it server-side; the in-pipe guard makes that optional.
+
+## ComfyUI checkpoints (the media side)
+
+Not Ollama tenants, but they compete for the same 24 GB, so they belong in the same ledger.
+
+| Job | File | Notes |
+|---|---|---|
+| Text-to-image | `krea2/redcraft23INT8INT4FP8_30Krea2.safetensors` | **RedCraft** (Krea 2 base, INT8/INT4/FP8-scaled), 12.2 GB. Creator's spec: `ER_SDE`/Euler, simple, **cfg 1.0, 8–12 steps** — the pipes run 8. No trigger words. Swapped in 2026-08-02. |
+| Text-to-image (previous) | `krea2/krea2_turbo_fp8_scaled.safetensors` | Krea 2 Turbo. **Kept on disk** for rollback: change `self.unet` in `image_krea.py` and the `unet_name` in `auto_assistant._build_t2i_wf`. |
+| Instruction editing | `Qwen-Image-Edit-2509-Q4_K_M.gguf` | + `Qwen-Image-Edit-2509-Lightning-4steps` LoRA for the fast tiers. Shared CLIP/VAE with the t2i path. |
+| Uncensored t2i | `lustifySDXL.safetensors` | Photoreal only. |
+
+Raising steps toward 10–12 is the sanctioned quality lever for RedCraft; **cfg stays 1.0**,
+where a negative prompt is mathematically inert (measured — byte-identical output with and
+without one). Anything that depends on a negative must run a cfg > 1 tier.
 
 ## Considered, not adopted
 
@@ -209,7 +246,8 @@ download size, not just config.
 |---|---|
 | **The whole consolidation** | `ollama pull hf.co/unsloth/Qwen3.6-35B-A3B-GGUF:UD-IQ4_XS` (17.7 GB) and `ollama pull dolphin-venice:24b` (14 GB), then revert `chat_model`/`vision_model`/`coder_model` in `pipes/auto_assistant.py`, `text_model` in `uncensored.py (function id `uncensored`, shown as "Photoreal")`, and both in `image_krea.py`. Git history has the exact prior values. |
 | **Vision only** | `ollama pull gemma4:31b` (19 GB), set `self.vision_model`. |
-| **Task model → `gemma3:1b`** | set `task.model.default` / `task.model.external`, restart OpenWebUI. No download — it is still installed. |
+| **Task model → `gemma4:e2b`** | set `task.model.default` / `task.model.external` back, restart OpenWebUI. No download — it is still installed, and still carries `{"think": false}`. Note the visibility trap above: an id the registry cannot see is ignored in favour of the chat's model. |
+| **Image checkpoint → Krea 2 Turbo** | `self.unet` in `pipes/image_krea.py` and `unet_name` in `auto_assistant._build_t2i_wf`, then `python3 scripts/deploy_pipe.py --all`. The file was never deleted. |
 | **Re-create the main model** | The source GGUFs are kept at `/home/ohmz/models/hermes-genesis/` (18.3 GB) precisely so this does not need a re-download: `ollama create hermes-genesis:apex-compact -f Modelfile`. Worth keeping — the upstream repo's `:latest` tag resolves to **V3**, not the V5 build in use here, so a re-download would not reproduce it. |
 
 DB backups taken along the way: `webui.db.bak-genesis` (before the swap), `webui.db.bak-embedder`,

@@ -142,6 +142,53 @@ costs ~50 s of pointless VRAM-unload waiting.
 
 Covered by `tests/test_gpu_diagnosis.py`.
 
+## A follow-up edit changed the wrong picture (2026-08-02)
+
+**Symptom.** Generate an image, then ask for a change — "make this picture realistic" — and
+what comes back is a *different scene entirely*. The recorded case: a cat leaping from a
+burning building became a photo of a father and son. In Photoreal, "make this picture
+animated" returned an unrelated person.
+
+The edit instruction was fine. **The reference image was not.**
+
+### What actually happens
+
+Open WebUI asks the model for a chat title, tags, follow-up suggestions and a web-search
+decision after every turn. Those prompts start `### Task:` — and they were reaching the media
+pipes as ordinary requests, matching the image regexes, and running **real GPU renders**.
+Root cause in [MODELS.md](MODELS.md#-a-task-model-that-isnt-visible-silently-becomes-the-chat-model-2026-08-02):
+a task model absent from the visible registry is silently replaced by the chat's own model.
+
+Each junk render then overwrote that chat's "last image", because the task calls carry the
+real `chat_id`. The next genuine follow-up edited the junk. Three things had to fail together
+for it to be invisible: the junk render, a history scan that could not see generated images
+(Open WebUI 0.10 stores pipe replies in `message.output`, leaving `content` empty), and a
+vision-QA step that verified the *rewritten instruction* against only the produced image — so
+an edit that swapped the subjects passed with `qa_rounds=0`.
+
+### Confirm it in ten seconds
+
+```bash
+grep -c '### Task' /volume1/docker/openwebui/config/media_metrics.jsonl
+```
+
+Any non-zero count means background tasks are reaching a renderer — the guard has regressed.
+`job=image` or `job=edit` rows whose `request` field is task boilerplate are the junk renders.
+
+### Fix
+
+Already fixed in the pipes (Assistant 0.6.0, Image 1.4.0, Photoreal 0.6.0): each declares
+`__task__` in `pipe()` and answers task prompts as text, the last image is persisted per chat
+under `/app/backend/data/media_recent/`, and edit QA judges both images against the original
+ask. If the symptom returns, check in this order:
+
+1. the `grep` above — if it hits, the task guard is gone (redeploy: `python3 scripts/deploy_pipe.py --all`);
+2. `python3 tests/test_continuation.py` — 49 checks, no GPU, pins the whole contract;
+3. `ls /volume1/docker/openwebui/config/media_recent/` — empty after images were generated
+   means the `media_session` sidecar did not deploy (`tests/test_deployed.py` checks it).
+
+Design and the research behind the prompt changes: [IMAGE_CONTINUATION.md](IMAGE_CONTINUATION.md).
+
 ## LAN exposure — the deliberate list (2026-08-01)
 
 Docker-published ports **bypass ufw**, so the firewall is not the control here; the bind address
