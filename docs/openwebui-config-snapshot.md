@@ -11,7 +11,7 @@ _Updated 2026-08-02, re-read from the live DB._
 | `animate_scail` | Animate | pipe | ✅ | `pipes/animate_scail.py` |
 | `auto_assistant` | auto_assistant | pipe | ✅ | `pipes/auto_assistant.py` |
 | `image_krea` | Krea 2 Image | pipe | ✅ | `pipes/image_krea.py` |
-| `uncensored` | Uncensored | pipe | ✅ | **`pipes/photoreal.py`** — the one row where the function id and the filename differ |
+| `photoreal` | Uncensored | pipe | ✅ | `pipes/photoreal.py`. **Renamed from `uncensored` on 2026-08-02** so the id matches its file; every pipe id now does. `function.name` is unchanged because it mirrors the pipe's own `title:` frontmatter, and `deploy_pipe.py` rewrites `meta.manifest` from that frontmatter but never `name` — changing one without the other would drift |
 | `flux_image` | flux_image | pipe | — | `pipes/flux_image.py` |
 
 The `function.name` column above is **not** what the picker shows for a manifold pipe. OpenWebUI
@@ -23,7 +23,7 @@ active `model` row (`utils/models.py:152`). So `image_krea` displays as `Image`,
 | id | name | active | note |
 |---|---|---|---|
 | `auto_assistant.auto` | Ω Assistant | ✅ | display name is the workspace override on the `model` row; the pipe's own fallback is still `🪄 Assistant`. `meta.filterIds = ['adaptive_memory']` |
-| `uncensored.photo` | Photoreal | ✅ |  |
+| `photoreal.photo` | Photoreal | ✅ | migrated from `uncensored.photo` 2026-08-02; 3 pre-existing chats still reference the old id and will not resolve it |
 | `animate_scail.scail` | Animate | ✅ | row added 2026-08-02 purely to carry capabilities — `web_search`, `code_interpreter`, `image_generation`, `terminal`, `builtin_tools`, `file_context` and `citations` all **false**, `defaultFeatureIds: []` |
 | `image_krea.krea2` | Image | — | **hidden 2026-08-02 by request** — the function stays active and deployed; only the picker entry is gone |
 | `flux_image.flux-dev` | Image | — | inactive, and its function is inactive too — not in the picker |

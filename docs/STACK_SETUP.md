@@ -13,7 +13,7 @@ always the repo filename.
 |---|---|---|
 | `auto_assistant` | Ω Assistant | One model that routes by intent: chat (with vision when an image is in play), automatic coder routing, a RedCraft image (create or edit), a Wan 2.2 video (text-to-video, image-to-video, or multi-shot), and standing background jobs through the local hermes agent. Manages GPU VRAM around every job. |
 | `image_krea` | *(hidden)* | RedCraft (Krea 2 base) text-to-image + Qwen-Image-Edit 2509 instruction editing, optional LoRA, local prompt-enhance, vision-QA correction. Hidden from the picker 2026-08-02; the function stays active. |
-| `uncensored` (`pipes/photoreal.py`) | Photoreal | Lustify SDXL uncensored text-to-image; edits — including text-only follow-ups on the previous picture — go through Qwen-Image-Edit via the shared `identity_edit` module, with an SDXL img2img fallback. |
+| `photoreal` | Photoreal | Lustify SDXL uncensored text-to-image; edits — including text-only follow-ups on the previous picture — go through Qwen-Image-Edit via the shared `identity_edit` module, with an SDXL img2img fallback. |
 | `animate_scail` | Animate | SCAIL-2 (Wan 2.1 14B GGUF) motion transfer: attach a full-body character image and name one of three built-in motions — dance, wave or walk. See [SCAIL_ANIMATE.md](SCAIL_ANIMATE.md). |
 | `flux_image` | *(disabled)* | FLUX.1-dev text-to-image pipe. Kept deployed for rollback; not selectable in the UI. |
 

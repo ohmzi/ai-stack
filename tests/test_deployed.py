@@ -28,17 +28,17 @@ DEFAULT_DB = "/volume1/docker/openwebui/config/webui.db"
 
 # The README's Pipes/Filters tables are the roster a reader trusts, and nothing asserted them.
 # By 2026-08-02 they had drifted on five separate counts — a checkpoint swap (Krea 2 -> RedCraft),
-# a workspace rename (🪄 Assistant -> Ω Assistant), a function id that never matched its filename
-# (`uncensored` <- pipes/photoreal.py), a pipe missing entirely, and an active filter documented
-# nowhere. Every one of those was invisible to a green suite, for the same reason `pipes/live/`
-# was before this file existed: no check compared the doc to the box.
+# a workspace rename (🪄 Assistant -> Ω Assistant), a function id that did not match its own
+# filename, a pipe missing entirely, and an active filter documented nowhere. Every one of those
+# was invisible to a green suite, for the same reason `pipes/live/` was before this file existed:
+# no check compared the doc to the box.
 README = "README.md"
 
 # OpenWebUI function id -> the file in this repo that is its source of truth.
 SOURCES = {
     "auto_assistant": "pipes/live/auto_assistant.py",
     "image_krea":     "pipes/live/image_krea.py",
-    "uncensored":     "pipes/live/uncensored.py",
+    "photoreal":      "pipes/live/photoreal.py",
     "animate_scail":  "pipes/live/animate_scail.py",
     "flux_image":     "pipes/live/flux_image.py",
     "adaptive_memory": "filters/adaptive_memory.py",
@@ -55,7 +55,7 @@ SOURCES = {
 # copy drifts, photoreal.py silently falls back to the old drifting SDXL path — it is written
 # to degrade rather than crash, which means nothing would surface it except this check.
 TWINS = {
-    "pipes/photoreal.py": "pipes/live/uncensored.py",
+    "pipes/photoreal.py": "pipes/live/photoreal.py",
     "pipes/shared/identity_edit.py": "/volume1/docker/openwebui/config/identity_edit.py",
     "pipes/shared/media_session.py": "/volume1/docker/openwebui/config/media_session.py",
 }
@@ -76,8 +76,9 @@ def readme_roster():
     """{function id: the 'Model in the UI' cell} for every row of the README's tables.
 
     A filter's table has no such column, so its value is None. Rows are recognised by a
-    leading backticked id, which is why the Function column has to stay the OpenWebUI id and
-    not the filename — the mismatch that made `uncensored` look like a missing pipe for weeks.
+    leading backticked id, which is why the Function column has to stay the OpenWebUI id rather
+    than the filename. Those agree for every pipe today, but they are separate things and have
+    disagreed before — a row keyed on the filename read as a missing pipe.
     """
     roster = {}
     for line in open(os.path.join(ROOT, README)):

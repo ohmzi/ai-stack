@@ -29,9 +29,9 @@ changes explains. So this refuses to deploy a file that replace_imports would al
 tells you which line to reword.
 
 Usage:
-  python3 scripts/deploy_pipe.py uncensored              # deploy
-  python3 scripts/deploy_pipe.py uncensored --dry-run    # show what would change
-  python3 scripts/deploy_pipe.py uncensored --rollback   # restore the last backup
+  python3 scripts/deploy_pipe.py photoreal               # deploy
+  python3 scripts/deploy_pipe.py photoreal --dry-run     # show what would change
+  python3 scripts/deploy_pipe.py photoreal --rollback    # restore the last backup
   python3 scripts/deploy_pipe.py --all --dry-run         # audit every mapped pipe
 """
 import argparse
@@ -51,7 +51,7 @@ BACKUP_DIR = os.path.join(ROOT, ".deploy-backups")
 # and exists so the deployed bytes are inspectable without opening the database; keeping it
 # in step is part of deploying, not a separate chore.
 PIPES = {
-    "uncensored":     ("pipes/photoreal.py",      "pipes/live/uncensored.py"),
+    "photoreal":      ("pipes/photoreal.py",      "pipes/live/photoreal.py"),
     "auto_assistant": ("pipes/auto_assistant.py", "pipes/live/auto_assistant.py"),
     "image_krea":     ("pipes/image_krea.py",     "pipes/live/image_krea.py"),
     "animate_scail":  ("pipes/animate_scail.py",  "pipes/live/animate_scail.py"),
@@ -287,7 +287,7 @@ def rollback(fid):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("pipe", nargs="?", help="OpenWebUI function id, e.g. uncensored")
+    ap.add_argument("pipe", nargs="?", help="OpenWebUI function id, e.g. photoreal")
     ap.add_argument("--all", action="store_true", help="every pipe in the map")
     ap.add_argument("--dry-run", action="store_true")
     ap.add_argument("--rollback", action="store_true")

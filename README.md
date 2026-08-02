@@ -21,14 +21,15 @@ docs/        runbooks, setup, model notes, QA plan
 
 ## Pipes
 
-The Function column is the OpenWebUI function id, which is what `scripts/deploy_pipe.py` takes
-and what the DB rows are keyed on — it is not always the repo filename.
+The Function column is the OpenWebUI function id — what `scripts/deploy_pipe.py` takes and what
+the DB rows are keyed on. It matches the repo filename for every pipe, but the two are separate
+things and have drifted apart before.
 
 | Function (OpenWebUI id) | Model in the UI | What it does |
 |---|---|---|
 | `auto_assistant` | Ω Assistant | One entry that routes by intent: chat (with vision when an image is in play), automatic coder routing, a RedCraft image (create, or edit via Qwen-Image-Edit), a Wan 2.2 video (text-to-video, image-to-video, or a multi-shot sequence), and standing background jobs through the local hermes agent. Vision-QA on stills and video frames, a confirmation step before a video render, and VRAM choreography around every job. |
 | `image_krea` | *(hidden)* | RedCraft (Krea 2 base) text-to-image + Qwen-Image-Edit 2509 instruction editing, optional trained LoRA, local prompt-enhance and vision-grounded edit-rewrite, two-round vision-QA correction. Hidden from the picker on 2026-08-02 — the Assistant covers the same two jobs. Restore by setting `image_krea.krea2` active in the `model` table. |
-| `uncensored` (`pipes/photoreal.py`) | Photoreal | Lustify SDXL uncensored text-to-image. Edits — including text-only follow-ups on the previous picture — run through Qwen-Image-Edit via the shared `identity_edit` module so the subject stays the same person, with an SDXL img2img fallback when Qwen is unavailable. |
+| `photoreal` | Photoreal | Photorealistic text-to-image on its own SDXL checkpoint. Edits — including text-only follow-ups on the previous picture — run through Qwen-Image-Edit via the shared `identity_edit` module so the subject stays the same person, with an SDXL img2img fallback when Qwen is unavailable. |
 | `animate_scail` | Animate | SCAIL-2 (Wan 2.1 14B GGUF) motion transfer: attach a full-body character image and name one of three built-in motions — dance, wave or walk. Your text picks the motion; it is not a prompt. ~2 s clip, ~3 min. |
 | `flux_image` | *(disabled)* | FLUX.1-dev text-to-image. Kept deployed and byte-current for rollback; not selectable in the UI. |
 
@@ -195,7 +196,8 @@ Methodology and the current baseline: [docs/QA_TEST_PLAN.md](docs/QA_TEST_PLAN.m
 - Open WebUI (official image) with Ollama (`localhost:11434`) and ComfyUI
   (`localhost:8188`) reachable.
 - ComfyUI with the referenced checkpoints/GGUFs (RedCraft on a Krea 2 base,
-  Wan 2.2 A14B, Qwen-Image-Edit 2509, Lustify SDXL, SCAIL-2, …).
+  Wan 2.2 A14B, Qwen-Image-Edit 2509, SCAIL-2, and the SDXL checkpoint named in
+  `pipes/photoreal.py`).
 
 ## Docs
 
