@@ -21,10 +21,18 @@ drift that does not exist. Verified: the read-only view and a WAL-checkpointed c
 Usage:  python3 tests/test_deployed.py
         python3 tests/test_deployed.py --db /path/to/webui.db
 """
-import argparse, hashlib, os, sqlite3, sys
+import argparse, hashlib, os, re, sqlite3, sys
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 DEFAULT_DB = "/volume1/docker/openwebui/config/webui.db"
+
+# The README's Pipes/Filters tables are the roster a reader trusts, and nothing asserted them.
+# By 2026-08-02 they had drifted on five separate counts — a checkpoint swap (Krea 2 -> RedCraft),
+# a workspace rename (🪄 Assistant -> Ω Assistant), a function id that never matched its filename
+# (`uncensored` <- pipes/photoreal.py), a pipe missing entirely, and an active filter documented
+# nowhere. Every one of those was invisible to a green suite, for the same reason `pipes/live/`
+# was before this file existed: no check compared the doc to the box.
+README = "README.md"
 
 # OpenWebUI function id -> the file in this repo that is its source of truth.
 SOURCES = {
@@ -62,6 +70,82 @@ def check(label, ok, detail=""):
 
 def sha8(s):
     return hashlib.sha256(s.encode()).hexdigest()[:8]
+
+
+def readme_roster():
+    """{function id: the 'Model in the UI' cell} for every row of the README's tables.
+
+    A filter's table has no such column, so its value is None. Rows are recognised by a
+    leading backticked id, which is why the Function column has to stay the OpenWebUI id and
+    not the filename — the mismatch that made `uncensored` look like a missing pipe for weeks.
+    """
+    roster = {}
+    for line in open(os.path.join(ROOT, README)):
+        m = re.match(r"\|\s*`([a-z_]+)`", line)
+        if not m:
+            continue
+        cells = [c.strip() for c in line.strip().strip("|").split("|")]
+        roster[m.group(1)] = cells[1] if len(cells) >= 3 else None
+    return roster
+
+
+def picker_name(db, fid, content, is_active):
+    """What OpenWebUI 0.10.2 actually shows in the model picker for this function.
+
+    For a manifold pipe the label comes from the pipe's own `pipes()` return
+    (`functions.py:104`), and an active `model` row overrides it (`utils/models.py:152`).
+    The `function.name` column never reaches the picker, so comparing against it would pass
+    while the UI said something else. Returns None for anything not selectable.
+    """
+    if not is_active:
+        return None
+    tail = content.split("def pipes", 1)[-1]
+    m = re.search(r'"id"\s*:\s*"([^"]+)"\s*,\s*"name"\s*:\s*"([^"]+)"', tail)
+    if not m:
+        return None  # a filter or action — no picker entry of its own
+    pipe_id, name = m.group(1), m.group(2)
+    row = db.execute("select name, is_active from model where id = ?",
+                     (f"{fid}.{pipe_id}",)).fetchone()
+    if row:
+        # An INACTIVE row is not a no-op that leaves the pipes() name standing — it is how a
+        # manifold entry gets hidden. `get_all_models` deletes the entry outright
+        # (`utils/models.py:169`), and since the picker and the dispatcher read the same
+        # `app.state.MODELS`, a hidden model is also uncallable (`main.py:1026`).
+        return row[0] if row[1] else None
+    return name
+
+
+def check_readme(db, rows):
+    print(f"\n  {README} roster → installed functions")
+    roster = readme_roster()
+    if not roster:
+        check(f"{README} lists any functions", False,
+              "no backticked ids found — did the table format change?")
+        return
+
+    for fid, content, is_active in sorted(rows):
+        documented = fid in roster
+        check(f"{README} documents {fid}", documented,
+              "" if documented else "installed on the box but absent from the tables")
+        if not documented:
+            continue
+        shown, claimed = picker_name(db, fid, content, is_active), roster[fid]
+        if claimed is None:            # filters table: two columns, nothing to compare
+            continue
+        if shown is None:
+            ok = any(w in claimed.lower() for w in ("disabled", "hidden"))
+            check(f"{README} marks {fid} as not selectable", ok,
+                  "" if ok else f"claims {claimed!r} but it is not in the picker")
+        else:
+            ok = claimed.strip("*_ ") == shown
+            check(f"{README} names {fid} as {shown!r}", ok,
+                  "" if ok else f"README says {claimed!r}, the picker shows {shown!r}")
+
+    installed_ids = {fid for fid, _, _ in rows}
+    for fid in sorted(roster):
+        listed = fid in installed_ids
+        check(f"{fid} in {README} is installed", listed,
+              "" if listed else "documented but no such function on the box")
 
 
 def main():
@@ -124,6 +208,8 @@ def main():
         check(f"{tracked} → {twin}", tsrc == wsrc,
               "" if tsrc == wsrc else f"repo={sha8(tsrc)} ({len(tsrc)}B) "
                                       f"deployed={sha8(wsrc)} ({len(wsrc)}B) — copy it across")
+
+    check_readme(db, rows)
 
     fails = sum(1 for _, ok, _ in results if not ok)
     if fails:
