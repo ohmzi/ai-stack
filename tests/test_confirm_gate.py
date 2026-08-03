@@ -105,7 +105,7 @@ def main():
     check("only NEW heuristic jobs are gated, never followups or manage verbs",
           "if not followup and not is_manage:" in src)
     check("the /research slash command is not gated (explicit intent already)",
-          src.index('startswith(("/research"') < src.index("if not followup and not is_manage:"))
+          src.index("_BG_ONESHOT.match") < src.index("if not followup and not is_manage:"))
 
     print("--- per-request num_ctx rounds UP and never under-sizes ---")
     fit = mod.Pipe._fit_ctx

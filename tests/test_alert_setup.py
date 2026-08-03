@@ -107,6 +107,26 @@ def main():
     check("pipe recognises the parked state", p._pending_phone_request(msgs) == parked)
     check("no marker -> nothing parked",
           p._pending_phone_request([{"role": "assistant", "content": "hi"}]) is None)
+    # People answer questions out of order: phone prompt, "wait, how much does a text cost?",
+    # answer, and only THEN the number. A single-turn scan had forgotten the parked request by
+    # then, so the bare number fell through to the chat model as small talk.
+    interposed = [{"role": "assistant", "content": prompt},
+                  {"role": "user", "content": "wait — how much does a text cost?"},
+                  {"role": "assistant", "content": "Nothing — the carrier gateway is free."}]
+    check("parked state survives ONE interposed turn", p._pending_phone_request(interposed) == parked)
+    two_later = interposed + [{"role": "user", "content": "good to know"},
+                              {"role": "assistant", "content": "Anything else?"}]
+    check("...but not two — a stray digit string later is ordinary chat again",
+          p._pending_phone_request(two_later) is None)
+    # Once the number arrives and the task is submitted, the prompt one turn back is SPENT.
+    # Reading past the bg-task reply resurrected it: "no thanks" a turn after scheduling matched
+    # the decline branch and re-submitted the job — a duplicate the user never asked for.
+    consumed = [{"role": "assistant", "content": prompt},
+                {"role": "user", "content": "514-555-0123"},
+                {"role": "assistant",
+                 "content": "✅ Saved. Verified scheduled." + mod.Pipe._BG_MARK}]
+    check("a consumed prompt is not resurrected past the bg-task reply",
+          p._pending_phone_request(consumed) is None)
 
     print("--- answering with a number saves it and runs the original request ---")
     sent = {}

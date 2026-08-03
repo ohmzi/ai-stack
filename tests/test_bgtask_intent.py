@@ -44,6 +44,10 @@ YES = [
     "show my scheduled jobs",
     "cancel the price monitor",
     "pause the btc tracking job",
+    "/tasks",                          # the plural fell through to chat for a month
+    "what are my scheduled tasks?",    # was dead code: _BG_QUESTION won before _BG_MANAGE ran
+    "what are my background tasks",
+    "stop tracking the gpu price",     # bare 'tracking' with a THING as object stays manageable
 ]
 
 # Must NOT delegate (ordinary conversation, questions, coder work, media).
@@ -62,6 +66,18 @@ NO = [
     "monitor lizards are fascinating animals",
     "is there a way to watch netflix on linux?",
     "alert fatigue is a real problem in ops teams",
+    "stop tracking me",                       # a person as object is a privacy plea, not job mgmt
+    "cancel my job application",              # 'job' heading a non-task noun phrase
+    "cancel my job apps",                     # ...including the clipped plural
+    "can you stop tracking me across websites?",
+    "/taskscheduler is a windows thing, right?",
+    # The manage-before-question reorder must NOT open trivia to the manage arm: these are
+    # general-knowledge questions that happen to end in a task noun. Caught by adversarial
+    # review of the reorder — routing any of these delegates to hermes consent-free.
+    "what are the biggest jobs in tech?",
+    "what are the best jobs for new grads",
+    "what are the night watches in game of thrones?",
+    "what are some good monitors for gaming?",
 ]
 
 # Media must win first: these mention monitoring but ask for a render.
@@ -91,6 +107,17 @@ def main():
         # The structural claim: even if the bg predicate matched, the pipe's ordering sends these
         # to the render path. Assert the predicate itself stays quiet so ordering never matters.
         check(t, (p._is_image_request(t) or p._is_video_request(t)) and not p._is_bg_task_request(t))
+
+    print("--- /research and /agent are word-bounded (the /agenda bug) ---")
+    # startswith("/agent") also captured "/agenda review monday", and the anchored strip then
+    # mangled it to "a review monday" before shipping it to hermes as a research question.
+    ONESHOT = mod.Pipe._BG_ONESHOT
+    check("/research fires", bool(ONESHOT.match("/research best 24GB gpu under 500")))
+    check("/agent fires behind leading spaces", bool(ONESHOT.match("  /agent check the notes")))
+    check("/agenda does NOT fire", not ONESHOT.match("/agenda review monday"))
+    check("/researching does NOT fire", not ONESHOT.match("/researching apples"))
+    m = ONESHOT.match("/research   best gpu")
+    check("the question survives the strip intact", "/research   best gpu"[m.end():] == "best gpu")
 
     print("--- conversational follow-ups continue the task exchange, but ONLY there ---")
     # Live failure: the agent asked "re-enable this one, or create new?"; the user answered

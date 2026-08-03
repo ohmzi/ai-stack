@@ -522,7 +522,12 @@ class Pipe:
 
         Any failure (model absent, timeout, junk output) returns False so the turn falls back to
         ordinary chat — a routing helper must never be able to break the chat path.
+
+        Every call writes a job:'classifier' metrics row (verdict, latency, error class). A
+        timed-out classifier degrades to chat SILENTLY by contract, which means detection quality
+        quietly varies with GPU load — the row is the only place that shows it happening.
         """
+        t0 = time.monotonic()
         try:
             r = requests.post(
                 f"{self.ollama}/api/chat",
@@ -531,11 +536,17 @@ class Pipe:
                       "messages": [{"role": "user",
                                     "content": self._CLASSIFY_PROMPT.format(msg=text[:600])}]},
                 timeout=ROUTE_CLASSIFIER_TIMEOUT)
+            latency = round((time.monotonic() - t0) * 1000)
             if r.status_code != 200:
+                self._metric(job="classifier", ok=False, error=f"http_{r.status_code}",
+                             latency_ms=latency)
                 return False
             verdict = ((r.json().get("message") or {}).get("content") or "").strip().upper()
+            self._metric(job="classifier", ok=True, verdict=verdict[:12], latency_ms=latency)
             return verdict.startswith("CODE")
-        except Exception:
+        except Exception as e:
+            self._metric(job="classifier", ok=False, error=type(e).__name__,
+                         latency_ms=round((time.monotonic() - t0) * 1000))
             return False
 
     def _is_code_request(self, text):
@@ -774,11 +785,31 @@ class Pipe:
     # is conversation). A standing job needs either the explicit /task prefix, a management verb
     # aimed at existing jobs, or an imperative monitoring verb PLUS evidence of recurrence — a
     # schedule word, a duration, or an alert condition. One regex alone does not commit.
-    _BG_SLASH = re.compile(r"^\s*/task\b", re.I)
+    _BG_SLASH = re.compile(r"^\s*/tasks?\b", re.I)  # '/tasks' too — the plural fell through to chat
+    # One-shot research/agent prefix, word-bounded. startswith("/agent") also captured "/agenda
+    # review monday", and the anchored strip then mangled it to "a review monday" before shipping
+    # it to hermes as a research question nobody asked.
+    _BG_ONESHOT = re.compile(r"^\s*/(research|agent)\b\s*", re.I)
+    # The manage-verb object is a NAMED task noun, not any gerund in range: "stop tracking me" and
+    # "cancel my job application" both routed to the agent consent-free (manage verbs skip the
+    # confirm gate). So bare 'tracking/monitoring' is rejected when a person is the object, and
+    # 'job' is rejected when it heads a non-task noun phrase.
+    #
+    # The list/what-are arm requires a possessive or a task qualifier before the noun. Without it,
+    # moving _BG_MANAGE ahead of the question deny-list turned every "what are ... jobs/monitors"
+    # trivia question ("what are the biggest jobs in tech?") into a consent-free hermes delegation
+    # — the reorder is only safe because this arm cannot match general-knowledge phrasing.
     _BG_MANAGE = re.compile(
-        r"^\s*(?:please\s+)?(?:(?:list|show|what are)\b.{0,20}\b(?:background|scheduled|monitoring)?"
-        r"\s*(?:tasks|monitors|jobs|watches)\b"
-        r"|(?:cancel|stop|pause|resume|remove|delete)\b.{0,40}\b(?:task|monitor|monitoring|job|watch|tracking)\b)", re.I)
+        r"^\s*(?:please\s+)?(?:(?:list|show|what are)\b.{0,20}?\b"
+        r"(?:my\s+(?:background\s+|scheduled\s+|monitoring\s+)?"
+        r"|(?:the\s+)?(?:background|scheduled|monitoring|active|running|cron)\s+)"
+        r"(?:tasks|monitors|jobs|watches)\b"
+        r"|(?:cancel|stop|pause|resume|remove|delete)\b.{0,40}?\b(?:"
+        r"(?:task|monitor|watch)(?:es|s)?\b"
+        r"|jobs?\b(?!\s+(?:app(?:lication)?s?|offers?|interviews?|postings?|listings?"
+        r"|search(?:es)?|hunts?|markets?)\b)"
+        r"|(?:monitoring|tracking)\b(?!\s+(?:me|us|him|her|them)\b)"
+        r"))", re.I)
     _BG_VERB = re.compile(
         r"^\s*(?:please\s+|can you\s+|could you\s+)?"
         r"(?:monitor|track|watch|keep an eye on|keep track of|alert me|notify me|remind me|ping me)\b", re.I)
@@ -1036,16 +1067,33 @@ class Pipe:
         return self._phone_then_task(e164, handle, pending)
 
     def _pending_phone_request(self, messages):
-        """The request parked by a previous _phone_prompt, or None."""
-        prev = next((m.get("content") or "" for m in reversed(messages or [])
-                     if m.get("role") == "assistant"), "")
-        m = self._PHONE_MARK_RE.search(prev)
-        if not m:
-            return None
-        try:
-            return base64.b64decode(m.group(1)).decode() or ""
-        except Exception:
-            return ""
+        """The request parked by a previous _phone_prompt, or None.
+
+        Scans the last TWO assistant turns, not one: the prompt asks a question, and people
+        answer questions out of order — phone prompt, "wait, how much does a text cost?",
+        answer, and only THEN the number. A single-turn scan had already forgotten the parked
+        request by then, so the bare number fell through to the chat model. Two turns is the
+        whole allowance on purpose: further back, the prompt has scrolled away and a stray
+        digit string should be ordinary chat again.
+        """
+        recent = [m.get("content") or "" for m in reversed(messages or [])
+                  if m.get("role") == "assistant"]
+        for prev in recent[:2]:
+            m = self._PHONE_MARK_RE.search(prev)
+            if m:
+                try:
+                    return base64.b64decode(m.group(1)).decode() or ""
+                except Exception:
+                    return ""
+            # A bg-task reply between us and the prompt means the parked request was already
+            # CONSUMED — the number arrived (or was declined) and the task was submitted. Reading
+            # past it would resurrect the request: "no thanks" one turn after scheduling matched
+            # _PHONE_DECLINE and re-submitted the job, a duplicate the user never asked for. Every
+            # consumption path ends in _BG_MARK (hermes stream, decline, re-park), so the marker
+            # doubles as the scan's stop sign.
+            if self._BG_MARK in prev:
+                return None
+        return None
 
     def _is_bg_followup(self, text, messages):
         """True when this short message continues the previous hermes exchange in THIS chat."""
@@ -1059,10 +1107,15 @@ class Pipe:
         raw = (t or "").strip().lower()
         if self._BG_SLASH.match(raw):
             return True
-        if self._BG_QUESTION.match(raw):
-            return False  # asking ABOUT monitoring is chat, whatever else matches
+        # Manage verbs BEFORE the question deny-list. "what are my scheduled tasks?" is both a
+        # question and a management request aimed at existing jobs — and the deny-list used to win,
+        # which made the "what are ... tasks" arm of _BG_MANAGE dead code: the turn went to the
+        # chat model, which answered with a hallucinated task list. The swap is safe because
+        # _BG_MANAGE is anchored — it only fires when the manage verb is the message's opening move.
         if self._BG_MANAGE.match(raw):
             return True
+        if self._BG_QUESTION.match(raw):
+            return False  # asking ABOUT monitoring is chat, whatever else matches
         return bool(self._BG_VERB.match(raw) and self._BG_RECURRENCE.search(raw))
 
     def _is_image_request(self, t):
@@ -1891,6 +1944,22 @@ class Pipe:
         except Exception:
             pass  # instrumentation must never cost a user their generation
 
+    def _route_metric(self, route, tier, rule_id, text=None, **extra):
+        """One job:'route' row per routed turn — which branch won, at which tier, on which rule.
+
+        This is the answer to a question that used to be unanswerable after the fact: WHICH rule
+        routed a given message, and would the message have routed at all without it. Every
+        heuristic in this file that guessed has needed measuring and walking back, and until now
+        the measuring started only after the incident. Tier vocabulary matches the roadmap:
+        0 = explicit (slash/marker/manage-follow-up), 1 = STRONG regex, 3 = the 1B classifier.
+
+        The request text rides along truncated: enough to adjudicate a misroute from the log
+        alone, short enough that the file does not become a transcript of every conversation.
+        """
+        if text:
+            extra["request"] = text[:200]
+        self._metric(job="route", route=route, tier=tier, rule_id=rule_id, **extra)
+
     def _gen_image(self, prompt, ref_b64, msgs=None, original=None):
         # `original` is the user's verbatim ask (pre-instruction-stripping) — QA judges
         # against it, never against the rewritten instruction alone: the rewrite may itself
@@ -2634,12 +2703,18 @@ class Pipe:
                                 {"role": "user", "content": text}]}
         reply = ""          # accumulated so verification can check ids the agent cites
         after = None
+        # Verification class for the metrics stream. Starts at 'incomplete' so a stream that dies
+        # without [DONE] — client disconnect, hermes crash mid-answer — is visible as exactly that
+        # rather than as a missing row.
+        outcome = "incomplete"
+        t0 = time.monotonic()
         timeout = aiohttp.ClientTimeout(total=None, sock_connect=15, sock_read=HERMES_TIMEOUT_S)
         try:
             async with aiohttp.ClientSession(timeout=timeout) as s:
                 async with s.post(f"{HERMES_URL}/chat/completions", json=payload,
                                   headers={"Authorization": f"Bearer {key}"}) as r:
                     if r.status != 200:
+                        outcome = f"http_{r.status}"
                         body = (await r.text())[:300]
                         yield f"⚠️ hermes-agent HTTP {r.status}: {body}"
                         return
@@ -2668,6 +2743,7 @@ class Pipe:
                                             break
                                     await asyncio.sleep(1)
                                 if new_jobs:
+                                    outcome = "created"
                                     j = new_jobs[0]
                                     sched = j.get("schedule_display") or str(j.get("schedule", "?"))
                                     yield (f"\n\n✅ **Verified scheduled**: job `{j.get('id')}` "
@@ -2681,6 +2757,7 @@ class Pipe:
                                     # report success. Ground truth, not keywords: if a job the
                                     # scheduler already had now has a different schedule, state or
                                     # run budget, something real happened.
+                                    outcome = "updated"
                                     jid, what = self._changed_jobs(before, after)[0]
                                     j = after[jid]
                                     sched = (j.get("schedule_display")
@@ -2699,6 +2776,7 @@ class Pipe:
                                              if i in (after or {})]
                                     live = [i for i in cited if _runnable(after[i])]
                                     if live:
+                                        outcome = "pointed_active"
                                         j = after[live[0]]
                                         sched = (j.get("schedule_display")
                                                  or str(j.get("schedule", "?")))
@@ -2709,6 +2787,7 @@ class Pipe:
                                         # The failure this catches: the agent finds a FINISHED job
                                         # of the same name, calls it "already running", and creates
                                         # nothing — so the user's monitor silently does not exist.
+                                        outcome = "finished_job"
                                         j = after[cited[0]]
                                         yield (f"\n\n⚠️ **Nothing is scheduled**: the agent pointed "
                                                f"at job `{cited[0]}`, which has already FINISHED "
@@ -2716,11 +2795,15 @@ class Pipe:
                                                f"No new job was created. Reply "
                                                f"**\"create a new one\"** to schedule it properly.")
                                     else:
+                                        outcome = "failed"
                                         yield ("\n\n⚠️ **Verification failed**: the agent described "
                                                "a job but the scheduler has NO matching entry — "
                                                "nothing was actually created. Please resend.")
                                 else:
+                                    outcome = "unverifiable"
                                     yield "\n\n(could not verify job creation — /api/jobs unreachable)"
+                            else:
+                                outcome = "n/a"  # list/cancel/followup turns verify nothing by design
                             yield self._BG_MARK
                             return
                         try:
@@ -2732,11 +2815,23 @@ class Pipe:
                             reply += tok
                             yield tok
         except asyncio.TimeoutError:
+            outcome = "timeout"
             yield ("\n\n⏳ hermes-agent did not finish within the window — the job may still have "
                    "been created. Check the background-tasks channel, or ask me to list tasks.")
+            # The marker survives the failure ON PURPOSE. Both advice lines above invite a reply
+            # ("ask me to list tasks", "start it and retry") — and without the marker that reply
+            # matched no predicate and landed in plain chat, exactly when continuity mattered most.
+            yield self._BG_MARK
         except aiohttp.ClientConnectorError:
+            outcome = "unreachable_gateway"
             yield ("⚠️ hermes-agent is not reachable on 127.0.0.1:8642. "
                    "Start it with: `systemctl --user start hermes-gateway`")
+            yield self._BG_MARK
+        finally:
+            # One row per delegation with the verification CLASS — the ready-made outcome signal
+            # ("created" vs "failed" vs "timeout") that until now existed only as chat prose.
+            self._metric(job="hermes", outcome=outcome, verify=bool(verify_creation),
+                         duration_s=round(time.monotonic() - t0, 1))
 
     def _sampling(self, guard_text):
         """Sampling options for a chat turn, chosen by route.
@@ -3019,12 +3114,20 @@ class Pipe:
         user's answer through sio.call (frontend handler; backend socket/main.py:1039).
         """
         want = CONFIRM_RENDERS
-        if want == "never" or event_call is None:
+        if want == "never":
             return True
         # Keyed on measured COST, not on the noun. A Qwen-Image-Edit round is 162 s median (n=26)
         # against 16.3 s for a fresh Krea image, so an edit belongs with video under "video" even
         # though the user would call both "an image".
-        if want != "all" and not expensive:
+        gated = want == "all" or expensive
+        if event_call is None:
+            # Fail-open is the contract, but an UNCOUNTED fail-open silently poisons the gate's
+            # accept/decline stream — which is the live false-positive counter the roadmap needs
+            # before any heuristic is allowed to relax. Count it, then proceed as before.
+            if gated:
+                self._metric(job="confirm", kind=kind, outcome="fail_open_no_client")
+            return True
+        if not gated:
             return True
         try:
             answer = await event_call({
@@ -3034,13 +3137,13 @@ class Pipe:
                                     f"finishes."},
             })
         except Exception:
+            self._metric(job="confirm", kind=kind, outcome="fail_open_error")
             return True
         # sio.call returns {'error': ...} on a dead session; anything non-boolean is "not a no".
-        if answer is False:
-            return False
-        if isinstance(answer, dict) and answer.get("confirmed") is False:
-            return False
-        return True
+        declined = answer is False or (isinstance(answer, dict)
+                                       and answer.get("confirmed") is False)
+        self._metric(job="confirm", kind=kind, outcome="declined" if declined else "accepted")
+        return not declined
 
     @staticmethod
     def _declined(kind):
@@ -3092,6 +3195,10 @@ class Pipe:
         # last-image cache with junk, which is how "make this picture realistic" got applied
         # to a stranger's photo. Answer them as plain text on the small task model instead.
         if __task__ or (ms and ms.is_task_request(text)):
+            # No request text on this row on purpose: it is '### Task:' boilerplate at title/tag
+            # frequency. The row itself is the standing invariant — a task_guard row carrying any
+            # other tier/rule means the guard stopped being the first check.
+            self._route_metric("task_guard", 0, "task_kwarg" if __task__ else "task_prefix")
             return ms.answer_task(self.ollama, msgs) if ms else ""
         # OpenWebUI PREPENDS retrieved file/knowledge context to the LAST USER message (RAG_SYSTEM_CONTEXT
         # defaults false), so `text` can be a multi-kB document blob. Every routing predicate below reads
@@ -3115,6 +3222,7 @@ class Pipe:
         # user_prompt fix above, which protects the 'auto' entry.
         entry = self._entry(body)
         if entry != "auto":
+            self._route_metric(f"entry:{entry}", 0, "manifold_entry")
             return self._entry_chat_stream(entry, self._ollama_messages(msgs))
         cid = self._chat_id(body, __metadata__)
         # What media does this conversation currently revolve around? History first, then the
@@ -3141,6 +3249,7 @@ class Pipe:
                                        r"\banimate\b|\bbring\b.*\blife\b", (text or "").lower()))
         if (text and anim_img and not style_edit and (ref or refers_to_img)
                 and (self._is_video_request(text) or self._wants_new_video(text))):
+            self._route_metric("media:animate", 1, "animate_image", text)
             opts = self._video_opts(text)
             motion = self._strip_video_directives(self._clean_prompt(text))
             if not await self._confirm_render(confirm, "video",
@@ -3153,6 +3262,7 @@ class Pipe:
         # Fresh video: explicit ("create a video of …") or video-flavored wording with no video yet.
         if text and not ref and not style_edit and (self._wants_new_video(text)
                                  or (self._is_video_request(text) and kind != "video")):
+            self._route_metric("media:video", 1, "video_request", text)
             opts = self._video_opts(text)
             cleaned = self._strip_video_directives(self._clean_prompt(text))
             n = self._wants_multishot(text)
@@ -3174,6 +3284,7 @@ class Pipe:
         # (unless it's a restyle of the image on the table — "make this picture realistic" — which
         # must fall through to the EDIT path below, not t2i a mangled prompt from scratch)
         if text and not ref and not style_edit and self._is_image_request(text):
+            self._route_metric("media:image", 1, "image_request", text)
             cleaned_img = self._clean_prompt(text)
             if not await self._confirm_render(confirm, "image",
                                               f"Generate an image: “{cleaned_img[:120]}”",
@@ -3187,6 +3298,7 @@ class Pipe:
         # original prompt, SAME seed (keeps the scene recognizably similar). Multi-shot histories
         # (shots joined with ' || ') are re-planned with the change applied.
         if text and not ref and kind == "video" and (self._wants_edit(text) or self._is_length_only(text)):
+            self._route_metric("media:video_edit", 1, "video_followup", text)
             prev_prompt, prev_seed, prev_opts = media
             # Start from the original clip's opts; only override what the message explicitly names,
             # so a follow-up keeps the original 720p/length instead of silently resetting to defaults.
@@ -3226,6 +3338,7 @@ class Pipe:
         # needed. Any non-question/non-smalltalk message here is treated as an edit instruction.
         img = ref or (media if kind == "image" else None)
         if text and img and self._wants_edit(text):
+            self._route_metric("media:image_edit", 1, "edit_request", text)
             instruction = self._edit_instruction(text)
             # expensive=True: 162 s median, the slowest per-result operation on the box.
             if not await self._confirm_render(confirm, "image edit", f"Edit the image: “{instruction[:120]}”"):
@@ -3268,11 +3381,16 @@ class Pipe:
             # that guessed has needed measuring and walking back, and the cost here is not a wrong
             # answer: delegating evicts the chat tenant and the user waits ~23 s for the reload.
             # /img and /vid set the precedent. Earn a heuristic with data first.
-            if (text or "").strip().lower().startswith(("/research", "/agent")):
-                question = re.sub(r"^/(research|agent)\s*", "", text.strip(), flags=re.I)
+            # Word-bounded (_BG_ONESHOT), not startswith: "/agenda review monday" used to satisfy
+            # startswith("/agent"), and the anchored strip then sent "a review monday" to hermes.
+            oneshot = self._BG_ONESHOT.match(text or "")
+            if oneshot:
+                question = (text or "")[oneshot.end():].strip()
                 if not question:
                     return self._say("Give me something to look into — e.g. "
                                      "`/research what changed in the Wan 2.2 release notes`.")
+                self._route_metric("agent.oneshot", 0,
+                                   f"slash_{oneshot.group(1).lower()}", text)
                 return self._hermes_stream(question, handle, verify_creation=False,
                                            brief=self._RESEARCH_BRIEF)
             # A turn that answers "what number should I text?" is handled before anything else —
@@ -3282,10 +3400,26 @@ class Pipe:
             if pending is not None:
                 answered = self._phone_reply(text, handle, pending)
                 if answered is not None:
+                    self._route_metric("task.create", 0, "phone_reply", text)
                     return answered
             followup = self._is_bg_followup(text, omsgs)
             if followup or self._is_bg_task_request(text):
-                is_manage = bool(self._BG_MANAGE.match((text or "").strip().lower()))
+                raw_l = (text or "").strip().lower()
+                is_manage = bool(self._BG_MANAGE.match(raw_l))
+                # Rule attribution mirrors _is_bg_task_request's precedence exactly, so the row
+                # names the rule that actually won — not merely one that also matches.
+                if followup:
+                    bg_rule, bg_tier = "bg_followup", 0
+                elif self._BG_SLASH.match(raw_l):
+                    bg_rule, bg_tier = "bg_slash", 0
+                elif is_manage:
+                    bg_rule, bg_tier = "bg_manage", 1
+                else:
+                    bg_rule, bg_tier = "bg_verb+recurrence", 1
+                self._route_metric(
+                    "task.manage" if is_manage else
+                    ("task.followup" if followup else "task.create"),
+                    bg_tier, bg_rule, text)
                 # Ask for a number BEFORE scheduling anything. Creating the job first would leave
                 # a monitor that runs, fires, and texts nobody — the user believing they are
                 # covered. Only for genuinely new alerting requests: managing or continuing an
@@ -3325,6 +3459,9 @@ class Pipe:
                 return self._hermes_stream(sent, handle,
                                            verify_creation=not (is_manage or followup))
         if not attached_img and not ref and await asyncio.to_thread(self._is_code_request, text):
+            code_rule = ("code_strong" if self._CODE_STRONG.search(text or "")
+                         else "code_classifier")
+            self._route_metric("coder", 1 if code_rule == "code_strong" else 3, code_rule, text)
             # emitter goes IN, so the wait ticks from inside _locked_stream's polling loop. Not
             # wrapped around it — wrapping one async generator in another breaks aclose()
             # propagation and would hold the GPU on a disconnect, which is the bug just fixed.
@@ -3338,4 +3475,5 @@ class Pipe:
         if emitter and await asyncio.to_thread(self._gpu_contended):
             await self._status(emitter, "GPU is rendering — this reply may be slow to start.",
                                done=True)
+        self._route_metric("chat:vision" if attached_img else "chat", 0, "fallthrough", text)
         return self._achat_stream(omsgs, keep_system=AUTO_KEEP_SYSTEM)

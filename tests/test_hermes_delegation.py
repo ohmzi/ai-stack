@@ -39,19 +39,21 @@ def check(label, ok, detail=""):
 
 # ---- a scripted SSE endpoint ------------------------------------------------------------------
 class _Content:
-    def __init__(self, lines):
-        self._lines = lines
+    def __init__(self, lines, exc=None):
+        self._lines, self._exc = lines, exc
 
     def __aiter__(self):
         async def gen():
             for line in self._lines:
                 yield line
+            if self._exc is not None:   # the stream dies instead of reaching [DONE]
+                raise self._exc
         return gen()
 
 
 class _Resp:
-    def __init__(self, lines, status=200):
-        self.status, self.content = status, _Content(lines)
+    def __init__(self, lines, status=200, exc=None):
+        self.status, self.content = status, _Content(lines, exc)
 
     async def __aenter__(self):
         return self
@@ -67,8 +69,9 @@ SENT = {}          # last payload the pipe posted to hermes, for contract assert
 
 
 class _Session:
-    def __init__(self, lines, status=200):
+    def __init__(self, lines, status=200, exc=None, post_exc=None):
         self._lines, self._status = lines, status
+        self._exc, self._post_exc = exc, post_exc
 
     async def __aenter__(self):
         return self
@@ -77,22 +80,25 @@ class _Session:
         return False
 
     def post(self, *a, **kw):
+        if self._post_exc is not None:  # the gateway is not even listening
+            raise self._post_exc
         SENT.clear()
         SENT.update(kw.get("json") or {})
-        return _Resp(self._lines, self._status)
+        return _Resp(self._lines, self._status, self._exc)
 
 
 class _Aiohttp:
     """Proxies the real aiohttp except for ClientSession, so ClientTimeout and the exception
     types the pipe catches keep working."""
-    def __init__(self, real, lines, status=200):
+    def __init__(self, real, lines, status=200, exc=None, post_exc=None):
         self._real, self._lines, self._status = real, lines, status
+        self._exc, self._post_exc = exc, post_exc
 
     def __getattr__(self, k):
         return getattr(self._real, k)
 
     def ClientSession(self, *a, **kw):
-        return _Session(self._lines, self._status)
+        return _Session(self._lines, self._status, self._exc, self._post_exc)
 
 
 def sse(text):
@@ -115,8 +121,9 @@ def job(jid, sched="every 5m", enabled=True, state="active", repeat=None):
             "state": state, "repeat": repeat}
 
 
-def drive(reply, snapshots, verify=True, status=200, brief=None):
-    """Run one delegation turn. `snapshots` is what _hermes_jobs returns on successive calls."""
+def drive(reply, snapshots, verify=True, status=200, brief=None, exc=None, post_exc=None):
+    """Run one delegation turn. `snapshots` is what _hermes_jobs returns on successive calls.
+    `exc` kills the SSE stream before [DONE]; `post_exc` kills the connection attempt itself."""
     p = mod.Pipe()
     seq = list(snapshots)
     released = []
@@ -137,7 +144,10 @@ def drive(reply, snapshots, verify=True, status=200, brief=None):
     async def no_sleep(_s):          # the verifier polls 6x1s; tests must not take six seconds
         return None
 
-    mod.aiohttp = _Aiohttp(real_aiohttp, sse(reply), status)
+    lines = sse(reply)
+    if exc is not None:
+        lines = lines[:-1]   # a dying stream never delivers its [DONE]
+    mod.aiohttp = _Aiohttp(real_aiohttp, lines, status, exc, post_exc)
     mod.asyncio.sleep = no_sleep
     chunks = []
     try:
@@ -220,6 +230,22 @@ def main():
     out = drive("nope", [before, before], status=503)
     check("a non-200 from hermes surfaces as an error, not a silent pass",
           "hermes-agent HTTP 503" in out, out[:160])
+
+    print("--- continuity survives timeouts and a dead gateway ---")
+    # Live failure shape: after a timeout the pipe suggests "ask me to list tasks" — but the reply
+    # carried no _BG_MARK, so that very follow-up matched no predicate and landed in plain chat,
+    # exactly when continuity mattered most.
+    out = drive("partial answer", [before, before], verify=False, exc=asyncio.TimeoutError())
+    check("a timeout explains itself", "did not finish" in out, out[-200:])
+    check("...streams what arrived before dying", "partial answer" in out, out[:120])
+    check("...and still carries the follow-up marker",
+          out.endswith(mod.Pipe._BG_MARK), repr(out[-40:]))
+
+    dead = mod.aiohttp.ClientConnectorError.__new__(mod.aiohttp.ClientConnectorError)
+    out = drive("never sent", [before, before], verify=False, post_exc=dead)
+    check("a dead gateway names the fix", "hermes-gateway" in out, out[:160])
+    check("...and still carries the follow-up marker",
+          out.endswith(mod.Pipe._BG_MARK), repr(out[-40:]))
 
     print("--- the GPU handoff ---")
     # The cron tag runs at num_ctx 65536 and chat at 32768; Ollama keys runners by model+options,
