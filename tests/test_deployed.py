@@ -42,6 +42,7 @@ SOURCES = {
     "animate_scail":  "pipes/live/animate_scail.py",
     "flux_image":     "pipes/live/flux_image.py",
     "adaptive_memory": "filters/adaptive_memory.py",
+    "task_mode": "filters/task_mode.py",
 }
 
 # The hop BEFORE the one above, which nothing checked until now. `pipes/live/` is gitignored,

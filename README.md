@@ -61,6 +61,7 @@ Highlights:
 | Function | What it does |
 |---|---|
 | `adaptive_memory` | Vendored Adaptive Memory v4.4.1 (`1818TusculumSt/owui-adaptive-memory`) — extracts, dedupes and embeds per-user memories, then prepends them to the last user message. Attached to `Ω Assistant` specifically rather than globally. Provenance and the license caveat: [docs/CAPABILITY_UPGRADE_PLAN.md](docs/CAPABILITY_UPGRADE_PLAN.md). |
+| `task_mode` | The **Task** control in the chat input. While it is on, the turn goes to the hermes background-task agent instead of being guessed at from the wording, and Internet / Code are stood down server-side for that turn. Off by default; the pipe reads it per turn and never remembers it. |
 
 ### The picker is curated on purpose
 

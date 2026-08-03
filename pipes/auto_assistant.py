@@ -266,6 +266,18 @@ HERMES_TIMEOUT_S = 300  # an agent turn can run several tool calls before answer
 # BECAUSE the deterministic path is cheap (a false positive renders a table instead of evicting the
 # chat model), so turning the path off must make the vocabulary inert in the same edit.
 MANAGE_DETERMINISTIC = True
+# The user-facing "Task" control (filters/task_mode.py). When it is on for a turn, that turn goes
+# to the background-task agent — no routing predicate gets a vote.
+#
+# This exists because detection-by-wording kept failing in both directions. "track the item <url>
+# when the price is under 10" was answered with a scraping script because the recurrence pattern
+# had no arm for "is under"; widening the pattern to catch it then made ordinary sentences look
+# like monitors. A control the user turns on has neither failure mode: it is right by construction
+# on the turns it is on, and absent on the turns it is off.
+#
+# The id must match filters/task_mode.py's TASK_MODE_ID. tests/test_task_mode.py pins that, because
+# a rename on one side alone leaves a control that does nothing and reports nothing.
+TASK_MODE_ID = "task_mode"
 # Job management is ADMIN-ONLY. hermes has no per-job owner — one shared API key sees and can
 # delete every job on the host — so one user's list is every user's list. Primary signal is the
 # OpenWebUI role; this allow-list is supplementary, for handles that should qualify anyway.
@@ -496,6 +508,27 @@ class Pipe:
     # the user's actual words follow. Cutting through the closing tag leaves the question they
     # typed, which is the only thing routing should ever see.
     _RAG_ENVELOPE = re.compile(r"^\s*#{2,4}\s*Task\s*:[\s\S]*?</context>\s*", re.I)
+    # Same shape media_session.is_task_request uses. Duplicated here on purpose: that module is a
+    # sidecar copied into OpenWebUI's data volume, so it is absent from any host-side harness and
+    # from a container where the copy failed — and when it is absent the whole text-prefix half of
+    # the task guard silently disappears. That is survivable when the fallback is chat; it is not
+    # survivable under the Task control, where it would hand OpenWebUI's own title and tag prompts
+    # to the background-task agent.
+    _OWUI_TASK_PREFIX = re.compile(r"^\s*#{2,4}\s*Task\s*:", re.I)
+    _OWUI_RAG_MARKS = ("</context>", "<source",
+                       "Respond to the user query using the provided context")
+
+    @classmethod
+    def _is_owui_task(cls, text):
+        """True when this text is OpenWebUI's own machinery talking, not the user.
+
+        The RAG exclusion matters as much as the match: OpenWebUI's retrieval envelope opens with
+        the same '### Task:' heading and is wrapped around a real user turn.
+        """
+        t = text or ""
+        if not cls._OWUI_TASK_PREFIX.match(t):
+            return False
+        return not any(m in t for m in cls._OWUI_RAG_MARKS)
 
     def _strip_injected_context(self, text):
         """Remove app- and filter-injected blocks from the text used for ROUTING.
@@ -3677,6 +3710,143 @@ class Pipe:
                                f"**“{self._md_cell(r['needle'], 40)}”** among your tasks. Here's "
                                f"everything {whose} — nothing was changed:"))
 
+    # ---------- the Task control ----------
+    @staticmethod
+    def _task_mode(metadata):
+        """Which signal says the Task control is on, or None.
+
+        Two independent signals, read as an OR. The enabled-filter list is the client's claim that
+        the control was on; the stamp is the filter's own record that it actually ran, and so that
+        the other modes were actually stood down. A direct API caller can produce the first without
+        the second, and that divergence belongs in a metrics row rather than being invisible.
+
+        Missing the mode drops the turn back onto the wording-based guess this control exists to
+        replace, while entering it spuriously does what the user pressed a button to ask for — so
+        the OR is the right way round.
+        """
+        md = metadata or {}
+        in_ids = TASK_MODE_ID in (md.get("filter_ids") or [])
+        stamped = bool(md.get("task_mode"))
+        if not (in_ids or stamped):
+            return None
+        return "both" if (in_ids and stamped) else ("stamp" if stamped else "filter_ids")
+
+    async def _task_mode_turn(self, cid, text, msgs, user, src):
+        """The whole turn, given that the user asked for the background-task agent.
+
+        The control settles WHETHER to delegate. It does not settle WHAT the request is, so every
+        sub-intent below is decided by the same helper that decides it today — this changes
+        reachability, never resolution.
+        """
+        omsgs = self._ollama_messages(msgs)
+        handle = self._alert_username(user)
+        scoped = self._manage_scope(user, handle) is not None
+        raw = (text or "").strip().lower()
+
+        def row(route, rule, **extra):
+            # Tier 0 throughout: this is an explicit declaration, the same class of signal as a
+            # slash command, not a guess with a confidence.
+            self._route_metric(route, 0, rule, text, task_mode=True, src=src, **extra)
+
+        # 1. Explicit one-shot prefixes keep meaning what they mean.
+        oneshot = self._BG_ONESHOT.match(text or "")
+        if oneshot:
+            question = (text or "")[oneshot.end():].strip()
+            if not question:
+                return self._say("Give me something to look into — e.g. "
+                                 "`/research what changed in the Wan 2.2 release notes`.")
+            row("agent.oneshot", f"slash_{oneshot.group(1).lower()}")
+            self._mark_bg(cid)
+            return self._hermes_stream(question, handle, verify_creation=False,
+                                       brief=self._RESEARCH_BRIEF, scoped=scoped)
+
+        # 2. A bare number answering our own "what should I text?" question. Checked early because
+        #    under this control it would otherwise become a research question ABOUT a phone number.
+        pending = self._pending_phone_request(omsgs, cid)
+        if pending is not None:
+            answered = self._phone_reply(text, handle, pending, cid, scoped=scoped)
+            if answered is not None:
+                row("task.create", "chip_phone_reply")
+                self._mark_bg(cid)
+                return answered
+
+        # 3. Anything the deterministic path can answer, it should: it reads the scheduler over
+        #    HTTP and never loads the agent, so listing stays instant even with the control on.
+        pconf = self._pending_confirm(cid, omsgs, handle=handle if scoped else None)
+        parked = self._parked_jobs(cid, omsgs, handle=handle if scoped else None)
+        mg_manage = bool(self._BG_MANAGE.match(raw))
+        mg_list = bool(self._BG_LIST.search(raw))
+        answering = bool(pconf and (pconf.get("stage") == "choose"
+                                    or self._CONFIRM_YES.match(text or "")
+                                    or self._CONFIRM_ALT.match(text or "")
+                                    or self._CONFIRM_NO.match(text or "")))
+        referring = bool(parked and self._manage_op(text))
+        if answering or referring or mg_manage or mg_list:
+            rule = ("chip:bg_confirm" if answering else "chip:bg_parked_ref" if referring
+                    else "chip:bg_manage_list" if mg_manage else "chip:bg_list_vocab")
+            done = await self._manage_turn(cid, text, parked, rule, pending=pconf,
+                                           user=user, handle=handle)
+            if done is not None:
+                self._mark_bg(cid)
+                return self._say(done)
+            # Declined (the deterministic path is switched off). An ordinary user still must not be
+            # handed to the agent for a read-only question — its job list is the whole host.
+            if scoped and (mg_manage or mg_list):
+                row("task.manage", "chip_scoped_no_fallback", reason="scoped_no_fallback")
+                self._mark_bg(cid)
+                return self._say(
+                    "I can't look up your background tasks right now — task listing is switched "
+                    "off on this assistant. An admin can list and change jobs for you in the "
+                    "meantime.")
+
+        # 4. Continuing the previous agent turn.
+        if self._is_bg_followup(text, omsgs, cid):
+            prev = next((m.get("content") or "" for m in reversed(omsgs)
+                         if m.get("role") == "assistant"), "")
+            sent = (f"Continuing our exchange. You previously said:\n"
+                    f"{prev.replace(self._BG_MARK, '')[-1200:]}\n\n"
+                    f"The user now replies: {text}\n"
+                    f"Act on it against the REAL scheduler state — call "
+                    f"cronjob(action='list') first and work from what is actually there.")
+            row("task.followup", "chip_followup")
+            self._mark_bg(cid)
+            return self._hermes_stream(sent, handle, scoped=scoped, verify_creation=False)
+
+        # 5. Scheduling, on positive evidence only — but ANY one signal is enough. Outside this
+        #    control a monitoring verb must be accompanied by evidence of recurrence, because the
+        #    pair is what distinguishes a request from a sentence. Here the user already said which
+        #    it is, so the conjunction is what was making "track the item <url> when the price is
+        #    under 10" fail: it has the verb, and no schedule word the pattern recognises.
+        create = bool(self._BG_SLASH.match(raw) or self._BG_VERB.match(raw)
+                      or self._BG_RECURRENCE.search(raw) or self._WANTS_ALERT.search(text or ""))
+        if create:
+            # The phone gate survives the control. Creating first and asking later leaves a monitor
+            # that runs, fires, and texts nobody — pressing a button does not fix that.
+            if (self._WANTS_ALERT.search(text or "")
+                    and not self._contact(handle).get("phone")):
+                row("task.create", "chip_phone_prompt")
+                self._mark_bg(cid)
+                return self._say(self._phone_prompt(handle, text, cid))
+            # The confirmation gate is skipped: the control IS the consent, exactly as /task and
+            # /research are ungated. Recorded rather than silent, so the accept/decline stream
+            # stays an honest measure of what the guessing path gets wrong.
+            self._metric(job="confirm", kind="background task", outcome="skipped_task_mode")
+            row("task.create", "chip_create")
+            self._mark_bg(cid)
+            return self._hermes_stream(text, handle, verify_creation=True, scoped=scoped)
+
+        # 6. No evidence of a schedule: ANSWER it, do not schedule it. The two briefs fail very
+        #    differently. A question handed the scheduling brief becomes a job the user has to hunt
+        #    down and cancel, and reports a verification failure on top because nothing was
+        #    created. A monitoring request handed the research brief gets a real answer plus a
+        #    one-line offer to watch it, and the user escalates with a word. One of those is
+        #    recoverable in a turn; the other leaves state behind.
+        self._metric(job="confirm", kind="background task", outcome="skipped_task_mode")
+        row("task.research", "chip_research")
+        self._mark_bg(cid)
+        return self._hermes_stream(text, handle, verify_creation=False,
+                                   brief=self._RESEARCH_BRIEF, scoped=scoped)
+
     _RESEARCH_BRIEF = (
         "You are answering a ONE-OFF question for the user, using your tools. This is not a "
         "scheduled job.\n"
@@ -4450,7 +4620,7 @@ class Pipe:
         # of '### Task:' boilerplate (see media_metrics.jsonl) that also overwrote the chat's
         # last-image cache with junk, which is how "make this picture realistic" got applied
         # to a stranger's photo. Answer them as plain text on the small task model instead.
-        if __task__ or (ms and ms.is_task_request(text)):
+        if __task__ or (ms.is_task_request(text) if ms else self._is_owui_task(text)):
             # No request text on this row on purpose: it is '### Task:' boilerplate at title/tag
             # frequency. The row itself is the standing invariant — a task_guard row carrying any
             # other tier/rule means the guard stopped being the first check.
@@ -4465,6 +4635,19 @@ class Pipe:
             self._route_metric(f"entry:{entry}", 0, "manifold_entry")
             return self._entry_chat_stream(entry, self._ollama_messages(msgs))
         cid = self._chat_id(body, __metadata__)
+        # The Task control (filters/task_mode.py). Placed ABOVE every media branch and the coder
+        # tier on purpose: each of those returns unconditionally once it matches, so anything below
+        # this line could still swallow the turn — "draw a cat" with the control on has to reach
+        # the agent, not the renderer. It stays BELOW the __task__ guard, which must keep winning:
+        # OpenWebUI's own title and tag prompts are not the user asking for anything.
+        #
+        # Requires actual text. A turn that is only an attached image has nothing to delegate, so
+        # it falls through to normal routing rather than becoming an empty request.
+        tm_src = self._task_mode(__metadata__)
+        if BG_TASKS and tm_src and (text or "").strip():
+            done = await self._task_mode_turn(cid, text, msgs, __user__, tm_src)
+            if done is not None:
+                return done
         # What media does this conversation currently revolve around? History first, then the
         # in-memory caches, then the persistent per-chat store — the last one survives deploys
         # and mid-chat model switches (it is shared with the Image and Photoreal pipes).

@@ -58,6 +58,14 @@ PIPES = {
     "flux_image":     ("pipes/flux_image.py",     "pipes/live/flux_image.py"),
 }
 
+# Filters, same deal minus the live twin. adaptive_memory is vendored and never edited, so it was
+# always pasted by hand; task_mode is first-party and WILL be edited, and tests/test_deployed.py
+# byte-compares it against the repo — so hand-pasting it is the same missed step that made this
+# script necessary in the first place.
+FILTERS = {
+    "task_mode": "filters/task_mode.py",
+}
+
 # Files a pipe imports from OpenWebUI's data volume. Pipes are exec'd standalone and cannot
 # import a repo-relative module, so shared code is copied in and reached with a sys.path
 # insert. photoreal.py degrades to its old behaviour when this is missing rather than
@@ -86,7 +94,7 @@ def check_replace_imports(src, path):
             if any(tok in ln for tok in REPLACEMENTS)]
 
 
-def owui_preflight(src):
+def owui_preflight(src, is_filter=False):
     """(manifest, error) computed by OpenWebUI's OWN code, inside its own container.
 
     Two things the UI and the REST API do that a bare `update function set content=...`
@@ -119,6 +127,8 @@ def owui_preflight(src):
         "    out['loads'] = True\n"
         "    p = ns.get('Pipe')\n"
         "    out['pipes'] = p().pipes() if p and hasattr(p(), 'pipes') else None\n"
+        "    out['is_filter'] = ns.get('Filter') is not None\n"
+        "    out['toggle'] = ns.get('toggle')\n"
         "except Exception as e:\n"
         "    out['loads'] = False\n"
         "    out['error'] = f'{type(e).__name__}: {e}'\n"
@@ -136,6 +146,14 @@ def owui_preflight(src):
         return None, "replace_imports() would rewrite this file"
     if not d.get("loads"):
         return None, f"the pipe does not import inside the container — {d.get('error')}"
+    if is_filter:
+        if not d.get("is_filter"):
+            return None, "this file declares no Filter class"
+        # A filter that loses `toggle` stops being user-controlled and becomes ALWAYS-ON: it would
+        # force web search and the code interpreter off on every turn of every chat, with nothing
+        # in the interface to show for it. Nothing else in the stack would notice.
+        if d.get("toggle") is not True:
+            return None, "the filter has no `toggle = True` — it would run on every turn, invisibly"
     return d.get("manifest") or {}, None
 
 
@@ -160,10 +178,14 @@ def deployed_content(fid):
 
 
 def deploy(fid, dry_run=False):
-    if fid not in PIPES:
-        print(f"  unknown pipe id {fid!r} — known: {', '.join(sorted(PIPES))}")
+    is_filter = fid in FILTERS
+    if fid not in PIPES and not is_filter:
+        known = ", ".join(sorted(set(PIPES) | set(FILTERS)))
+        print(f"  unknown function id {fid!r} — known: {known}")
         return 1
-    rel, live_rel = PIPES[fid]
+    # Filters have no pipes/live/ twin: tests/test_deployed.py compares them straight against the
+    # repo file, so there is one fewer link in the chain to keep in step.
+    rel, live_rel = (FILTERS[fid], None) if is_filter else PIPES[fid]
     path = os.path.join(ROOT, rel)
     if not os.path.exists(path):
         print(f"  {rel} does not exist")
@@ -187,7 +209,7 @@ def deploy(fid, dry_run=False):
         print(f"  {fid}: already up to date ({len(src)} chars)")
     elif dry_run:
         print(f"  {fid}: WOULD UPDATE — deployed {len(current)} chars, repo {len(src)} chars")
-        manifest, err = owui_preflight(src)
+        manifest, err = owui_preflight(src, is_filter)
         if err:
             print(f"  {fid}: PREFLIGHT WOULD FAIL — {err}")
             return 1
@@ -195,7 +217,7 @@ def deploy(fid, dry_run=False):
     else:
         # Preflight BEFORE the backup and the write: a file that cannot import must never
         # reach the row, because OpenWebUI would then serve a broken model.
-        manifest, err = owui_preflight(src)
+        manifest, err = owui_preflight(src, is_filter)
         if err:
             print(f"  {fid}: REFUSING to deploy — {err}")
             return 1
@@ -227,6 +249,8 @@ def deploy(fid, dry_run=False):
         print(f"  {fid}: deployed {len(src)} chars, manifest v{manifest.get('version')} "
               f"(backup: {os.path.relpath(bak, ROOT)})")
 
+    if live_rel is None:
+        return 0
     live = os.path.join(ROOT, live_rel)
     if not os.path.exists(live) or open(live, encoding="utf-8").read() != src:
         if dry_run:
@@ -287,8 +311,8 @@ def rollback(fid):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("pipe", nargs="?", help="OpenWebUI function id, e.g. photoreal")
-    ap.add_argument("--all", action="store_true", help="every pipe in the map")
+    ap.add_argument("pipe", nargs="?", help="OpenWebUI function id, e.g. photoreal or task_mode")
+    ap.add_argument("--all", action="store_true", help="every pipe and filter in the maps")
     ap.add_argument("--dry-run", action="store_true")
     ap.add_argument("--rollback", action="store_true")
     a = ap.parse_args()
@@ -305,7 +329,7 @@ def main():
         ap.print_usage()
         return 2
 
-    targets = sorted(PIPES) if a.all else [a.pipe]
+    targets = sorted(set(PIPES) | set(FILTERS)) if a.all else [a.pipe]
     print(f"{'(dry run) ' if a.dry_run else ''}deploying to {DB}")
     rc = 0
     for fid in targets:
