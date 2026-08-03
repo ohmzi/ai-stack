@@ -854,6 +854,12 @@ class Pipe:
     _BG_LVERB = r"(?:tracking|monitoring|watching|keeping an eye on)"
     _BG_LOBJ = (r"(?=\s*[?.!]*\s*$|\s+for\s+(?:me|us)\b|\s+right\s+now\b|\s+currently\b"
                 r"|\s+at\s+the\s+moment\b)")
+    # The noun must END the request (or the clause). Without this, "list all the tracks on that
+    # album", "list the jobs at that company" and "show me the tasks in my jira board" all matched
+    # — there the noun belongs to something else. '\s+or\b' lets a compound question through:
+    # "are you tracking anything for me? or list all the trackers" is one ask, not two.
+    _BG_LEND = (r"(?=\s*[?.!,]*\s*$|\s+(?:right\s+now|currently|again|please|for\s+me)\b"
+                r"|\s*[?.!]\s|\s+or\b)")
     _BG_LIST = re.compile(
         r"^\s*(?:please\s+|hey\s+|so\s+)?(?:can you\s+|could you\s+|will you\s+)?"
         r"(?:"
@@ -861,6 +867,13 @@ class Pipe:
         r"(?:currently\s+|right now\s+)?" + _BG_LVERB + _BG_LOBJ +
         r"|(?:show|list|tell)\s+me\s+(?:all\s+|everything\s+)?(?:the\s+)?(?:things?\s+)?"
         r"(?:that\s+)?you(?:'re| are|re)?\s*(?:currently\s+)?" + _BG_LVERB + _BG_LOBJ +
+        # Yes/no form. "are you tracking anything for me?" is the same question as "what are you
+        # tracking", and it reached the chat model, which answered about conversation context.
+        # 'anything|something|any X' is required so "are you tracking the election results" —
+        # a question about the world, not about the scheduler — stays chat.
+        r"|are\s+you\s+(?:currently\s+)?" + _BG_LVERB + r"\s+(?:anything|something|any\s+\w+)\b"
+        # Bare imperative with no possessive: "list all the trackers".
+        r"|(?:list|show)\s+(?:me\s+)?(?:all\s+)?(?:of\s+)?(?:the|my)\s+" + _BG_LNOUN + _BG_LEND +
         r"|do\s+i\s+have\s+any\s+" + _BG_LNOUN + r"\b"
         r"|am\s+i\s+(?:currently\s+)?(?:tracking|monitoring|watching)\s+anything\b"
         r"|what\s+" + _BG_LNOUN + r"\s+(?:do\s+i\s+have|are\s+(?:there|running|scheduled|active))\b"

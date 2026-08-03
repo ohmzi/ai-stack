@@ -103,6 +103,24 @@ def main():
               "do i have any monitors running?", "what jobs do i have scheduled?",
               "anything running in the background?"]:
         check(f"routes to the scheduler: {t[:44]!r}", p0._is_bg_task_request(t))
+    print("--- yes/no and bare-imperative forms (live miss, answered about chat context) ---")
+    # "are you tracking anything for me ? or list all the trackers" was answered by the chat model
+    # with a description of conversation memory — under all three of web-search off, code
+    # interpreter on, and search on. Both clauses missed: there was no yes/no arm, and 'trackers'
+    # was not in the manage-arm noun set at all.
+    for t in ["are you tracking anything for me ? or list all the trackers",
+              "are you tracking anything for me?", "are you monitoring anything",
+              "are you watching anything for me", "list all the trackers", "list the trackers",
+              "list all my trackers", "show me all the monitors"]:
+        check(f"routes to the scheduler: {t[:50]!r}", p0._is_bg_task_request(t))
+    # The two guards that keep this narrow: the yes/no arm needs an indefinite object, and the
+    # imperative arm needs the noun to end the clause.
+    for t in ["are you tracking the election results", "are you watching the game",
+              "are you monitoring this thread for updates", "list all the tracks on that album",
+              "list the jobs at that company", "show me the tasks in my jira board",
+              "show me the monitors in the store", "list all the ingredients"]:
+        check(f"stays chat: {t[:50]!r}", not p0._is_bg_task_request(t))
+
     print("--- singular nouns count (live miss: 'list all my task' hit the code interpreter) ---")
     for t in ["list all my task", "list my task", "show my job", "what is my task",
               "show me my monitor", "show the active jobs", "list my background tasks"]:
