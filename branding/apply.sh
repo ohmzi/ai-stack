@@ -32,6 +32,24 @@
 #
 # Stock files are copied to .stock-backup on first run only, so a later re-run
 # never overwrites the pristine originals with branded ones.
+#
+# THE SHELL, NOT JUST THE ASSETS. index.html ships four things this script has
+# to rewrite, because no amount of correct files under /static can reach them:
+#
+#   <link rel="manifest" href="/manifest.json">   the BACKEND route, which
+#     returns {"name": "Open WebUI"} built from WEBUI_NAME. It is the only
+#     manifest a browser reads, so Android and iOS name a home-screen shortcut
+#     "Open WebUI" no matter what /static/site.webmanifest says. loader.js
+#     cannot help: the browser fetches a manifest itself, not through
+#     window.fetch, so the wrapper never sees it. Repointed at the branded
+#     static manifest, which was previously installed and referenced by nothing.
+#   <title>Open WebUI</title>                     what anything reading the raw
+#     HTML sees — bookmarks, link previews, iOS's add-to-home-screen prefill.
+#     loader.js only fixes the title once JS has run.
+#   <meta name="theme-color" content="#171717">   stock neutral; paints the
+#     Android status bar and Chrome-mobile's tab strip.
+#   apple-mobile-web-app-title                    absent; it is what iOS labels
+#     a home-screen icon with.
 
 set -euo pipefail
 
@@ -47,6 +65,20 @@ BACKUP="$STATIC/.stock-backup"
 # The SPA shell. Served from /app/build (unlike /static, which comes from the
 # backend directory above) — this is the one file in /app/build that matters.
 INDEX=/app/build/index.html
+# Files in /app/build are also served from the site ROOT, which is where every
+# scraper, feed reader and OS shortcut-maker probes for an icon when it ignores
+# the <link> tags. Stock ships favicon.png here (the "OI" mark) and no .ico at
+# all, so /favicon.ico falls through to the SPA catch-all and returns HTML.
+BUILD_ROOT=/app/build
+
+BRAND_NAME=OhmzAI
+BRAND_THEME='#1a1917'
+# The values to put back on --revert. Hardcoded rather than restored from a
+# backup for the same reason the fingerprints are stripped rather than restored:
+# deterministic, and it cannot resurrect a half-branded shell.
+STOCK_NAME='Open WebUI'
+STOCK_THEME='#171717'
+STOCK_MANIFEST=/manifest.json
 
 # Everything build_assets.py emits, plus the manifest.
 ASSETS=(
@@ -73,21 +105,64 @@ if ! docker exec "$CONTAINER" test -d "$BACKUP"; then
     "cd $STATIC && for f in ${ASSETS[*]}; do [ -f \"\$f\" ] && cp -p \"\$f\" $BACKUP/ || true; done"
 fi
 
+# The site-root favicon.png is a different file from $STATIC/favicon.png, and it
+# is stashed under a name that is NOT in ASSETS so the restore loop below —
+# which walks ASSETS — can never mistake it for a /static asset.
+#
+# Guarded on its own rather than folded into the block above, because that block
+# fires once ever, on the existence of $BACKUP. Anything added to the backup set
+# later would therefore never be captured on an instance that already has one —
+# which is exactly what happened when this file was added. The guard here is
+# per-file and self-healing, and the checksum test enforces the same rule the
+# all-or-nothing block above was written for: a branded file must never be
+# enshrined as the stock one.
+if ! docker exec "$CONTAINER" test -f "$BACKUP/build-root-favicon.png"; then
+  live=$(docker exec "$CONTAINER" sh -c \
+    "sha256sum $BUILD_ROOT/favicon.png 2>/dev/null | cut -d' ' -f1" || true)
+  mine=$(sha256sum "$HERE/assets/favicon.png" | cut -d' ' -f1)
+  if [ -n "$live" ] && [ "$live" != "$mine" ]; then
+    echo "backing up stock site-root favicon"
+    docker exec "$CONTAINER" cp -p "$BUILD_ROOT/favicon.png" "$BACKUP/build-root-favicon.png"
+  fi
+fi
+
 if [ "${1:-}" = "--revert" ]; then
   docker exec "$CONTAINER" test -d "$BACKUP" || die "no backup to revert to"
   # custom.css and loader.js ship empty — they exist purely as customisation
   # hooks — so truncating them IS the stock state, no backup copy needed.
   # Both dirs, or the next start would copy the branded build dir back over the
   # reverted served one — the same trap in reverse.
+  #
+  # Restore by walking ASSETS rather than `cp -rp $BACKUP/.`: the backup also
+  # holds the site-root favicon, which is not a /static asset and must not be
+  # dropped into either static dir.
   docker exec "$CONTAINER" sh -c \
-    "cp -rp $BACKUP/. $STATIC/ && cp -rp $BACKUP/. $BUILD_STATIC/ \
+    "cd $BACKUP && for f in ${ASSETS[*]}; do [ -f \"\$f\" ] && cp -p \"\$f\" $STATIC/ && cp -p \"\$f\" $BUILD_STATIC/ || true; done \
      && : > $STATIC/custom.css && : > $STATIC/loader.js \
      && : > $BUILD_STATIC/custom.css && : > $BUILD_STATIC/loader.js \
      && rm -rf $FONTS $BUILD_STATIC/ohmz-fonts"
-  # Strip the fingerprints rather than restoring index.html from a backup:
-  # deterministic, and it cannot resurrect a half-branded shell.
+  # The site-root icons: favicon.png overwrote a stock file, so it is restored;
+  # favicon.ico did not exist before this script, so it is simply removed.
+  # Say so if the stock copy is missing rather than skipping in silence — that
+  # leaves a branded file behind, and a quiet revert is how you end up debugging
+  # a "reverted" instance that isn't.
+  if docker exec "$CONTAINER" test -f "$BACKUP/build-root-favicon.png"; then
+    docker exec "$CONTAINER" cp -p "$BACKUP/build-root-favicon.png" "$BUILD_ROOT/favicon.png"
+  else
+    echo "warning: no stock copy of $BUILD_ROOT/favicon.png — it stays branded." >&2
+    echo "         recover it with: docker run --rm --entrypoint cat <image> $BUILD_ROOT/favicon.png" >&2
+  fi
+  docker exec "$CONTAINER" rm -f "$BUILD_ROOT/favicon.ico"
+  # Put the shell back. Strip the fingerprints rather than restoring index.html
+  # from a backup: deterministic, and it cannot resurrect a half-branded shell.
+  # Same reasoning for writing the stock strings back literally.
   docker exec "$CONTAINER" sh -c \
-    "sed -i -E 's#(/static/[A-Za-z0-9._-]+)\?v=[A-Za-z0-9]+#\1#g' $INDEX"
+    "sed -i -E 's#(/static/[A-Za-z0-9._-]+)\?v=[A-Za-z0-9]+#\1#g' $INDEX \
+     && sed -i -E 's@<meta name=\"apple-mobile-web-app-title\"[^>]*>@@g' $INDEX \
+     && sed -i -E 's@(<meta name=\"theme-color\" content=)\"[^\"]*\"@\1\"$STOCK_THEME\"@' $INDEX \
+     && sed -i -E \"s@'$BRAND_THEME'@'$STOCK_THEME'@g\" $INDEX \
+     && sed -i -E 's@(<link rel=\"manifest\" href=)\"[^\"]*\"@\1\"$STOCK_MANIFEST\"@' $INDEX \
+     && sed -i -E 's@<title>[^<]*</title>@<title>$STOCK_NAME</title>@' $INDEX"
   echo "reverted to stock assets. Hard-refresh the browser (ctrl-shift-r)."
   exit 0
 fi
@@ -122,8 +197,18 @@ for a in "${ASSETS[@]}"; do
   install_both "$HERE/assets/$a" "$a"
 done
 
+# The site root, for anything that ignores the <link> tags and just asks for
+# /favicon.*. favicon.png replaces the stock "OI" mark; favicon.ico is new —
+# without it that path falls through to the SPA catch-all and answers 200 with
+# text/html, which every consumer of it then fails to decode.
+echo "installing site-root icons"
+docker cp "$HERE/assets/favicon.png" "$CONTAINER:$BUILD_ROOT/favicon.png"
+docker cp "$HERE/assets/favicon.ico" "$CONTAINER:$BUILD_ROOT/favicon.ico"
+
 # The served files must be readable by the app's uid.
-docker exec "$CONTAINER" sh -c "chmod -R a+r $STATIC $BUILD_STATIC && chmod a+rx $FONTS"
+docker exec "$CONTAINER" sh -c \
+  "chmod -R a+r $STATIC $BUILD_STATIC && chmod a+rx $FONTS \
+   && chmod a+r $BUILD_ROOT/favicon.png $BUILD_ROOT/favicon.ico"
 
 # Fingerprint the asset URLs in index.html.
 #
@@ -140,13 +225,56 @@ docker exec "$CONTAINER" sh -c "chmod -R a+r $STATIC $BUILD_STATIC && chmod a+rx
 # layers at once. It also means no hard-refresh is ever needed.
 #
 # Idempotent: any existing ?v= is replaced, not appended to.
-STAMP=$(cat "$HERE/ohmz.css" "$HERE/loader.js" "$HERE/assets/favicon.svg" \
-  | sha256sum | cut -c1-10)
-FINGERPRINTED='custom\.css|loader\.js|favicon\.png|favicon\.svg|favicon\.ico|favicon-96x96\.png|favicon-dark\.png|apple-touch-icon\.png|splash\.png|splash-dark\.png'
+#
+# The stamp hashes EXACTLY the set of files whose URLs carry it. It used to
+# hash three (ohmz.css, loader.js, favicon.svg), which meant changing the mark
+# left the stamp — and therefore every icon URL — untouched: Cloudflare served
+# its four-hour-old copy under the unchanged key, and Chrome, whose favicon
+# database is keyed by icon URL and expires on the order of days, never
+# refetched at all. A revamped logo would simply not appear, on a shell that
+# looked correctly fingerprinted and files that were correct on disk. Hashing
+# the whole installed set is what makes a new asset actually ship.
+STAMP=$(cat "$HERE/ohmz.css" "$HERE/loader.js" \
+  "${ASSETS[@]/#/$HERE/assets/}" | sha256sum | cut -c1-10)
 
-echo "fingerprinting index.html (v=$STAMP)"
+# Built from ASSETS so the two can never drift. The dots are escaped, which is
+# what keeps the alternation unambiguous — no entry is a prefix of another once
+# its separator must match literally (splash\.png cannot match splash-dark.png).
+FINGERPRINTED='custom\.css|loader\.js'
+for a in "${ASSETS[@]}"; do
+  FINGERPRINTED="$FINGERPRINTED|${a//./\\.}"
+done
+
+# index.html and the manifest are the two documents that name asset URLs, and
+# neither is edge-cached (DYNAMIC), so a stamp written into them reaches every
+# browser on the next load and busts the browser and Cloudflare together.
+echo "fingerprinting index.html + site.webmanifest (v=$STAMP)"
 docker exec "$CONTAINER" sh -c \
-  "sed -i -E 's#/static/($FINGERPRINTED)(\?v=[A-Za-z0-9]+)?#/static/\1?v=$STAMP#g' $INDEX"
+  "sed -i -E 's#/static/($FINGERPRINTED)(\?v=[A-Za-z0-9]+)?#/static/\1?v=$STAMP#g' \
+     $INDEX $STATIC/site.webmanifest $BUILD_STATIC/site.webmanifest"
+
+# The shell's own branding — see the header. Every one of these is idempotent:
+# each rewrites a value in place, and the apple-mobile-web-app-title tag is
+# removed before it is re-added so a re-run cannot stack duplicates. It is
+# deleted as a TAG and not as a LINE, because after the first run it shares a
+# line with the theme-color meta that re-inserts it.
+#
+# The last sed is not a duplicate of the theme-color one. The meta tag only
+# holds until the inline anti-FOUC script runs, roughly a frame later: that
+# script setAttribute()s theme-color from its own hardcoded table, so the tag
+# alone would be overwritten with stock #171717 on every load. It is matched
+# single-quoted, which is exactly and only how the script spells it — the meta
+# tag uses double quotes — so this cannot touch the markup. Only the DARK entry
+# is rebranded; light (#ffffff), oled-dark (#000000) and her (#983724) are
+# deliberately left alone, since #1a1917 is the dark canvas specifically
+# (ohmz.css: --color-gray-900 / --color-black).
+echo "branding the shell (manifest link, title, theme-colour, iOS name)"
+docker exec "$CONTAINER" sh -c \
+  "sed -i -E 's@(<link rel=\"manifest\" href=)\"[^\"]*\"@\1\"/static/site.webmanifest?v=$STAMP\"@' $INDEX \
+   && sed -i -E 's@<title>[^<]*</title>@<title>$BRAND_NAME</title>@' $INDEX \
+   && sed -i -E 's@<meta name=\"apple-mobile-web-app-title\"[^>]*>@@g' $INDEX \
+   && sed -i -E 's@<meta name=\"theme-color\" content=\"[^\"]*\" />@<meta name=\"theme-color\" content=\"$BRAND_THEME\" /><meta name=\"apple-mobile-web-app-title\" content=\"$BRAND_NAME\" />@' $INDEX \
+   && sed -i -E \"s@'$STOCK_THEME'@'$BRAND_THEME'@g\" $INDEX"
 
 cat <<DONE
 
@@ -165,6 +293,13 @@ GET /api/config before the front-end reads it — so the sign-in heading, the
 sidebar and the document title all say OhmzAI. Setting WEBUI_NAME instead
 would need the container recreated, and env.py:842-844 would render it as
 "OhmzAI (Open WebUI)" regardless.
+
+The name on a phone home-screen shortcut is a SEPARATE path, and loader.js
+cannot reach it: a browser fetches the web app manifest itself rather than
+through window.fetch. The shell now points at /static/site.webmanifest instead
+of the backend's /manifest.json, which is what was naming those shortcuts
+"Open WebUI". An already-added shortcut keeps the name and icon it was created
+with — the OS copied both at the time. Remove it and add it again.
 
 No restart is needed: these files are read per request. A restart is now also
 SAFE — the assets are written to /app/build/static as well, so config.py's

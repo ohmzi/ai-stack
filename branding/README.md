@@ -22,7 +22,22 @@ an old one. Two layers, disagreeing.
 
 `apply.sh` therefore fingerprints the asset URLs in `index.html` (`?v=<hash>`),
 which is cached `DYNAMIC` — never — so a new hash busts both layers at once and
-no refresh is needed for the assets.
+no refresh is needed for the assets. The same stamp is written into the icon
+URLs inside `site.webmanifest`, which is also `DYNAMIC`.
+
+**The stamp must cover every file that carries it.** It originally hashed three
+(`ohmz.css`, `loader.js`, `favicon.svg`) while eleven URLs carried it, so
+changing *the mark* left every icon URL byte-identical. Cloudflare kept serving
+its four-hour copy under the unchanged key, and Chrome — whose favicon store is
+keyed by icon URL and expires on the order of days, independently of the HTTP
+cache — never refetched at all. A revamped logo simply never appeared, on a
+shell that looked correctly fingerprinted, over files that were correct on disk
+and correct on the wire. `tests/test_branding.py` now recomputes the stamp from
+that file list and asserts the shell carries it.
+
+Chrome's favicon store is the one layer a fingerprint reaches only on the *next*
+change: an icon it has already cached under a URL stays until that URL moves.
+That is fine as long as the stamp moves with the asset, which is the fix above.
 
 The one thing a fingerprint can't bust is the HTML carrying it. Open WebUI
 serves `/` with no `cache-control`, so browsers apply *heuristic* freshness —
@@ -39,8 +54,9 @@ browser actually run the current file?" in one lookup.
 | Path | What it is |
 |---|---|
 | `ohmz.css` | The theme. Installs as `custom.css`. |
-| `loader.js` | App-name override. Installs as `loader.js`. |
+| `loader.js` | App-name override for the running app. Installs as `loader.js`. |
 | `assets/` | Rendered marks — favicons, splash, manifest icons. Committed. |
+| `assets/site.webmanifest` | The PWA manifest — what names a home-screen shortcut. |
 | `fonts/` | Space Grotesk + IBM Plex Mono `woff2`, self-hosted. |
 | `build_assets.py` | Regenerates `assets/` from the font outline. |
 | `apply.sh` | Idempotent installer / reverter. |
@@ -103,6 +119,13 @@ So `apply.sh` writes **both**:
 | `/app/backend/open_webui/static` | what `/static` serves — write it so the skin is live immediately |
 | `/app/build/static` | the source the above is rebuilt from — write it so a restart reproduces the brand |
 
+`/app/build` itself is a third location, but it is not part of that dance — it
+is not rebuilt at startup, which is exactly why `index.html` can be edited in
+place. Its files are also served from the **site root**, which is where anything
+ignoring the `<link>` tags looks for an icon. Stock ships the "OI" `favicon.png`
+there and no `.ico` at all, so `/favicon.ico` fell through to the SPA catch-all
+and answered `200 text/html`. `apply.sh` writes both.
+
 An earlier revision of this file called `/app/build/static` "a leftover served to nobody". That was
 **wrong**, and acting on it broke the skin on 2026-08-01: a plain `docker restart` copied stock
 right back over the branded files. The failure is nasty because it is invisible from the server —
@@ -156,6 +179,48 @@ Two things this beats:
 
 `#sidebar-webui-name` still carries a CSS lockup on top, purely so the sidebar
 renders the **AI** in amber.
+
+### The name on a phone home screen is a different path
+
+`loader.js` cannot reach it, and this is not a caching problem. A browser
+fetches a web app manifest **itself** — not through `window.fetch` — so the
+wrapper never sees it. And the manifest the shell asked for was
+`/manifest.json`, the **backend route**, which builds its `name` from
+`WEBUI_NAME` and therefore always said *Open WebUI*. Meanwhile the branded
+`site.webmanifest` was installed into `/static` and referenced by nothing.
+
+So `apply.sh` repoints `<link rel="manifest">` at `/static/site.webmanifest`.
+Three further things the stock manifest got wrong, now fixed in ours:
+
+- it declared its 512×512 `logo.png` as `500x500`, and **Chrome drops a manifest
+  icon whose declared size does not match the file** — silently, so a correct
+  icon and an ignored one look identical. The test checks declared sizes against
+  each PNG's IHDR.
+- `background_color` was `#343541`, a grey belonging to no theme here.
+- it declared no `id`, `scope` or non-maskable icon.
+
+`share_target` is carried over from the stock manifest — without it Android
+loses OhmzAI from the system share sheet.
+
+Three more things live only in the shell, where no amount of correct files under
+`/static` can reach them:
+
+| In `index.html` | Stock | Why it matters |
+|---|---|---|
+| `<title>` | `Open WebUI` | what reads the raw HTML — bookmarks, link previews, iOS's add-to-home-screen prefill. `loader.js` only fixes the title once JS has run. |
+| `apple-mobile-web-app-title` | absent | what iOS labels a home-screen icon with. |
+| `theme-color` | `#171717` | the Android status bar and Chrome-mobile's tab strip. |
+
+The `theme-color` **meta tag is not enough on its own**: the inline anti-FOUC
+script `setAttribute`s it from its own hardcoded table a frame later, so the tag
+is overwritten on every load. `apply.sh` rewrites the dark entry in that script
+too, matched single-quoted — which is exactly and only how the script spells it,
+the markup uses double quotes. Light (`#ffffff`), oled-dark (`#000000`) and her
+(`#983724`) are deliberately untouched; `#1a1917` is the *dark* canvas
+specifically (`--color-gray-900` / `--color-black`).
+
+An already-added home-screen shortcut keeps the name and icon it was created
+with — the OS copies both at install time. Remove it and add it again.
 
 Open WebUI's licence permits removing its branding for deployments of 50 users
 or fewer (or with a commercial agreement). This is a single-user instance. The
