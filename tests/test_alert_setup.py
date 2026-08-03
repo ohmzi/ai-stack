@@ -136,8 +136,8 @@ def main():
     print("--- answering with a number saves it and runs the original request ---")
     sent = {}
 
-    def fake_stream(text, uname="user", verify_creation=False):
-        sent.update(text=text, uname=uname, verify=verify_creation)
+    def fake_stream(text, uname="user", verify_creation=False, brief=None, scoped=False):
+        sent.update(text=text, uname=uname, verify=verify_creation, scoped=scoped)
         async def go():
             yield "[scheduled]"
         return go()
@@ -147,6 +147,8 @@ def main():
     check("confirms the saved number", "✅ Saved" in out and "514-555-0123" in out, out)
     check("the parked request is what got delegated", sent.get("text") == parked, repr(sent))
     check("creation is still verified", sent.get("verify") is True, repr(sent))
+    check("...and the ownership scope is carried across the phone turn",
+          "scoped" in sent, repr(sent))
     saved = json.load(open(contacts))
     check("number persisted in E.164", saved["ohmz"]["phone"] == "+15145550123", repr(saved))
     check("existing email was not clobbered", saved["ohmz"]["email"] == "o@gmail.com", repr(saved))

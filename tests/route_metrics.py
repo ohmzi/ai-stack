@@ -127,6 +127,19 @@ def main():
             print(f"  ⚠ {bad} delegation(s) where the agent's story and the scheduler disagreed")
         print()
 
+    owner_rows = [r for r in rows if r.get("job") == "owner"]
+    if owner_rows:
+        print(f"=== job ownership ({len(owner_rows)} events)")
+        for (outcome, src), n in Counter((r.get("outcome", "?"), r.get("src", "-"))
+                                         for r in owner_rows).most_common():
+            print(f"  {n:5}x  {outcome}" + (f" (src {src})" if src != "-" else ""))
+        # A job that was never stamped is invisible to whoever asked for it, so a failure here is
+        # not cosmetic — it is a monitor with no owner.
+        bad = [r for r in owner_rows if r.get("outcome") in ("stamp_failed", "corrupt_reset")]
+        if bad:
+            print(f"  ⚠ {len(bad)} ownership write(s) failed or reset — jobs may be unowned")
+        print()
+
     manage = [r for r in rows if r.get("job") == "manage"]
     if manage:
         print(f"=== job mutations ({len(manage)})")
@@ -154,6 +167,14 @@ def main():
             violations.append(f"task.manage row with no strategy/op: {r.get('rule_id')}")
         if r.get("route") == "task.list" and r.get("n_jobs") is None and not r.get("err"):
             violations.append("task.list row with neither n_jobs nor err")
+        # A scoped listing must record how much it hid, or "did the filter do anything?" is
+        # unanswerable after the fact — which is the whole reason these rows exist.
+        if r.get("route") == "task.list" and r.get("scoped") and not isinstance(
+                r.get("n_hidden"), int):
+            violations.append("scoped task.list row with no integer n_hidden")
+    for r in rows:
+        if r.get("job") == "manage" and r.get("outcome") == "not_owner" and not r.get("job_id"):
+            violations.append("not_owner manage row with no job_id")
     if violations:
         print("INVARIANT VIOLATIONS:")
         for v in violations[:10]:

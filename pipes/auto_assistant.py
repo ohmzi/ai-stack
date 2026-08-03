@@ -284,6 +284,21 @@ PARK_TTL_S = 86400      # a rendered list older than this stops backing ordinals
 ALERT_CONTACTS_FILE = os.environ.get("ALERT_CONTACTS",
                                      "/app/backend/data/alerts/contacts.json")
 ALERT_PROFILE_FILE = os.environ.get("ALERT_PROFILE", "/app/backend/data/alerts/profile.json")
+# Who owns which background job. hermes has no per-job owner field and cannot be given one that
+# survives an upgrade (its REST PATCH whitelist rejects unknown keys, the agent's cronjob tool
+# cannot set them, and the pipe cannot import hermes across the container boundary), so ownership
+# is recorded HERE, keyed by the job id the scheduler hands back at creation time.
+#
+# Same directory as the alert files, and for the same reason: it is the one path shared with the
+# host, where the delivery watcher runs and needs to route each job's results to its owner.
+#   {job_id: {"h": handle, "t": epoch, "src": "cited"|"diff"|"seed"}}
+# `src` records HOW the job was attributed, so a stamp made on a weak signal is auditable and
+# repairable by hand rather than being indistinguishable from a certain one.
+TASK_OWNERS_FILE = os.environ.get("TASK_OWNERS", "/app/backend/data/alerts/job_owners.json")
+# A finite job deletes itself from the scheduler on its last run, but the delivery watcher reads
+# that run's output up to a minute later and the results still have to reach the right person.
+# Keep the ownership record well past the disappearance rather than pruning on sight.
+OWNER_PRUNE_S = 72 * 3600
 # Read-only, for resolving a handle to its account email exactly as the delivery side does.
 OWUI_DB = os.environ.get("OWUI_DB", "/app/backend/data/webui.db")
 VID_ENHANCE = True  # expand terse video ideas ("guy shooting hoops") into detailed prompts — the
@@ -1091,6 +1106,87 @@ class Pipe:
         except Exception:
             return False
 
+    # ---------- job ownership ----------
+    @staticmethod
+    def _read_owners():
+        """(owners, err). err is None when the map was read OR is simply absent.
+
+        Deliberately NOT _read_json: that collapses "no file yet" and "file is corrupt" into the
+        same empty default, and those must behave differently. An absent map is the ordinary first
+        run. A CORRUPT one means ownership is unknown, and a caller that treats unknown as empty
+        would tell a user they have no tasks while their monitors keep running — the exact lie the
+        rest of this file works to avoid.
+        """
+        try:
+            with open(TASK_OWNERS_FILE) as f:
+                d = json.load(f)
+            return (d, None) if isinstance(d, dict) else ({}, "unreadable")
+        except FileNotFoundError:
+            return {}, None
+        except Exception:
+            return {}, "unreadable"
+
+    @staticmethod
+    def _write_owners(owners):
+        """Atomic replace, same shape as _save_phone: the host-side delivery watcher reads this
+        file on its own schedule and must never see a half-written map."""
+        try:
+            os.makedirs(os.path.dirname(TASK_OWNERS_FILE), exist_ok=True)
+            tmp = TASK_OWNERS_FILE + ".tmp"
+            with open(tmp, "w") as f:
+                json.dump(owners, f, indent=2)
+            os.replace(tmp, TASK_OWNERS_FILE)
+            return True
+        except Exception:
+            return False
+
+    @staticmethod
+    def _prune_owners(owners, live_ids):
+        """Drop records for jobs the scheduler no longer has, once they are old enough that
+        delivery has certainly finished with them. Returns the number dropped."""
+        now, dead = time.time(), []
+        for jid, rec in owners.items():
+            if jid not in live_ids and now - float((rec or {}).get("t") or 0) > OWNER_PRUNE_S:
+                dead.append(jid)
+        for jid in dead:
+            owners.pop(jid, None)
+        return len(dead)
+
+    def _stamp_owner(self, ids, handle, src="diff", live_ids=None):
+        """Record `handle` as the owner of each job id. Never raises.
+
+        MUST stay synchronous and await-free. The pipe runs on one event loop, so a
+        read-merge-write with no await inside it cannot interleave with another turn's stamp; move
+        any part of this to a thread and concurrent creations start losing each other's records.
+
+        A corrupt map is quarantined rather than merged into: the alternative is refusing to stamp,
+        which would leave the job the user just created invisible to them — compounding one failure
+        with a second.
+        """
+        ids = [i for i in (ids or []) if i]
+        if not ids:
+            return 0
+        owners, err = self._read_owners()
+        if err:
+            try:
+                os.replace(TASK_OWNERS_FILE, TASK_OWNERS_FILE + ".corrupt")
+            except Exception:
+                pass
+            owners = {}
+            self._metric(job="owner", outcome="corrupt_reset", n=len(ids))
+        now = time.time()
+        for jid in ids:
+            owners[jid] = {"h": handle, "t": now, "src": src}
+        if live_ids is not None:
+            self._prune_owners(owners, live_ids)
+        ok = self._write_owners(owners)
+        self._metric(job="owner", outcome="stamped" if ok else "stamp_failed",
+                     n=len(ids), src=src, handle=handle)
+        return len(ids) if ok else 0
+
+    def _owner_of(self, owners, job):
+        return ((owners or {}).get((job or {}).get("id")) or {}).get("h")
+
     @staticmethod
     def _pretty_phone(e164):
         d = re.sub(r"\D", "", e164 or "")
@@ -1200,7 +1296,7 @@ class Pipe:
     async def _say(text):
         yield text
 
-    async def _phone_then_task(self, e164, handle, pending):
+    async def _phone_then_task(self, e164, handle, pending, scoped=False):
         """Save the number, then run the request the user made a turn ago."""
         if not self._save_phone(handle, e164):
             yield (f"⚠️ Couldn't save `{self._pretty_phone(e164)}` — `{ALERT_CONTACTS_FILE}` is "
@@ -1210,10 +1306,11 @@ class Pipe:
         if not pending:
             yield ("Now tell me what to watch and I'll set it up." )
             return
-        async for chunk in self._hermes_stream(pending, handle, verify_creation=True):
+        async for chunk in self._hermes_stream(pending, handle, verify_creation=True,
+                                              scoped=scoped):
             yield chunk
 
-    def _phone_reply(self, text, handle, pending, cid=None):
+    def _phone_reply(self, text, handle, pending, cid=None, scoped=False):
         """Handle the turn AFTER a phone prompt. None => not a phone answer, route normally.
 
         Consuming the prompt clears the parked request: "no thanks" a turn after the task was
@@ -1224,7 +1321,7 @@ class Pipe:
         if self._PHONE_DECLINE.match(t):
             if not pending:
                 return self._say("No problem — no number saved." )
-            return self._hermes_stream(pending, handle, verify_creation=True)
+            return self._hermes_stream(pending, handle, verify_creation=True, scoped=scoped)
         m = self._PHONE_RE.search(t)
         if not m:
             # A short, digit-heavy reply to "what is your number?" IS a phone attempt even when it
@@ -1247,7 +1344,7 @@ class Pipe:
             return self._say(
                 f"`{attempt.strip()}` doesn't look like a mobile number I can text — I need "
                 f"10 digits (or +country code). Try again, or reply **email only**.")
-        return self._phone_then_task(e164, handle, pending)
+        return self._phone_then_task(e164, handle, pending, scoped)
 
     def _pending_phone_request(self, messages, cid=None):
         """The request parked by a previous _phone_prompt, or None.
@@ -1293,21 +1390,24 @@ class Pipe:
         while len(store) > cap:
             store.pop(next(iter(store)))
 
-    def _park_jobs(self, cid, jobs):
+    def _park_jobs(self, cid, jobs, handle=""):
         """Remember the list just rendered, so "the second one" means something next turn.
 
         Returns "" — the reply carries no payload. Ordinal N maps to ids[N-1] and is never
         recomputed, because a job that vanishes between two turns would silently shift every
         number below it.
+
+        The handle rides along so an ordinal cannot be resolved by a different user than the one
+        the list was rendered for. Chat ids should already be per-user; this does not depend on it.
         """
         if cid:
             self._lru(self._parked, cid,
-                      {"t": time.time(),
+                      {"t": time.time(), "h": handle or "",
                        "ids": [j.get("id") for j in jobs[:JOBS_MAX]],
                        "ns": [str(j.get("name") or "")[:40] for j in jobs[:JOBS_MAX]]})
         return ""
 
-    def _parked_jobs(self, cid, messages=None):
+    def _parked_jobs(self, cid, messages=None, handle=None):
         """[{i, id, n}] from the most recent rendered list, or [].
 
         Reads the per-chat store, falling back to the legacy HTML-comment marker so conversations
@@ -1316,11 +1416,18 @@ class Pipe:
         Staleness is not really handled by this clock: jobs vanish with no tombstone when a repeat
         budget is exhausted, so every caller re-fetches /api/jobs and uses this only to map
         ordinal -> id. The TTL is belt-and-braces.
+
+        `handle` refuses a record rendered for someone else. Legacy markers carry no handle and are
+        honoured only for admins (handle=None) — they predate ownership entirely.
         """
         d = self._parked.get(cid) if cid else None
         if d and time.time() - d["t"] <= PARK_TTL_S:
+            if handle is not None and (d.get("h") or "") != handle:
+                return []
             return [{"i": i + 1, "id": jid, "n": (d["ns"][i] if i < len(d["ns"]) else "")}
                     for i, jid in enumerate(d["ids"]) if jid]
+        if handle is not None:
+            return []
         seen = 0
         for m in reversed(messages or []):
             if m.get("role") != "assistant":
@@ -1342,22 +1449,29 @@ class Pipe:
                 return []
         return []
 
-    def _confirm_park(self, cid, op, job, stage="confirm"):
+    def _confirm_park(self, cid, op, job, stage="confirm", handle=""):
         """Arm an operation for the NEXT turn. The name and schedule are kept so the yes-turn can
         check the job did not change under us between the question and the answer."""
         if cid:
             self._lru(self._armed, cid,
-                      {"t": time.time(), "stage": stage, "op": op,
+                      {"t": time.time(), "stage": stage, "op": op, "h": handle or "",
                        "id": (job or {}).get("id"),
                        "n": str((job or {}).get("name") or "")[:60],
                        "s": str((job or {}).get("schedule_display")
                                 or (job or {}).get("schedule") or "")[:40]})
         return ""
 
-    def _pending_confirm(self, cid, messages=None):
+    def _pending_confirm(self, cid, messages=None, handle=None):
         """The armed op, or None. Expiry is REPORTED rather than ignored, so a slow "yes" gets an
-        explanation instead of silence."""
+        explanation instead of silence.
+
+        A record armed for a different handle is not visible — a "yes" must never land on a
+        confirmation somebody else was shown."""
         d = dict(self._armed.get(cid) or {}) if cid else {}
+        if d and handle is not None and (d.get("h") or "") != handle:
+            return None
+        if not d and handle is not None:
+            return None
         if not d:
             prev = next((m.get("content") or "" for m in reversed(messages or [])
                          if m.get("role") == "assistant"), "")
@@ -3018,17 +3132,22 @@ class Pipe:
             return None
 
     @staticmethod
-    def _changed_jobs(before, after):
+    def _changed_jobs(before, after, owner=None, owners=None):
         """[(job_id, what changed)] for jobs the scheduler already had and has since altered.
 
         Only fields a user would recognise as "my task changed": how often it runs, how many runs
         are left, and whether it is on. Anything else (next_run_at ticking forward, last_status)
         moves on its own every minute and would report a change on every single turn.
+
+        `owner` restricts the result to that handle's jobs. The snapshots are host-wide, so
+        without it a change another user made during this turn would be narrated to this one.
         """
         out = []
         for jid, a in (after or {}).items():
             b = (before or {}).get(jid)
             if not b:
+                continue
+            if owner is not None and ((owners or {}).get(jid) or {}).get("h") != owner:
                 continue
             diffs = []
             if (a.get("schedule_display") or a.get("schedule")) != \
@@ -3142,19 +3261,25 @@ class Pipe:
             sched += f" · {rep.get('completed', 0)} of {rep['times']} runs"
         return sched
 
-    def _jobs_table(self, jobs, ordinals=True):
+    def _jobs_table(self, jobs, ordinals=True, owners=None):
         """The markdown table. Rows stay in API order — sorting by state would renumber the list
         between two renders the user is comparing, which is the one thing ordinals cannot survive.
+
+        `owners` adds an Owner column and is passed ONLY on an admin listing: a scoped table
+        contains one owner by construction, so the column would be a column of the reader's own
+        name.
         """
-        rows = ["| # | Task | Schedule | Next run | Last run | ID |",
-                "|---|---|---|---|---|---|"]
+        own = owners is not None
+        rows = ["| # | Task |" + (" Owner |" if own else "") + " Schedule | Next run | Last run | ID |",
+                "|---|---|" + ("---|" if own else "") + "---|---|---|---|"]
         for i, j in enumerate(jobs[:JOBS_MAX], 1):
             last = j.get("last_run_at")
             mark = {"ok": "✅", "error": "⚠️"}.get(str(j.get("last_status") or "").lower(), "")
             last_cell = f"{mark} {self._when(last)}".strip() if last else "*never*"
             handle = f"**{i}**" if ordinals else f"**{chr(96 + i)}**"
+            owner_cell = (f" {self._md_cell(self._owner_of(owners, j) or '—', 16)} |") if own else ""
             rows.append(f"| {handle} | {self._job_glyph(j)} {self._md_cell(j.get('name'), 44)} "
-                        f"| {self._job_sched(j)} | {self._job_next(j)} | {last_cell} "
+                        f"|{owner_cell} {self._job_sched(j)} | {self._job_next(j)} | {last_cell} "
                         f"| `{j.get('id') or 'unknown'}` |")
         out = "\n".join(rows)
         if len(jobs) > JOBS_MAX:
@@ -3205,38 +3330,61 @@ class Pipe:
         return (f"⚠️ **The scheduler errored** ({err}).{tail} Nothing was changed and I cannot show "
                 f"you the list right now.")
 
-    def _render_list(self, cid, jobs, lead=None, ordinals=True, park=True):
-        """The full listing reply: header, table, legend/failures, and the marker that makes
+    @staticmethod
+    def _owners_error():
+        """When ownership cannot be read, an ordinary user is told so — not shown an empty list.
+
+        Same discipline as _jobs_error: an error that reads like "you have nothing" is worse than
+        an error, because the user stops expecting the alert they are still owed.
+        """
+        return ("⚠️ **I could not work out which tasks are yours** — the ownership record is "
+                "unreadable, so I will not guess. That is not the same as having no tasks: "
+                "anything you scheduled is still scheduled and still running. An admin can repair "
+                f"`{TASK_OWNERS_FILE}`.")
+
+    def _render_list(self, cid, jobs, lead=None, ordinals=True, park=True, owners=None,
+                     scoped=False, handle=""):
+        """The full listing reply: header, table, legend/failures, and the state that makes
         ordinals mean something next turn."""
         if not jobs:
-            return ("**No background tasks are scheduled.** I checked hermes's scheduler directly "
-                    "— this is what it actually has, not a guess.\n\nAsk for one with e.g. "
-                    "*monitor the RTX 5090 price on newegg every 6 hours*." )
+            mine = " of yours" if scoped else ""
+            only = ("\n\nOnly your own tasks appear here." if scoped else "")
+            return (f"**No background tasks{mine} are scheduled.** I checked hermes's scheduler "
+                    f"directly — this is what it actually has, not a guess.{only}\n\nAsk for one "
+                    f"with e.g. *monitor the RTX 5090 price on newegg every 6 hours*.")
         live = sum(1 for j in jobs if self._job_live(j))
         paused = sum(1 for j in jobs if not j.get("enabled", True)
                      and str(j.get("state") or "").lower() != "completed")
         done = sum(1 for j in jobs if str(j.get("state") or "").lower() == "completed")
         bits = [f"{live} active"] + ([f"{paused} paused"] if paused else []) \
             + ([f"{done} finished"] if done else [])
-        head = lead or f"**Your background tasks** — {', '.join(bits)}"
-        tail = ("\n\nSay *pause the second one*, *cancel the btc monitor*, or give me an id. "
+        head = lead or (f"**{'All' if owners is not None else 'Your'} background tasks** — "
+                        f"{', '.join(bits)}")
+        # The examples name no job on purpose: a plausible-sounding one ("cancel the btc monitor")
+        # reads as though it refers to a row that is actually there.
+        tail = ("\n\nSay *pause the second one*, *cancel the first one*, or give me an id. "
                 "I read the real scheduler, and I ask before deleting anything.")
-        return (f"{head}\n\n{self._jobs_table(jobs, ordinals)}{self._jobs_notes(jobs)}{tail}"
-                + (self._park_jobs(cid, jobs) if park else ""))
+        return (f"{head}\n\n{self._jobs_table(jobs, ordinals, owners)}{self._jobs_notes(jobs)}{tail}"
+                + (self._park_jobs(cid, jobs, handle) if park else ""))
 
-    def _may_manage(self, user, handle):
-        """Deterministic job management is admin-only.
+    def _manage_scope(self, user, handle):
+        """Whose jobs this turn may see. None = everyone's (admin); otherwise the owning handle.
 
-        hermes has no per-job owner and one shared API key sees — and can delete — every job on the
-        host, so one user's list is every user's list. Until that changes (it needs a hermes-side
-        field, not a pipe-side filter), this stays with admins. Non-admins are not blocked from
-        anything: they fall through to exactly today's agent delegation, which is equally unscoped.
+        Management used to be admin-only, because hermes has no per-job owner and one shared API
+        key sees every job on the host. Ownership now lives in TASK_OWNERS_FILE, stamped at
+        creation from the scheduler's own job ids — so an ordinary user gets a real, scoped view
+        instead of being pushed onto the agent, which would have shown them everything.
+
+        Caveat worth knowing: the handle is the email local part (see _alert_username), so
+        alice@a.com and alice@b.com collide, and every account without an email shares "user".
+        That is the same key the alert contacts already use. If it ever matters, key on
+        user["id"] instead — the change is confined to _alert_username.
         """
-        if str((user or {}).get("role", "")).lower() == "admin":
-            return True
-        return (handle or "") in TASK_ADMINS
+        if str((user or {}).get("role", "")).lower() == "admin" or (handle or "") in TASK_ADMINS:
+            return None
+        return handle or "user"
 
-    async def _do_manage(self, op, job, parked_name=None):
+    async def _do_manage(self, op, job, parked_name=None, scope=None):
         """Execute one scheduler write and report what the SCHEDULER says afterwards, not what the
         API claimed. Returns the finished reply text."""
         jid = job.get("id") or ""
@@ -3251,6 +3399,16 @@ class Pipe:
         if not self._JOB_ID_RE.match(jid):
             return _fin("bad_id", f"⚠️ That row has an unusable job id (`{jid}`), so I cannot "
                                   f"{op} it. Ask hermes directly for this one.")
+        if scope is not None:
+            # Belt and braces: the fetch in _manage_turn already filtered to this owner, so
+            # reaching here means the record changed underneath a parked reference. Re-read rather
+            # than trusting the map this turn started with, and phrase the refusal so it confirms
+            # nothing about a job the user is not allowed to know exists.
+            fresh_owners, oerr = self._read_owners()
+            if oerr or (fresh_owners.get(jid) or {}).get("h") != scope:
+                return _fin("not_owner",
+                            f"⚠️ I don't have a job with id `{jid}` among your tasks, so nothing "
+                            f"was changed.")
         # Pre-checks that make an API call pointless or misleading.
         state = str(job.get("state") or "").lower()
         if op == "pause" and state == "completed":
@@ -3324,9 +3482,9 @@ class Pipe:
 
         Owns every route row it could emit: exactly one per turn, by construction.
         """
-        if not MANAGE_DETERMINISTIC or not self._may_manage(user, handle):
-            self._route_metric("task.manage", 1, rule, text, deterministic=False,
-                               reason="disabled" if not MANAGE_DETERMINISTIC else "not_admin")
+        if not MANAGE_DETERMINISTIC:
+            self._route_metric("task.manage", 1, rule, text,
+                               deterministic=False, reason="disabled")
             return None
         t0 = time.monotonic()
         jobs, err = await asyncio.to_thread(self._jobs_list)
@@ -3336,6 +3494,29 @@ class Pipe:
             self._route_metric("task.list.error", 1, rule, text, err=err,
                                ms=round((time.monotonic() - t0) * 1000))
             return self._jobs_error(err, "list")
+
+        # --- whose jobs is this turn allowed to see? ----------------------------------------
+        scope = self._manage_scope(user, handle)
+        owners, oerr = self._read_owners()
+        total = len(jobs)
+        if err is None and not oerr:
+            live = {j.get("id") for j in jobs}
+            if self._prune_owners(owners, live):
+                self._write_owners(owners)
+                self._metric(job="owner", outcome="pruned")
+        if scope is not None:
+            if oerr:
+                # FAIL CLOSED. The alternative is rendering an empty list, which reads as "you
+                # have nothing scheduled" — the precise lie every error string in _jobs_error
+                # exists to prevent — or showing the unfiltered host list, which is the exposure
+                # this whole path was built to close.
+                self._route_metric("task.list.error", 1, rule, text, err="owners_unreadable",
+                                   ms=round((time.monotonic() - t0) * 1000))
+                return self._owners_error()
+            jobs = [j for j in jobs if self._owner_of(owners, j) == scope]
+        # Everything downstream reads `jobs`: the listing, _resolve_ref's candidate set, the
+        # disambiguation table and the armed-confirm lookup. Filtering once here is what makes
+        # every one of them scoped, including the ones added later.
 
         pend = pending or {}
         op = self._manage_op(text)
@@ -3371,27 +3552,33 @@ class Pipe:
                     self._route_metric("task.manage.abort", 0, "bg_confirm_changed", text)
                     self._disarm(cid)
                     return self._render_list(
-                        cid, [fresh],
+                        cid, [fresh], handle=handle, scoped=scope is not None,
                         lead="⚠️ **That task changed since I asked** — I did not cancel anything. "
                              "Here it is as it stands now; ask again if you still want it gone.")
                 if self._CONFIRM_ALT.match(text or ""):
                     self._metric(job="confirm", kind="task_cancel", outcome="downgraded")
                     self._route_metric("task.manage.downgrade", 0, "bg_confirm_pause", text)
                     self._disarm(cid)
-                    return await self._do_manage("pause", fresh)
+                    return await self._do_manage("pause", fresh, scope=scope)
                 self._metric(job="confirm", kind="task_cancel", outcome="accepted")
                 self._route_metric("task.manage.cancel", 0, "bg_confirm_yes", text, job_id=jid)
                 self._disarm(cid)
-                return await self._do_manage("cancel", fresh, pend.get("n"))
+                return await self._do_manage("cancel", fresh, pend.get("n"), scope=scope)
             if self._CONFIRM_NO.match(text or ""):
                 self._metric(job="confirm", kind="task_cancel", outcome="declined")
                 self._route_metric("task.manage.abort", 0, "bg_confirm_no", text)
                 self._disarm(cid)
                 return "Okay — nothing was cancelled."
-            # Anything else: the user moved on. Never act, never swallow the turn.
+            # Anything else: the user moved on from the confirmation. Never act on it.
             self._metric(job="confirm", kind="task_cancel", outcome="abandoned")
             self._disarm(cid)
-            return None
+            # ...but if what they moved on TO is itself a task request, serve it here rather than
+            # returning None. Falling through would hand "list my tasks" to the agent, whose job
+            # list is the whole host — the one leak this path exists to close.
+            raw = (text or "").strip().lower()
+            if not (op or self._BG_LIST.search(raw) or self._BG_MANAGE.match(raw)):
+                return None
+            pend = {}
 
         # --- an open disambiguation ("which one?") ------------------------------------------
         if pend.get("stage") == "choose":
@@ -3400,8 +3587,13 @@ class Pipe:
         # --- no operation named: this is a listing turn --------------------------------------
         if not op:
             self._route_metric("task.list", 1, rule, text, n_jobs=len(jobs),
-                               deterministic=True, ms=round((time.monotonic() - t0) * 1000))
-            return self._render_list(cid, jobs)
+                               deterministic=True, scoped=scope is not None,
+                               n_hidden=total - len(jobs),
+                               ms=round((time.monotonic() - t0) * 1000))
+            # The Owner column only makes sense on an unscoped list: a scoped one is a column of
+            # the reader's own handle.
+            return self._render_list(cid, jobs, owners=owners if scope is None else None,
+                                     scoped=scope is not None, handle=handle)
 
         # --- an operation aimed at a specific job --------------------------------------------
         r = self._resolve_ref(text, jobs, parked)
@@ -3426,11 +3618,11 @@ class Pipe:
                         f"| ID | `{job.get('id')}` |\n\n"
                         "Deleting removes the job **and its saved output**; there is no undo. "
                         "Reply **yes** to delete it, or anything else to leave it alone." + alt
-                        + self._confirm_park(cid, "cancel", job))
+                        + self._confirm_park(cid, "cancel", job, handle=handle))
             self._route_metric(f"task.manage.{op}", 0 if r["strategy"] in
                                ("ordinal", "id", "prefix") else 1, rule, text,
                                op=op, strategy=r["strategy"], job_id=job.get("id"))
-            return await self._do_manage(op, job)
+            return await self._do_manage(op, job, scope=scope)
 
         # --- could not resolve: explain and re-render, never guess ---------------------------
         self._route_metric("task.manage.ambiguous" if st == "many" else "task.manage.nomatch",
@@ -3442,13 +3634,16 @@ class Pipe:
             # The candidates ARE parked, so "a" / "the first one" resolve against this shortlist
             # rather than the full list they were drawn from.
             return self._render_list(
-                cid, cands, ordinals=False,
+                cid, cands, ordinals=False, handle=handle, scoped=scope is not None,
                 lead=f"**Which one?** {len(cands)} tasks match "
                      f"**“{self._md_cell(r['needle'], 40)}”** — say *a*, *b*, or give me an id. "
-                     f"Nothing has been changed.") + self._confirm_park(cid, op, None, stage="choose")
+                     f"Nothing has been changed.") + self._confirm_park(cid, op, None, stage="choose", handle=handle)
+        # "the scheduler has" is true for an admin and misleading for everyone else, who is being
+        # shown their own slice of it.
+        whose = "you have" if scope is not None else "the scheduler actually has"
         leads = {
-            "bad_id": f"I don't have a job with id `{self._md_cell(r['needle'], 20)}`. "
-                      f"Here's what the scheduler actually has:",
+            "bad_id": f"I don't have a job with id `{self._md_cell(r['needle'], 20)}` among your "
+                      f"tasks. Here's what {whose}:",
             "out_of_range": f"There's no #{self._md_cell(r['needle'], 4)} — the list I showed you "
                             f"has {len(parked)} item(s). Here's the current list:",
             "need_list": "I need to know which one — I haven't shown you a list in this chat yet. "
@@ -3457,9 +3652,10 @@ class Pipe:
                     f"longer in the scheduler. Nothing was changed; here's what's actually there:",
         }
         return self._render_list(
-            cid, jobs, lead=leads.get(st, f"I don't see a task matching "
-                                          f"**“{self._md_cell(r['needle'], 40)}”**. Here's "
-                                          f"everything the scheduler has — nothing was changed:"))
+            cid, jobs, handle=handle, scoped=scope is not None,
+            lead=leads.get(st, f"I don't see a task matching "
+                               f"**“{self._md_cell(r['needle'], 40)}”** among your tasks. Here's "
+                               f"everything {whose} — nothing was changed:"))
 
     _RESEARCH_BRIEF = (
         "You are answering a ONE-OFF question for the user, using your tools. This is not a "
@@ -3582,7 +3778,8 @@ class Pipe:
         handle = re.sub(r"[^a-z0-9_-]", "", local.lower())
         return handle or "user"
 
-    async def _hermes_stream(self, text, uname="user", verify_creation=False, brief=None):
+    async def _hermes_stream(self, text, uname="user", verify_creation=False, brief=None,
+                             scoped=False):
         """Delegate a background-task request to the local hermes-agent API server.
 
         A plain HTTP client, deliberately: hermes's API server is an agent runtime that streams
@@ -3592,12 +3789,24 @@ class Pipe:
 
         `brief` selects the contract: the default cron brief for scheduling, or _RESEARCH_BRIEF for
         one-shot work. They are not interchangeable — handing a research question the cron brief
-        would tell the agent to create a job nobody asked for."""
+        would tell the agent to create a job nobody asked for.
+
+        `scoped` says the requester is an ordinary user, not an admin. It does two things: the
+        agent is told which job ids are that user's so its duplicate-check cannot describe someone
+        else's monitor, and the verdicts below refuse to print details of a job the user does not
+        own. `uname` doubles as the ownership key for anything this turn creates.
+        """
         key = self._hermes_key()
         if not key:
             yield ("⚠️ Background tasks are configured but the hermes-agent key is missing "
                    f"({HERMES_KEY_FILE}). Is the hermes gateway set up on this host?")
             return
+        # Snapshot BEFORE the brief is built: the ctx below names the user's own job ids, which
+        # requires knowing what exists. Unconditional now — it used to be taken only when a verdict
+        # was wanted, which meant follow-up and /research turns created jobs the pipe never learned
+        # the id of, leaving them unowned and so invisible to the person who asked for them.
+        before = self._hermes_jobs()
+        owners, _oerr = self._read_owners()
         if brief is None:
             brief = self._HERMES_BRIEF
             ctx = (f"Request context: the requesting user is '{uname}'. If this job needs to "
@@ -3610,6 +3819,17 @@ class Pipe:
                     "best describes what the user is watching for.")
         else:
             ctx = f"Request context: the requesting user is '{uname}'."
+        if scoped:
+            # The cron brief tells the agent to list existing jobs and refuse to duplicate an
+            # active one. On a shared scheduler that means it would answer "you already have that"
+            # while describing a monitor belonging to someone else. Name the user's own ids so the
+            # duplicate check has a scope. This is instruction, not enforcement — the hard
+            # guarantees are the deterministic scoped path and the verdict filters below.
+            mine = [i for i in (before or {}) if (owners.get(i) or {}).get("h") == uname]
+            ctx += (" Duplicate-check scope: of the jobs already in the scheduler, ONLY these "
+                    "belong to this user: " + (", ".join(sorted(mine)) or "(none)") +
+                    ". Every other job belongs to someone else — never name, cite, quote or "
+                    "describe one, and never treat one as this user's duplicate.")
         # hermes runs hermes-genesis:agent at num_ctx 65536 while chat holds apex-compact at 32768.
         # Ollama keys runners by model+options, so those are two distinct ~17 GB allocations and
         # only one fits. Releasing the chat tenant first makes the handoff deterministic instead of
@@ -3618,10 +3838,6 @@ class Pipe:
         # to_thread because _release_chat_tenant is a blocking requests call: running it inline
         # would stall the event loop, and this pipe serves every other conversation on the box.
         await asyncio.to_thread(self._release_chat_tenant)
-        # Snapshot the scheduler BEFORE delegating, so creation can be verified against ground
-        # truth after the stream rather than trusting the agent's narration (it has claimed jobs
-        # it never created). None when verification is off — e.g. list/cancel requests.
-        before = self._hermes_jobs() if verify_creation else None
         payload = {"model": "hermes-agent", "stream": True,
                    "messages": [{"role": "system", "content": brief + "\n" + ctx},
                                 {"role": "user", "content": text}]}
@@ -3631,7 +3847,28 @@ class Pipe:
         # without [DONE] — client disconnect, hermes crash mid-answer — is visible as exactly that
         # rather than as a missing row.
         outcome = "incomplete"
+        stamped = 0
         t0 = time.monotonic()
+
+        def _attribute(snapshot, src_hint="diff"):
+            """Stamp whatever this turn created. Returns the new ids.
+
+            Prefers ids the agent actually CITED in its reply: brief rule 9 makes it print the real
+            id, and a cited id is evidence this turn created it. The bare snapshot diff is
+            host-wide, so a job another user created in the same seconds would otherwise be
+            attributed here.
+            """
+            nonlocal stamped
+            if snapshot is None or before is None:
+                return []
+            fresh = sorted(set(snapshot) - set(before))
+            if not fresh:
+                return []
+            cited = [i for i in re.findall(r"\b[0-9a-f]{12}\b", reply) if i in fresh]
+            pick, src = (cited, "cited") if cited else (fresh, src_hint)
+            stamped += self._stamp_owner(pick, uname, src=src, live_ids=set(snapshot))
+            return fresh
+
         timeout = aiohttp.ClientTimeout(total=None, sock_connect=15, sock_read=HERMES_TIMEOUT_S)
         try:
             async with aiohttp.ClientSession(timeout=timeout) as s:
@@ -3665,15 +3902,23 @@ class Pipe:
                                         if new_jobs:
                                             break
                                     await asyncio.sleep(1)
+                                # Stamp ownership before any verdict: everything below reports on
+                                # jobs, and a job with no owner is invisible to the person who
+                                # just asked for it.
+                                _attribute(after)
                                 if new_jobs:
                                     outcome = "created"
                                     j = new_jobs[0]
                                     sched = j.get("schedule_display") or str(j.get("schedule", "?"))
+                                    extra = (f" (plus {len(new_jobs) - 1} more)"
+                                             if len(new_jobs) > 1 else "")
                                     yield (f"\n\n✅ **Verified scheduled**: job `{j.get('id')}` "
-                                           f"({sched}) — confirmed against the scheduler, not the "
-                                           f"agent's word.")
+                                           f"({sched}){extra} — confirmed against the scheduler, "
+                                           f"not the agent's word.")
                                     yield self._alert_setup_block(uname)
-                                elif new_jobs is not None and self._changed_jobs(before, after):
+                                elif new_jobs is not None and self._changed_jobs(
+                                        before, after, owner=uname if scoped else None,
+                                        owners=owners):
                                     # An UPDATE is not a creation. "change my alert to every 5
                                     # minutes" produced a correctly rescheduled job AND a message
                                     # saying nothing had been created — the loudest possible way to
@@ -3681,7 +3926,9 @@ class Pipe:
                                     # scheduler already had now has a different schedule, state or
                                     # run budget, something real happened.
                                     outcome = "updated"
-                                    jid, what = self._changed_jobs(before, after)[0]
+                                    jid, what = self._changed_jobs(
+                                        before, after, owner=uname if scoped else None,
+                                        owners=owners)[0]
                                     j = after[jid]
                                     sched = (j.get("schedule_display")
                                              or str(j.get("schedule", "?")))
@@ -3697,6 +3944,25 @@ class Pipe:
                                     # the scheduler.
                                     cited = [i for i in set(re.findall(r"\b[0-9a-f]{12}\b", reply))
                                              if i in (after or {})]
+                                    if scoped:
+                                        # Re-read: the stamp above may have just created the record
+                                        # this check depends on.
+                                        fresh_owners, _ = self._read_owners()
+                                        foreign = [i for i in cited
+                                                   if (fresh_owners.get(i) or {}).get("h") != uname]
+                                        cited = [i for i in cited if i not in foreign]
+                                        if foreign and not cited:
+                                            # The agent pointed at somebody else's monitor. Say
+                                            # that nothing was created WITHOUT confirming what it
+                                            # found — no id, no name, no schedule.
+                                            outcome = "pointed_foreign"
+                                            yield ("\n\nℹ️ The agent referred to an existing job "
+                                                   "that is not yours, so I can't show its "
+                                                   "details. **No new job was created for you** — "
+                                                   "resend the request if you still want this "
+                                                   "monitored.")
+                                            yield self._marks()
+                                            return
                                     live = [i for i in cited if _runnable(after[i])]
                                     if live:
                                         outcome = "pointed_active"
@@ -3726,7 +3992,19 @@ class Pipe:
                                     outcome = "unverifiable"
                                     yield "\n\n(could not verify job creation — /api/jobs unreachable)"
                             else:
-                                outcome = "n/a"  # list/cancel/followup turns verify nothing by design
+                                # No verdict is wanted (follow-up, /research, list) — but the turn
+                                # can still have CREATED something: "yes, create a new one" after a
+                                # finished-job verdict travels the follow-up path. Those jobs used
+                                # to end up unowned, i.e. invisible to the person who asked for
+                                # them. Two short attempts, then give up; the cost on the ordinary
+                                # case (nothing created) is one local GET.
+                                outcome = "n/a"
+                                for attempt in range(2):
+                                    after = self._hermes_jobs()
+                                    if _attribute(after):
+                                        break
+                                    if attempt == 0:
+                                        await asyncio.sleep(1)
                             return
                         try:
                             d = json.loads(data)
@@ -3738,6 +4016,12 @@ class Pipe:
                             yield tok
         except asyncio.TimeoutError:
             outcome = "timeout"
+            # The advice line below says the job may still have been created — so claim it before
+            # saying so, or the user is told to go look for something they will not be able to see.
+            try:
+                _attribute(self._hermes_jobs(), src_hint="timeout")
+            except Exception:
+                pass
             yield ("\n\n⏳ hermes-agent did not finish within the window — the job may still have "
                    "been created. Check the background-tasks channel, or ask me to list tasks.")
             # The marker survives the failure ON PURPOSE. Both advice lines above invite a reply
@@ -3750,7 +4034,11 @@ class Pipe:
         finally:
             # One row per delegation with the verification CLASS — the ready-made outcome signal
             # ("created" vs "failed" vs "timeout") that until now existed only as chat prose.
+            # Sync only. On GeneratorExit (client disconnect) no await is permitted here, which is
+            # why attribution happens above rather than in this block — a job created by a turn the
+            # user walked away from stays unowned until an admin assigns it.
             self._metric(job="hermes", outcome=outcome, verify=bool(verify_creation),
+                         scoped=bool(scoped), stamped=stamped,
                          duration_s=round(time.monotonic() - t0, 1))
 
     def _sampling(self, guard_text):
@@ -4296,8 +4584,11 @@ class Pipe:
         # it, because that turn is unambiguously about the picture.
         if BG_TASKS and MANAGE_DETERMINISTIC and not ref:
             mhandle = self._alert_username(__user__)
-            pconf = self._pending_confirm(cid, omsgs)
-            parked = self._parked_jobs(cid, omsgs)
+            # Non-admins only see state that was rendered FOR them; admins keep reading the legacy
+            # in-message markers, which predate ownership and carry no handle.
+            mscope = self._manage_scope(__user__, mhandle)
+            pconf = self._pending_confirm(cid, omsgs, handle=mhandle if mscope else None)
+            parked = self._parked_jobs(cid, omsgs, handle=mhandle if mscope else None)
             raw_l = (text or "").strip().lower()
             mg_manage = bool(self._BG_MANAGE.match(raw_l))
             mg_list = bool(self._BG_LIST.search(raw_l))
@@ -4321,6 +4612,9 @@ class Pipe:
                     return self._say(done)
         if BG_TASKS and not attached_img and not ref:
             handle = self._alert_username(__user__)
+            # Non-admin turns tell hermes to scope its duplicate check, and make the pipe refuse to
+            # narrate a job the user does not own.
+            scoped = self._manage_scope(__user__, handle) is not None
             # One-shot delegation, EXPLICIT ONLY. hermes's chat surface already has web, file,
             # memory, session_search and todo (terminal and code execution are deliberately
             # excluded in config.yaml), so multi-step research is installed and safe — it was just
@@ -4343,13 +4637,13 @@ class Pipe:
                                    f"slash_{oneshot.group(1).lower()}", text)
                 self._mark_bg(cid)
                 return self._hermes_stream(question, handle, verify_creation=False,
-                                           brief=self._RESEARCH_BRIEF)
+                                           brief=self._RESEARCH_BRIEF, scoped=scoped)
             # A turn that answers "what number should I text?" is handled before anything else —
             # a bare "514-555-0123" matches no task predicate and would otherwise reach the chat
             # model, which would cheerfully claim to have saved it.
             pending = self._pending_phone_request(omsgs, cid)
             if pending is not None:
-                answered = self._phone_reply(text, handle, pending, cid)
+                answered = self._phone_reply(text, handle, pending, cid, scoped=scoped)
                 if answered is not None:
                     self._route_metric("task.create", 0, "phone_reply", text)
                     self._mark_bg(cid)
@@ -4359,7 +4653,7 @@ class Pipe:
                 raw_l = (text or "").strip().lower()
                 is_manage = bool(self._BG_MANAGE.match(raw_l))
                 # Reaching here with listing vocabulary means the deterministic path DECLINED
-                # (scheduler unreachable, non-admin, feature off). It is still a read-only
+                # (scheduler unreachable, or the feature switched off). It is still a read-only
                 # question, so it must be threaded exactly like is_manage below — otherwise a
                 # failed list falls into the job-CREATION machinery and asks for a phone number.
                 is_list = bool(self._BG_LIST.search(raw_l))
@@ -4376,6 +4670,19 @@ class Pipe:
                     bg_rule, bg_tier = "bg_list", 1
                 else:
                     bg_rule, bg_tier = "bg_verb+recurrence", 1
+                # For an ordinary user there is NO agent fallback on a read-only turn. The agent's
+                # job list is the whole host, so delegating "list my tasks" would show them
+                # everyone's — the exact exposure the deterministic path exists to prevent. This
+                # deliberately narrows the old "non-admins fall through to today's behaviour"
+                # contract: that fallthrough WAS the leak. Admins still fall through.
+                if read_only and scoped:
+                    self._route_metric("task.manage", bg_tier, bg_rule, text,
+                                       deterministic=False, reason="scoped_no_fallback")
+                    self._mark_bg(cid)
+                    return self._say(
+                        "I can't look up your background tasks right now — task listing is "
+                        "switched off on this assistant. An admin can list and change jobs for "
+                        "you in the meantime.")
                 self._route_metric(
                     "task.manage" if read_only else
                     ("task.followup" if followup else "task.create"),
@@ -4422,7 +4729,7 @@ class Pipe:
                             f"Act on it against the REAL scheduler state — call "
                             f"cronjob(action='list') first and work from what is actually there.")
                 self._mark_bg(cid)
-                return self._hermes_stream(sent, handle,
+                return self._hermes_stream(sent, handle, scoped=scoped,
                                            verify_creation=not (read_only or followup))
         if not attached_img and not ref and await asyncio.to_thread(self._is_code_request, text):
             code_rule = ("code_strong" if self._CODE_STRONG.search(text or "")

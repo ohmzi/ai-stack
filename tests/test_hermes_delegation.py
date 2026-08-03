@@ -22,7 +22,7 @@ so this never talks to hermes and never creates a job.
 
 Usage:  python3 tests/test_hermes_delegation.py [pipe_path]
 """
-import asyncio, importlib.util, json, sys
+import asyncio, importlib.util, json, os, sys, tempfile, time
 
 PIPE_PATH = sys.argv[1] if len(sys.argv) > 1 else "/home/ohmz/ai-stack/pipes/live/auto_assistant.py"
 spec = importlib.util.spec_from_file_location("aa_del", PIPE_PATH)
@@ -121,7 +121,27 @@ def job(jid, sched="every 5m", enabled=True, state="active", repeat=None):
             "state": state, "repeat": repeat}
 
 
-def drive(reply, snapshots, verify=True, status=200, brief=None, exc=None, post_exc=None):
+OWNERS_DIR = tempfile.mkdtemp()
+
+
+def fresh_owners(seed=None):
+    """A private ownership map for one scenario, so stamps from different drives cannot mix."""
+    path = os.path.join(OWNERS_DIR, f"o{len(os.listdir(OWNERS_DIR))}.json")
+    if seed is not None:
+        json.dump(seed, open(path, "w"))
+    mod.TASK_OWNERS_FILE = path
+    return path
+
+
+def owners_now():
+    try:
+        return json.load(open(mod.TASK_OWNERS_FILE))
+    except Exception:
+        return {}
+
+
+def drive(reply, snapshots, verify=True, status=200, brief=None, exc=None, post_exc=None,
+          scoped=False, uname="ohmz"):
     """Run one delegation turn. `snapshots` is what _hermes_jobs returns on successive calls.
     `exc` kills the SSE stream before [DONE]; `post_exc` kills the connection attempt itself."""
     p = mod.Pipe()
@@ -152,7 +172,8 @@ def drive(reply, snapshots, verify=True, status=200, brief=None, exc=None, post_
     chunks = []
     try:
         async def go():
-            async for c in p._hermes_stream("watch this price every 5m", "ohmz", verify, brief):
+            async for c in p._hermes_stream("watch this price every 5m", uname, verify, brief,
+                                            scoped=scoped):
                 chunks.append(c)
         asyncio.run(go())
     finally:
@@ -282,6 +303,82 @@ def main():
     drive("scheduled", [before, before], verify=False)
     sysmsg = next((m["content"] for m in SENT.get("messages", []) if m["role"] == "system"), "")
     check("the cron brief is still the default", mod.Pipe._HERMES_BRIEF[:60] in sysmsg)
+
+    print("--- every job this turn creates is stamped to the requester ---")
+    # Ownership is what makes a per-user view possible at all: hermes records no owner, so the one
+    # moment the pipe can attribute a job is the instant it appears in the before/after diff. A job
+    # created and not stamped is invisible to the person who asked for it, forever.
+    fresh_owners()
+    drive("scheduled it", [before, {**before, "new1": job("new1")}], uname="alice")
+    check("a created job is owned by whoever asked", owners_now().get("new1", {}).get("h") == "alice",
+          repr(owners_now()))
+    check("...and jobs that already existed are not claimed", "old" not in owners_now(),
+          repr(owners_now()))
+
+    fresh_owners()
+    drive("made both", [before, {**before, "n1": job("n1"), "n2": job("n2")}], uname="alice")
+    check("EVERY new job is stamped, not just the first",
+          {"n1", "n2"} <= set(owners_now()), repr(owners_now()))
+
+    # The diff is host-wide, so a job another user created in the same seconds would otherwise be
+    # attributed here. The agent prints the real id it made (brief rule 9) — prefer that.
+    fresh_owners()
+    drive("created abc123abc123 for you",
+          [before, {**before, "abc123abc123": job("abc123abc123"), "someoneelse1": job("someoneelse1")}],
+          uname="alice")
+    o = owners_now()
+    check("a cited id wins over the bare diff", o.get("abc123abc123", {}).get("h") == "alice", repr(o))
+    check("...and the concurrently-created stranger is left alone", "someoneelse1" not in o, repr(o))
+    check("...and the stamp records that it was cited",
+          o.get("abc123abc123", {}).get("src") == "cited", repr(o))
+
+    # The gap this closes: "yes, create a new one" travels the follow-up path, which wants no
+    # verdict — and used to take no snapshot either, so the job it created ended up unowned.
+    fresh_owners()
+    drive("done", [before, {**before, "fup1": job("fup1")}], verify=False, uname="alice")
+    check("a job created on a no-verdict turn is still owned",
+          owners_now().get("fup1", {}).get("h") == "alice", repr(owners_now()))
+
+    fresh_owners()
+    drive("partial", [before, {**before, "late1": job("late1")}], verify=False,
+          exc=asyncio.TimeoutError(), uname="alice")
+    check("a job created by a turn that TIMED OUT is claimed before we tell the user to go look",
+          owners_now().get("late1", {}).get("h") == "alice", repr(owners_now()))
+
+    print("--- a scoped turn is told which jobs are the user's, and narrates no others ---")
+    fresh_owners({"old": {"h": "bob", "t": time.time()},
+                  "mine1": {"h": "alice", "t": time.time()}})
+    base2 = {"old": job("old"), "mine1": job("mine1")}
+    drive("ok", [base2, base2], verify=False, scoped=True, uname="alice")
+    sysmsg = next((m["content"] for m in SENT.get("messages", []) if m["role"] == "system"), "")
+    check("the duplicate-check scope names only the user's own job",
+          "mine1" in sysmsg.split("Duplicate-check scope:")[-1]
+          and "old" not in sysmsg.split("Duplicate-check scope:")[-1], sysmsg[-300:])
+    check("...and forbids describing anyone else's", "never name, cite, quote or describe" in sysmsg)
+    drive("ok", [base2, base2], verify=False, scoped=False, uname="alice")
+    sysmsg = next((m["content"] for m in SENT.get("messages", []) if m["role"] == "system"), "")
+    check("an admin turn carries no scope restriction", "Duplicate-check scope" not in sysmsg)
+
+    print("--- ...and refuses to report on a job the user does not own ---")
+    # Real 12-hex ids: the verifier resolves citations with \b[0-9a-f]{12}\b, so a placeholder
+    # name would never be recognised as a citation at all and the test would pass vacuously.
+    BOBS = "bbbb11112222"
+    snap = {BOBS: job(BOBS)}
+    fresh_owners({BOBS: {"h": "bob", "t": time.time()}})
+    out = drive(f"that is already running as {BOBS}", [snap, snap], scoped=True, uname="alice")
+    check("pointing at somebody else's job says nothing was created for you",
+          "not yours" in out and "No new job was created for you" in out, out[-260:])
+    check("...without leaking its id", f"`{BOBS}`" not in out, out[-260:])
+    fresh_owners({BOBS: {"h": "alice", "t": time.time()}})
+    out = drive(f"that is already running as {BOBS}", [snap, snap], scoped=True, uname="alice")
+    check("...but her OWN job is reported normally",
+          "No new job created" in out and f"`{BOBS}`" in out, out[-200:])
+
+    fresh_owners({BOBS: {"h": "bob", "t": time.time()}})
+    out = drive("changed it", [{BOBS: job(BOBS, "every 5m")}, {BOBS: job(BOBS, "every 10m")}],
+                scoped=True, uname="alice")
+    check("a change to another user's job is not narrated to this one",
+          "Verified updated" not in out, out[-200:])
 
     print("--- /research is EXPLICIT: no heuristic may fire on ordinary chat ---")
     p = mod.Pipe()

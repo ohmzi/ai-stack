@@ -22,7 +22,7 @@ never create, pause or delete a real job.
 
 Usage:  python3 tests/test_manage_path.py [pipe_path]
 """
-import asyncio, base64, importlib.util, json, sys, time
+import asyncio, base64, importlib.util, json, os, sys, tempfile, time
 
 PIPE_PATH = sys.argv[1] if len(sys.argv) > 1 else "/home/ohmz/ai-stack/pipes/live/auto_assistant.py"
 spec = importlib.util.spec_from_file_location("aa_mng", PIPE_PATH)
@@ -52,10 +52,27 @@ ADMIN = {"email": "someone@example.com", "role": "admin"}
 CALLS = []          # every stubbed API call, so "did not act" is provable
 
 
-def make(jobs=None, err=None, mutate_err=None, on_delete=None):
+OWNERS_DIR = tempfile.mkdtemp()
+
+
+def owners_file(mapping):
+    """Point the pipe at a fresh ownership map. `None` means 'no file at all' (first run);
+    a string writes it verbatim, which is how a corrupt map is simulated."""
+    path = os.path.join(OWNERS_DIR, f"owners_{len(os.listdir(OWNERS_DIR))}.json")
+    if mapping is not None:
+        with open(path, "w") as f:
+            f.write(mapping if isinstance(mapping, str)
+                    else json.dumps({k: {"h": v, "t": time.time(), "src": "seed"}
+                                     for k, v in mapping.items()}))
+    mod.TASK_OWNERS_FILE = path
+    return path
+
+
+def make(jobs=None, err=None, mutate_err=None, on_delete=None, owners=None):
     """A pipe whose scheduler is a fixture. Records every call it is asked to make."""
     p = mod.Pipe()
     state = {"jobs": [dict(j) for j in (JOBS if jobs is None else jobs)]}
+    owners_file(owners)
     CALLS.clear()
 
     def api(method, path, body=None, timeout=10):
@@ -84,7 +101,7 @@ def make(jobs=None, err=None, mutate_err=None, on_delete=None):
 CID = "chat-1"
 
 
-def turn(p, text, msgs=None, user=ADMIN, cid=CID):
+def turn(p, text, msgs=None, user=ADMIN, cid=CID, handle="tester"):
     """One deterministic manage turn, as pipe() would call it.
 
     State lives on the pipe INSTANCE keyed by chat id, not in the message text, so `p` must be
@@ -93,7 +110,7 @@ def turn(p, text, msgs=None, user=ADMIN, cid=CID):
     msgs = msgs or []
     return asyncio.run(p._manage_turn(
         cid, text, p._parked_jobs(cid, msgs), "test",
-        pending=p._pending_confirm(cid, msgs), user=user, handle="tester"))
+        pending=p._pending_confirm(cid, msgs), user=user, handle=handle))
 
 
 def assistant(text):
@@ -378,15 +395,93 @@ def main():
     check("...and the injected page starts no render",
           "![" not in wout and "<video" not in wout, wout[:200])
 
-    print("--- authorization: admin-only while hermes has no per-job owner ---")
-    check("an admin may manage", p0._may_manage({"role": "admin"}, "nobody"))
-    check("a listed handle may manage", p0._may_manage({}, sorted(mod.TASK_ADMINS)[0]))
-    check("everyone else falls through to today's behaviour",
-          not p0._may_manage({"role": "user"}, "stranger"))
-    check("a non-admin turn declines rather than answering",
-          turn(make(), "list my tasks", user={"role": "user"}) is None)
+    print("--- ownership: each user sees ONLY their own tasks ---")
+    check("an admin's scope is unrestricted", p0._manage_scope({"role": "admin"}, "nobody") is None)
+    check("a listed handle is unrestricted too",
+          p0._manage_scope({}, sorted(mod.TASK_ADMINS)[0]) is None)
+    check("everyone else is scoped to their own handle",
+          p0._manage_scope({"role": "user"}, "alice") == "alice")
+    check("an account with no email still gets a scope, never an empty one",
+          p0._manage_scope({"role": "user"}, "") == "user")
     check("the real handle spelling is covered (it is the email local part, not the name)",
           "omariqbal97" in mod.TASK_ADMINS, repr(mod.TASK_ADMINS))
+
+    OWN = {"ab12cd34ef56": "alice", "77aa11bb22cc": "bob"}   # the amazon job stays unowned
+    USER = {"role": "user"}
+
+    pa = make(owners=OWN)
+    a_list = turn(pa, "list my tasks", user=USER, handle="alice")
+    check("alice sees her own job", "RTX 5090" in a_list, a_list[:200])
+    check("...and NOTHING of bob's — not the name", "btc drop" not in a_list, a_list)
+    check("...not the id", "77aa11bb22cc" not in a_list, a_list)
+    check("...and not the unowned job either (unowned is admin-only)",
+          "amazon.ca" not in a_list, a_list)
+    check("...the header counts only what she can see", "1 active" in a_list, a_list[:120])
+    check("...and the parked ordinals are hers alone",
+          [d["id"] for d in pa._parked_jobs(CID)] == ["ab12cd34ef56"])
+
+    pb = make(owners=OWN)
+    b_list = turn(pb, "list my tasks", user=USER, handle="bob")
+    check("bob sees his own job", "btc drop" in b_list, b_list[:200])
+    check("...and none of alice's", "RTX 5090" not in b_list and "ab12cd34ef56" not in b_list, b_list)
+
+    pad = make(owners=OWN)
+    ad_list = turn(pad, "list my tasks")
+    check("an admin sees every job", all(j["name"][:18] in ad_list for j in JOBS), ad_list[:300])
+    check("...with an Owner column naming each one",
+          "| Owner |" in ad_list and "alice" in ad_list and "bob" in ad_list, ad_list[:400])
+    check("...and an unowned job shows as unclaimed rather than as somebody's", "—" in ad_list)
+
+    print("--- ...and cannot touch anyone else's, by id or by name ---")
+    pc = make(owners=OWN)
+    turn(pc, "list my tasks", user=USER, handle="alice")
+    CALLS.clear()
+    steal = turn(pc, "cancel 77aa11bb22cc", user=USER, handle="alice")
+    check("cancelling by a foreign id issues no write", "DELETE" not in [m for m, _ in CALLS],
+          repr(CALLS))
+    check("...and the refusal does not confirm the job exists",
+          "btc" not in steal.lower() and "Cancel this task" not in steal, steal[:200])
+    CALLS.clear()
+    steal2 = turn(pc, "cancel the btc monitor", user=USER, handle="alice")
+    check("cancelling by a foreign NAME finds nothing to cancel",
+          "DELETE" not in [m for m, _ in CALLS] and "btc drop alert" not in steal2, steal2[:200])
+    # Defence in depth: _do_manage re-reads ownership even when handed a job object directly,
+    # because the armed-confirm path resolves an id parked a turn earlier.
+    direct = asyncio.run(pc._do_manage("cancel", JOBS[1], scope="alice"))
+    check("_do_manage refuses a job outside the scope it was given",
+          "don't have a job" in direct and "DELETE" not in [m for m, _ in CALLS], direct[:160])
+
+    print("--- alice can still fully manage her own ---")
+    pm = make(owners=OWN)
+    turn(pm, "list my tasks", user=USER, handle="alice")
+    ask = turn(pm, "cancel the RTX one", user=USER, handle="alice")
+    check("her own job confirms normally", "Cancel this task for good?" in ask, ask[:120])
+    gone = turn(pm, "yes", user=USER, handle="alice")
+    check("...and deletes on yes", "Cancelled" in gone, gone[:120])
+    check("...with exactly one DELETE", [m for m, _ in CALLS].count("DELETE") == 1, repr(CALLS))
+
+    print("--- an unreadable ownership map fails CLOSED, never as 'you have none' ---")
+    pcorrupt = make(owners="{ this is not json")
+    bad = turn(pcorrupt, "list my tasks", user=USER, handle="alice")
+    check("the user is told ownership could not be read", "could not work out which tasks" in bad,
+          bad[:160])
+    check("...and explicitly that this is not an empty list", "not the same as" in bad, bad[:200])
+    check("...no job names leak while ownership is unknown",
+          not any(j["name"][:10] in bad for j in JOBS), bad[:200])
+    check("an admin is unaffected by a corrupt map",
+          "RTX 5090" in (turn(make(owners="{ nope"), "list my tasks") or ""))
+
+    print("--- ownership state cannot be borrowed across users in one chat ---")
+    ph = make(owners=OWN)
+    turn(ph, "list my tasks", user=USER, handle="alice")
+    check("a list rendered for alice is invisible to bob",
+          ph._parked_jobs(CID, handle="bob") == [])
+    check("...and still visible to alice", len(ph._parked_jobs(CID, handle="alice")) == 1)
+    turn(ph, "cancel the RTX one", user=USER, handle="alice")
+    check("an armed confirm is likewise not answerable by another user",
+          ph._pending_confirm(CID, handle="bob") is None)
+    check("...but is by the user who armed it",
+          (ph._pending_confirm(CID, handle="alice") or {}).get("stage") == "confirm")
 
     print("--- the kill switch takes the broadened vocabulary with it ---")
     old_flag = mod.MANAGE_DETERMINISTIC

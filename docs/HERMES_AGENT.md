@@ -432,6 +432,70 @@ the user answered "yes reenable", the message matched no task predicate, went to
 — which read the job id out of the transcript and produced a confident confirmation of something it
 had not done and could not do.
 
+### Jobs belong to a user, even though hermes has no idea who that is
+
+A hermes job record carries no owner: `origin.user_id` is `None` for everything created through the
+API server, the API key is shared, and `GET /api/jobs` returns every job on the host. That is fine
+for one person and wrong the moment there are two — one user could list, read and cancel another's
+monitors.
+
+Ownership is therefore recorded **pipe-side**, in
+`/volume1/docker/openwebui/config/alerts/job_owners.json`:
+
+```json
+{"6dc7813ef231": {"h": "omariqbal97", "t": 1785737368.4, "src": "seed"}}
+```
+
+The stamp happens in `_hermes_stream`: the pipe already snapshots `/api/jobs` before and after every
+delegation to verify creation, so the ids that appear in that diff are the ids this turn created.
+Where the agent printed a real id in its reply (brief rule 9) that id is preferred over the bare
+diff — `src` records which, so a stamp made on the weaker signal is auditable. `h` is the handle
+from `_alert_username`, i.e. the email local part.
+
+Why not patch hermes: its REST `PATCH` whitelist rejects unknown keys, the agent's `cronjob` tool
+cannot set them, and the pipe cannot import hermes across the container boundary. The vendored
+checkout is a plain `git pull --ff-only` clone, so a local patch is one `hermes update` away from
+being stashed or reset. The sidecar needs none of that and is readable by the host-side delivery
+timer, which is the other thing that needs it.
+
+Consequences, all covered by `tests/test_task_ownership.py`:
+
+* an ordinary user's list, reference resolution and every write are filtered to their own jobs;
+* an admin (OpenWebUI `role`, or a handle in `TASK_ADMINS`) sees everything, with an Owner column;
+* an **unowned** job is admin-only — never adopted by whoever asks first;
+* a read-only turn from an ordinary user is **never** delegated to the agent, because the agent's
+  job list is the whole host and it has no notion of who is asking. With `MANAGE_DETERMINISTIC`
+  off they get a refusal rather than a fallthrough; admins keep the old behaviour;
+* if the map is unreadable, an ordinary user is told so. Not an empty list ("you have nothing
+  scheduled" is the one lie that matters here) and not the unfiltered host list.
+
+Known limits, stated rather than hidden: the handle is an email local part, so `alice@a.com` and
+`alice@b.com` collide and every account without an email shares `user` — the same key the alert
+contacts already use. The before/after diff is host-wide, so two simultaneous creations can
+cross-stamp; the cited-id preference shrinks that window and `src` makes it repairable. A turn the
+user disconnects from cannot stamp at all, leaving that job unowned until an admin assigns it. And
+this protects OpenWebUI users from each other — anyone with the hermes key on the host still sees
+everything.
+
+### Results go to the owner's channel
+
+`LOG:` output used to post to a single shared background-tasks webhook, so every user read every
+other user's monitor results. `hermes_delivery.py` now resolves the job's owner from the sidecar
+above and looks the handle up in
+`/volume1/docker/openwebui/config/alerts/owner_channels.json`:
+
+```json
+{"omariqbal97": "http://<host>/api/v1/channels/webhooks/<id>/<secret>"}
+```
+
+Per user, one-time, in the OpenWebUI admin UI: create a channel (e.g. `tasks-alice`), add that user
+and the admins, create a channel webhook, paste the URL under their handle.
+
+An unowned job, an owner with no channel mapped, or a corrupt map all fall back to the original
+shared webhook. That fallback is deliberate — a routing miss must never *drop* a result — which is
+why the shared channel should be restricted to admins. The ALERT leg (text/email) was already
+per-user and is unchanged.
+
 ## Rollback
 
 ```bash

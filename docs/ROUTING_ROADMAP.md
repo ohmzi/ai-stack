@@ -82,13 +82,40 @@ Deleting is irreversible (hermes rmtree's the job's output), so cancel is a two-
 that **fails closed**: no single message can delete a job, a bare "ok"/"sure" is not a
 confirmation, and a job whose name or schedule changed between the question and the answer is not
 deleted. `_confirm_render` is deliberately not used for mutation — it fails open with no client.
-Admin-only while hermes has no per-job owner; non-admins fall through to today's agent path.
 Kill switch: `MANAGE_DETERMINISTIC`, which makes the broadened vocabulary inert in the same edit.
 
+*(Superseded 2026-08-03: management was admin-only in this step because hermes has no per-job
+owner. It is now scoped per user — see below.)*
+
+### Done — 2026-08-03 (per-user ownership)
+
+Each user's background tasks are their own. Ownership is recorded pipe-side in
+`alerts/job_owners.json`, stamped from the scheduler's own job ids in `_hermes_stream`'s
+before/after diff, preferring an id the agent actually cited over the bare diff. Attribution is now
+unconditional, closing the follow-up, `/research` and timeout gaps where a created job used to end
+up unowned — and so invisible to whoever asked for it.
+
+Scoping falls out of one filter on `_manage_turn`'s single fetch, so listing, reference resolution,
+disambiguation and the armed-confirm lookup are all scoped together. `_do_manage` re-reads
+ownership before any write. Parked lists and armed confirms carry the handle they were rendered
+for. A non-admin read-only turn is never delegated to the agent — the agent's job list is the whole
+host — so with the kill switch off they get a refusal, not a fallthrough. An unreadable ownership
+map fails closed with an explanation rather than an empty list. Unowned jobs are admin-only.
+
+Results delivery is per-user too: `hermes_delivery.py` routes each job's `LOG:` output to its
+owner's channel via `alerts/owner_channels.json`, falling back to the shared webhook (which should
+be admin-only) whenever ownership or routing is unknown — a routing miss must never drop a result.
+
+Covered by `tests/test_task_ownership.py` (38 end-to-end checks through `pipe()`), plus ownership
+blocks in `test_manage_path.py`, attribution/verdict-filter checks in `test_hermes_delegation.py`,
+and routing checks in `test_hermes_delivery.py`. See `HERMES_AGENT.md` for the stated limits
+(handle collisions, concurrent-creation misattribution, host-shell access).
+
 ### Next
-4. **Explicit entries** — agent manifold entry (+ its 0.10.2 `access_grant` row and an
-   authorization decision: admin-only vs owner-tagged jobs), `filters/agent_toggle.py`, action
-   button; marker strings pinned by coupling tests.
+4. **Explicit entries** — agent manifold entry (+ its 0.10.2 `access_grant` row),
+   `filters/agent_toggle.py`, action button; marker strings pinned by coupling tests.
+   The authorization half of this step is **done** (2026-08-03): jobs are owner-tagged, so the
+   access grant no longer implies exposing everyone's tasks to everyone.
 5. **Shadow tier 2** — versioned exemplar file, embed-at-init on bge-m3, cosine scorer logging
    into the route rows on every turn without acting; replay the historical metrics corpus; fit
    thresholds; promotion needs ≥50 in-scope shadow decisions, and demotion triggers are defined

@@ -124,7 +124,7 @@ def main():
         open(os.path.join(d, "job1", "run.md"), "w").write("## Response\nLOG: it ran\n")
         open(hd.STATE, "w").write(broken)
         posted = []
-        hd.post_channel = lambda summary, job: posted.append(summary) or True
+        hd.post_channel = lambda summary, job, job_id=None: posted.append(summary) or True
         sys.argv = ["hd"]
         rc = hd.main()
         label = repr(broken[:18])
@@ -271,6 +271,36 @@ def main():
         hd.process_alert_queue({"k2": e2})
         check("a delivered alert is marked delivered", e2["status"] == "delivered", e2["status"])
         check("delivered after exactly one attempt", len(e2["attempts"]) == 1)
+
+    print("--- results are routed to their OWNER's channel, and never dropped ---")
+    # A shared channel means every user reads every other user's monitor results. Ownership is
+    # recorded by the pipe at creation; this side turns it into a destination. A routing miss must
+    # fall back to the shared channel, never swallow the result.
+    d = _tf.mkdtemp()
+    hd.OWNERS_FILE = os.path.join(d, "job_owners.json")
+    hd.OWNER_CHANNELS_FILE = os.path.join(d, "owner_channels.json")
+    hd.WEBHOOK_FILE = os.path.join(d, "shared_url")
+    open(hd.WEBHOOK_FILE, "w").write("https://x/shared\n")
+    json.dump({"j-alice": {"h": "alice"}, "j-nochan": {"h": "carol"}},
+              open(hd.OWNERS_FILE, "w"))
+    json.dump({"alice": "https://x/alice", "bob": "https://x/bob"},
+              open(hd.OWNER_CHANNELS_FILE, "w"))
+
+    check("an owned job goes to its owner's channel",
+          hd.channel_for("j-alice") == ("https://x/alice", "alice"),
+          repr(hd.channel_for("j-alice")))
+    check("an UNOWNED job falls back to the shared channel, not nowhere",
+          hd.channel_for("j-unknown") == ("https://x/shared", None),
+          repr(hd.channel_for("j-unknown")))
+    check("an owner with no channel mapped also falls back",
+          hd.channel_for("j-nochan") == ("https://x/shared", None),
+          repr(hd.channel_for("j-nochan")))
+    open(hd.OWNERS_FILE, "w").write("{ broken")
+    check("a corrupt owner map degrades to shared delivery rather than dropping the run",
+          hd.channel_for("j-alice") == ("https://x/shared", None),
+          repr(hd.channel_for("j-alice")))
+    check("a missing map file is not an error either",
+          hd._read_map(os.path.join(d, "nope.json")) == {})
 
     fails = results.count(False)
     print(f"\n{len(results)} checks — {'ALL PASS' if not fails else str(fails) + ' FAILURE(S)'}")

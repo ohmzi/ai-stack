@@ -44,6 +44,19 @@ import urllib.request
 OUT_DIR = os.path.expanduser("~/.hermes/cron/output")
 STATE = os.path.join(OUT_DIR, ".delivered.json")
 WEBHOOK_FILE = os.path.expanduser("~/.hermes/owui_webhook_url")
+# Per-user results routing. Job ownership is recorded by the pipe at creation time (it is the only
+# component that knows which OpenWebUI user asked); this side reads it to decide WHICH channel a
+# job's results belong in. Both files live in the OpenWebUI config dir because that is the one path
+# the container and the host share.
+#   job_owners.json     {job_id: {"h": handle, ...}}         written by pipes/auto_assistant.py
+#   owner_channels.json {handle: "<channel webhook url>"}    written by hand, one line per user
+# A job with no owner, or an owner with no channel, falls back to WEBHOOK_FILE. That fallback is
+# deliberate: a routing miss must never DROP a result. Keep the shared channel admin-only so the
+# fallback leaks to admins rather than to everyone.
+OWNERS_FILE = os.environ.get(
+    "TASK_OWNERS", "/volume1/docker/openwebui/config/alerts/job_owners.json")
+OWNER_CHANNELS_FILE = os.environ.get(
+    "OWNER_CHANNELS", "/volume1/docker/openwebui/config/alerts/owner_channels.json")
 # Recipient is a bare handle; the legacy alerts- prefix is still accepted and stripped, because
 # jobs created before 2026-07-30 spell it that way and must keep working.
 # Alert delivery is retried and recorded. A "sent" that nobody received is the failure mode this
@@ -208,8 +221,36 @@ def job_titles():
     return out
 
 
-def post_channel(summary, job_name):
-    url = open(WEBHOOK_FILE).read().strip()
+def _read_map(path):
+    """A JSON object from disk, or {} — never raises. A corrupt map degrades this to the shared
+    channel, which is the safe direction: results still arrive, just not privately."""
+    try:
+        with open(path) as f:
+            d = json.load(f)
+        return d if isinstance(d, dict) else {}
+    except Exception:
+        return {}
+
+
+def channel_for(job_id):
+    """(webhook_url, owner_handle_or_None) for this job's results.
+
+    Falls back to the shared webhook whenever ownership or routing is unknown. Dropping a result
+    would be worse than posting it to the admin channel: the user is waiting on the answer, and a
+    silently swallowed run is the failure mode this whole subsystem was built to stop.
+    """
+    owner = (_read_map(OWNERS_FILE).get(job_id) or {}).get("h")
+    if owner:
+        url = (_read_map(OWNER_CHANNELS_FILE).get(owner) or "").strip()
+        if url:
+            return url, owner
+    return open(WEBHOOK_FILE).read().strip(), None
+
+
+def post_channel(summary, job_name, job_id=None):
+    url, owner = channel_for(job_id) if job_id else (open(WEBHOOK_FILE).read().strip(), None)
+    # The owner's own channel needs no name tag; the shared fallback does, so an admin reading it
+    # can tell whose unrouted job they are looking at.
     data = json.dumps({"content": f"🤖 {job_name}: {summary}"}).encode()
     req = urllib.request.Request(url, data=data, headers={"Content-Type": "application/json"})
     with urllib.request.urlopen(req, timeout=15) as r:
@@ -392,7 +433,7 @@ def main():
         if not st["log"]:
             try:
                 if log:
-                    post_channel(log, job_name)
+                    post_channel(log, job_name, job_id)
                 st["log"] = True
             except Exception as e:
                 print(f"channel retry later {f}: {e}", file=sys.stderr)
@@ -425,9 +466,11 @@ def main():
         # Drain the retry queue every tick, then persist both state files.
         for entry in process_alert_queue(alert_state):
             try:
+                # Routed to the owner's channel too: an undeliverable alert is news for the person
+                # who is waiting on it, not only for whoever reads the shared log.
                 post_channel(f"⚠️ ALERT UNDELIVERABLE after {MAX_ATTEMPTS} attempts "
                              f"(last error: {entry['attempts'][-1]['notes']}): {entry['message']}",
-                             entry["job"])
+                             entry["job"], entry.get("job_id"))
             except Exception:
                 pass
         save_alert_state(alert_state)
