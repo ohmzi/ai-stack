@@ -127,6 +127,18 @@ def main():
             print(f"  ⚠ {bad} delegation(s) where the agent's story and the scheduler disagreed")
         print()
 
+    manage = [r for r in rows if r.get("job") == "manage"]
+    if manage:
+        print(f"=== job mutations ({len(manage)})")
+        for (op, outcome), n in Counter((r.get("op", "?"), r.get("outcome", "?"))
+                                        for r in manage).most_common():
+            print(f"  {n:5}x  {op}: {outcome}")
+        # The scheduler disagreeing with its own API is the failure worth alarming on.
+        bad = [r for r in manage if r.get("outcome") in ("verify_failed", "api_error")]
+        if bad:
+            print(f"  ⚠ {len(bad)} mutation(s) where the write and the re-read disagreed")
+        print()
+
     # Standing invariants — the greps that must stay boring.
     violations = []
     for r in routes:
@@ -135,6 +147,13 @@ def main():
             violations.append(f"task_guard row with tier={r.get('tier')} rule={r.get('rule_id')}")
         if "### Task" in str(r.get("request", "")):
             violations.append(f"route row carries '### Task' boilerplate: {r.get('route')}")
+        # Every manage row must say HOW it resolved, or the accept/decline ratio cannot be
+        # attributed to a strategy and piece C stays unmeasurable.
+        if str(r.get("route", "")).startswith("task.manage.") and not (
+                r.get("strategy") or r.get("op")):
+            violations.append(f"task.manage row with no strategy/op: {r.get('rule_id')}")
+        if r.get("route") == "task.list" and r.get("n_jobs") is None and not r.get("err"):
+            violations.append("task.list row with neither n_jobs nor err")
     if violations:
         print("INVARIANT VIOLATIONS:")
         for v in violations[:10]:

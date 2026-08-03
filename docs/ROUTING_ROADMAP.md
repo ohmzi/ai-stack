@@ -63,10 +63,29 @@ job), and clipped plurals slipping the 'job' blocklist ("cancel my job apps"). A
 and pinned. That is the roadmap's thesis in miniature: heuristic edits ship with measurement and
 review, or they ship regressions.
 
-### Next
+### Done — 2026-08-02 (step 3)
 
-3. **Deterministic manage path** — render `/api/jobs` as a table beside `_hermes_jobs`; pause /
-   delete behind a pipe-rendered confirm; agent fallback only for ambiguous references.
+Deterministic job management, per `MANAGE_PATH_PLAN.md`. Listing, pausing, resuming and cancelling
+are answered from hermes's REST API with no model in the path and no chat-tenant eviction — a
+"list my tasks" turn went from ~22.7 s to one local HTTP call. Nine natural phrasings that used to
+reach the chat model (which invented a task list) now route deterministically; the listing regex
+measures 16/16 recall against its targets and 0/42 against an ordinary-chat corpus.
+
+Reference-based management resolves "cancel the RTX one" / "pause the second one" through an
+ordered, deterministic ladder (exact id → parked ordinal → id prefix → name → name+prompt → token
+overlap → bare), where the first stage producing a candidate decides and ties never break by
+margin. Bulk ("cancel everything") and exclusion ("all except the rtx one") are guarded and can
+never resolve to a single job. Disambiguation uses letters so a number never means two things in
+one conversation.
+
+Deleting is irreversible (hermes rmtree's the job's output), so cancel is a two-turn marker gate
+that **fails closed**: no single message can delete a job, a bare "ok"/"sure" is not a
+confirmation, and a job whose name or schedule changed between the question and the answer is not
+deleted. `_confirm_render` is deliberately not used for mutation — it fails open with no client.
+Admin-only while hermes has no per-job owner; non-admins fall through to today's agent path.
+Kill switch: `MANAGE_DETERMINISTIC`, which makes the broadened vocabulary inert in the same edit.
+
+### Next
 4. **Explicit entries** — agent manifold entry (+ its 0.10.2 `access_grant` row and an
    authorization decision: admin-only vs owner-tagged jobs), `filters/agent_toggle.py`, action
    button; marker strings pinned by coupling tests.

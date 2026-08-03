@@ -254,6 +254,28 @@ HERMES_URL = "http://127.0.0.1:8642/v1"
 # Env override for the host-side harnesses, same pattern as MEDIA_METRICS.
 HERMES_KEY_FILE = os.environ.get("HERMES_KEY_FILE", "/app/backend/data/hermes_api_key")
 HERMES_TIMEOUT_S = 300  # an agent turn can run several tool calls before answering
+
+# --- deterministic job management (2026-08-02) ---------------------------------------------------
+# Listing and changing jobs used to be delegated to the agent like everything else, which meant
+# "list my tasks" cost a ~22.7 s chat-tenant eviction plus an agent run to answer a question the
+# REST API answers in milliseconds — and phrasings the regex missed reached the CHAT model, which
+# invented a task list. hermes exposes full cron CRUD, so the pipe answers these itself from
+# /api/jobs and never asks a model what is scheduled.
+#
+# ONE switch for both halves on purpose: the broadened listing vocabulary below is only safe
+# BECAUSE the deterministic path is cheap (a false positive renders a table instead of evicting the
+# chat model), so turning the path off must make the vocabulary inert in the same edit.
+MANAGE_DETERMINISTIC = True
+# Job management is ADMIN-ONLY. hermes has no per-job owner — one shared API key sees and can
+# delete every job on the host — so one user's list is every user's list. Primary signal is the
+# OpenWebUI role; this allow-list is supplementary, for handles that should qualify anyway.
+# NB the handle comes from _alert_username, i.e. the EMAIL LOCAL PART (omariqbal97@… -> omariqbal97),
+# not the display name. contacts.json already carries both spellings from an earlier drift.
+TASK_ADMINS = {h for h in os.environ.get("TASK_ADMINS", "ohmz omariqbal97").lower()
+               .replace(",", " ").split() if h}
+JOBS_MAX = 25           # rows rendered before "…and N more"; keeps a runaway list readable
+CONFIRM_TTL_S = 600     # an armed delete older than this is refused, not silently ignored
+PARK_TTL_S = 86400      # a rendered list older than this stops backing ordinals
 # Alert wiring the pipe can see from inside the container. Both live in the OpenWebUI config
 # directory because that is the only path shared with the host, where the transports run:
 #   contacts — read AND written here, so a phone number the user types in chat is usable at once
@@ -810,6 +832,92 @@ class Pipe:
         r"|search(?:es)?|hunts?|markets?)\b)"
         r"|(?:monitoring|tracking)\b(?!\s+(?:me|us|him|her|them)\b)"
         r"))", re.I)
+    # Asking what is scheduled, phrased as people actually phrase it. _BG_MANAGE needs a literal
+    # task NOUN behind a possessive ("my tasks"); none of these have one — "things you are
+    # tracking" puts the noun in a verb and the object in a preposition — so they all reached the
+    # CHAT model, which answered with an invented list of monitors the user never created.
+    #
+    # Only safe because the deterministic path answers these: a false positive costs a local table
+    # render, not a 23 s eviction. Gated on MANAGE_DETERMINISTIC for exactly that reason.
+    #
+    # The object guard on the verb-phrase arms is load-bearing. Without it "what are you watching
+    # on netflix", "what are you monitoring in the lab" and "what are you tracking in your fitness
+    # app" all fired. Measured: 16/16 of the target phrasings, 0/42 of an ordinary-chat corpus.
+    _BG_LNOUN = r"(?:tasks?|monitors?|jobs?|watches|watchers?|trackers?|alerts?|reminders?|automations?)"
+    _BG_LVERB = r"(?:tracking|monitoring|watching|keeping an eye on)"
+    _BG_LOBJ = (r"(?=\s*[?.!]*\s*$|\s+for\s+(?:me|us)\b|\s+right\s+now\b|\s+currently\b"
+                r"|\s+at\s+the\s+moment\b)")
+    _BG_LIST = re.compile(
+        r"^\s*(?:please\s+|hey\s+|so\s+)?(?:can you\s+|could you\s+|will you\s+)?"
+        r"(?:"
+        r"(?:what|show me what|tell me what)\s+(?:are\s+you|you(?:'re| are)|youre)\s+"
+        r"(?:currently\s+|right now\s+)?" + _BG_LVERB + _BG_LOBJ +
+        r"|(?:show|list|tell)\s+me\s+(?:all\s+|everything\s+)?(?:the\s+)?(?:things?\s+)?"
+        r"(?:that\s+)?you(?:'re| are|re)?\s*(?:currently\s+)?" + _BG_LVERB + _BG_LOBJ +
+        r"|do\s+i\s+have\s+any\s+" + _BG_LNOUN + r"\b"
+        r"|am\s+i\s+(?:currently\s+)?(?:tracking|monitoring|watching)\s+anything\b"
+        r"|what\s+" + _BG_LNOUN + r"\s+(?:do\s+i\s+have|are\s+(?:there|running|scheduled|active))\b"
+        r"|(?:is\s+)?anything\s+(?:running|scheduled|active)\s+(?:in\s+the\s+background|right now)\b"
+        r")", re.I)
+
+    # ---------- managing a specific job by reference ----------
+    # The verb decides the operation; the rest of the message is the reference. 'restart' is
+    # deliberately ABSENT — it reads as run-now, which re-arms and then deletes a one-shot, so it
+    # stays with the agent rather than being silently absorbed by resume.
+    _MANAGE_VERB = re.compile(
+        r"^\s*(?:please\s+|pls\s+|hey\s+|ok(?:ay)?[,\s]+|now\s+)*"
+        r"(?:(?:can|could|would|will)\s+you\s+(?:please\s+)?)?(?:go\s+ahead\s+and\s+)?"
+        r"(?P<verb>cancel|delete|remove|stop|end|kill|get\s+rid\s+of|unsubscribe\s+from"
+        r"|pause|hold|disable|suspend|turn\s+off"
+        r"|resume|unpause|re-?enable|re-?activate|turn\s+back\s+on)\b", re.I)
+    _MANAGE_OPS = {"cancel": "cancel", "delete": "cancel", "remove": "cancel", "stop": "cancel",
+                   "end": "cancel", "kill": "cancel", "get rid of": "cancel",
+                   "unsubscribe from": "cancel",
+                   "pause": "pause", "hold": "pause", "disable": "pause", "suspend": "pause",
+                   "turn off": "pause",
+                   "resume": "resume", "unpause": "resume", "reenable": "resume",
+                   "re-enable": "resume", "reactivate": "resume", "re-activate": "resume",
+                   "turn back on": "resume"}
+    _ORDINAL_WORDS = {"first": 1, "second": 2, "third": 3, "fourth": 4, "fifth": 5, "sixth": 6,
+                      "seventh": 7, "eighth": 8, "ninth": 9, "tenth": 10}
+    _ORDINAL_RE = re.compile(
+        r"\b(?:(first|second|third|fourth|fifth|sixth|seventh|eighth|ninth|tenth)"
+        r"|(\d{1,2})(?:st|nd|rd|th)?"
+        r"|#\s*(\d{1,2})"
+        r"|(?:number|no\.?|item|entry|task|job|row)\s*(\d{1,2}))\b", re.I)
+    # Words that carry no identity. 'such' is here on purpose: "cancel such and such tracking" is a
+    # PLACEHOLDER, not a name, so it must reduce to zero tokens and be treated as a bare reference.
+    _REF_STOP = frozenset("""the a an my our your this that those these it its one ones thing
+        things please for me us and or of on in to now right currently task tasks job jobs monitor
+        monitors monitoring watch watches watching watcher tracker trackers tracking alert alerts
+        reminder reminders cron crons automation automations background scheduled active running
+        such is are was were do does did i you he she they them there here what which""".split())
+    # Bulk and exclusion are exactly where a wrong guess is unrecoverable, so neither ever resolves
+    # to a single job — they always fall through to "which one?".
+    _REF_QUANTIFIER = re.compile(r"\b(?:all|every|everything|each|both|the\s+rest|any\s+of\s+them)\b", re.I)
+    _REF_NEGATION = re.compile(
+        r"\b(?:not|isn'?t|aren'?t|except|other\s+than|besides|apart\s+from|rather\s+than"
+        r"|instead\s+of|but\s+the|the\s+other)\b", re.I)
+
+    # Rendered-list state: ordinal N maps to ids[N-1], never recomputed from a fresh fetch.
+    _JOBS_MARK_RE = re.compile(r"<!--bg-jobs:([A-Za-z0-9+/=]*)-->")
+    # An armed destructive op, or an open disambiguation.
+    _CONFIRM_MARK_RE = re.compile(r"<!--bg-confirm:([A-Za-z0-9+/=]*)-->")
+    # Deleting is irreversible (hermes rmtree's the job's output directory), so a bare "ok" or
+    # "sure" is NOT enough to trigger one — those are acknowledgements, not decisions. The
+    # permissive set stays for the reversible pause downgrade below.
+    _CONFIRM_YES = re.compile(
+        r"^\s*(?:yes|yeah|yep|yup|do it|delete it|cancel it|confirm(?:ed)?|"
+        r"yes please|delete|go ahead and delete)\b[\s\S]{0,40}$", re.I)
+    _CONFIRM_ALT = re.compile(
+        r"^\s*(?:just\s+)?(?:pause|pause it|pause instead|switch it off|turn it off|disable it)\b",
+        re.I)
+    # 'stop' is deliberately absent: on a confirm turn it is ambiguous between "stop asking" and
+    # "stop the job", so it falls through to the abandoned branch rather than guessing.
+    _CONFIRM_NO = re.compile(
+        r"^\s*(?:n|no|nope|nah|don'?t|do not|wait|never\s?mind|nvm|leave it|keep it|"
+        r"forget it|cancel that|no thanks?)\b", re.I)
+
     _BG_VERB = re.compile(
         r"^\s*(?:please\s+|can you\s+|could you\s+)?"
         r"(?:monitor|track|watch|keep an eye on|keep track of|alert me|notify me|remind me|ping me)\b", re.I)
@@ -1095,6 +1203,248 @@ class Pipe:
                 return None
         return None
 
+    # ---------- cross-turn state for job management ----------
+    def _park_jobs(self, jobs):
+        """The marker that makes "the second one" mean something next turn.
+
+        Base64 for the same reason _phone_prompt uses it: a job name can contain quotes, newlines
+        or '--', any of which would break the HTML comment or leak into the rendered chat.
+        Parallel arrays rather than objects to keep the history small.
+        """
+        try:
+            blob = json.dumps({"v": 1, "t": int(time.time()),
+                               "ids": [j.get("id") for j in jobs[:JOBS_MAX]],
+                               "ns": [str(j.get("name") or "")[:20] for j in jobs[:JOBS_MAX]]},
+                              separators=(",", ":"))
+            return f"<!--bg-jobs:{base64.b64encode(blob.encode()).decode()}-->"
+        except Exception:
+            return ""
+
+    def _parked_jobs(self, messages):
+        """[{i, id, n}] from the most recent rendered list, or [].
+
+        Scans the last TWO assistant turns because people interleave a question between the list
+        and the instruction ("what does the second one check?" then "cancel it"). Unlike
+        _pending_phone_request this does NOT stop at _BG_MARK — the table itself carries that
+        marker, so stopping there would abort on the very message being looked for.
+
+        Staleness is not really handled by this clock: jobs vanish with no tombstone when a repeat
+        budget is exhausted, so every caller re-fetches /api/jobs and uses this only to map
+        ordinal -> id. The TTL is belt-and-braces against a list resurrected by history editing.
+        """
+        seen = 0
+        for m in reversed(messages or []):
+            if m.get("role") != "assistant":
+                continue
+            seen += 1
+            if seen > 2:
+                break
+            hits = self._JOBS_MARK_RE.findall(m.get("content") or "")
+            if not hits:
+                continue
+            try:
+                # LAST match, not first: a message could contain an earlier marker quoted back.
+                d = json.loads(base64.b64decode(hits[-1]).decode())
+                if d.get("v") != 1 or time.time() - float(d.get("t", 0)) > PARK_TTL_S:
+                    return []
+                ids, ns = d.get("ids") or [], d.get("ns") or []
+                return [{"i": i + 1, "id": jid, "n": (ns[i] if i < len(ns) else "")}
+                        for i, jid in enumerate(ids) if jid]
+            except Exception:
+                return []
+        return []
+
+    def _confirm_park(self, op, job, stage="confirm"):
+        """Arm an operation for the NEXT turn. The name and schedule ride along so the yes-turn can
+        check the job did not change under us between the question and the answer."""
+        try:
+            blob = json.dumps({"v": 1, "t": int(time.time()), "stage": stage, "op": op,
+                               "id": (job or {}).get("id"),
+                               "n": str((job or {}).get("name") or "")[:60],
+                               "s": str((job or {}).get("schedule_display")
+                                        or (job or {}).get("schedule") or "")[:40]},
+                              separators=(",", ":"))
+            return f"<!--bg-confirm:{base64.b64encode(blob.encode()).decode()}-->"
+        except Exception:
+            return ""
+
+    def _pending_confirm(self, messages):
+        """The armed op from the LAST assistant turn, or None.
+
+        Deliberately stricter than the jobs marker: one intervening assistant turn means the user
+        moved on, and a stray "yes" three messages later must never arm a delete. An expired marker
+        is REPORTED as expired rather than ignored, so a slow "yes" gets an explanation.
+        """
+        prev = next((m.get("content") or "" for m in reversed(messages or [])
+                     if m.get("role") == "assistant"), "")
+        hits = self._CONFIRM_MARK_RE.findall(prev)
+        if not hits:
+            return None
+        try:
+            d = json.loads(base64.b64decode(hits[-1]).decode())
+        except Exception:
+            return None
+        if d.get("v") != 1:
+            return None
+        d["expired"] = (time.time() - float(d.get("t", 0))) > CONFIRM_TTL_S
+        return d
+
+    # ---------- resolving "the RTX one" to a real job ----------
+    @classmethod
+    def _manage_op(cls, text):
+        """'cancel' | 'pause' | 'resume' | None, from the leading verb.
+
+        Length-capped like _is_bg_followup: a 300-word message that happens to open with "stop" is
+        prose, not an instruction aimed at a job.
+        """
+        t = (text or "").strip()
+        if not t or len(t) > 160:
+            return None
+        m = cls._MANAGE_VERB.match(t)
+        if not m:
+            return None
+        verb = re.sub(r"\s+", " ", m.group("verb").lower())
+        return cls._MANAGE_OPS.get(verb) or cls._MANAGE_OPS.get(verb.replace("-", ""))
+
+    @staticmethod
+    def _fold(s):
+        """Comparison form. NFKD-normalises rather than deleting non-ASCII, so a job named
+        'Café price watch' is still findable by typing 'cafe'."""
+        try:
+            import unicodedata
+            s = unicodedata.normalize("NFKD", str(s or ""))
+            s = "".join(c for c in s if not unicodedata.combining(c))
+        except Exception:
+            s = str(s or "")
+        return re.sub(r"\s+", " ", re.sub(r"[^\w$.]+", " ", s.lower())).strip()
+
+    @classmethod
+    def _ref_ordinal(cls, phrase):
+        """1-based position, or None. Deliberately not a general number parser: a bare number only
+        counts when it is the WHOLE reference, so "cancel 2" resolves and "cancel the 60k alert"
+        does not."""
+        p = phrase.strip()
+        if re.fullmatch(r"\d{1,2}", p):
+            return int(p)
+        # Disambiguation candidates are lettered so a number can never mean two different jobs in
+        # one conversation; a bare letter answers that question and nothing else.
+        if re.fullmatch(r"[a-j]", p, re.I):
+            return ord(p.lower()) - 96
+        if re.search(r"\blast\s+one\b|\bthe\s+last\b", p, re.I):
+            return -1          # resolved against the parked length by the caller
+        m = cls._ORDINAL_RE.search(p)
+        if not m:
+            return None
+        word, bare, hashed, labelled = m.groups()
+        if word:
+            return cls._ORDINAL_WORDS[word.lower()]
+        if hashed or labelled:
+            return int(hashed or labelled)
+        # A bare digit only counts if nothing else is left of the reference.
+        rest = (p[:m.start()] + p[m.end():]).strip()
+        if bare and not [t for t in cls._fold(rest).split() if t not in cls._REF_STOP]:
+            return int(bare)
+        return None
+
+    @classmethod
+    def _ref_tokens(cls, phrase):
+        return [t for t in cls._fold(phrase).split() if t not in cls._REF_STOP and len(t) > 1]
+
+    def _resolve_ref(self, text, jobs, parked):
+        """Map the user's words onto exactly one job, or refuse.
+
+        Ordered strategies, and the FIRST stage producing a candidate decides — a weaker signal
+        must never override a stronger one. Ambiguity is never broken by a score margin: a
+        threshold is a guess, and a wrong guess here deletes the wrong monitor.
+        """
+        out = {"status": "none", "job": None, "candidates": [], "strategy": "", "needle": ""}
+        by_id = {j.get("id"): j for j in jobs}
+        phrase = (text or "").strip()
+        m = self._MANAGE_VERB.match(phrase)
+        if m:
+            phrase = phrase[m.end():]
+        phrase = phrase.strip().strip("?!.,").strip()
+        out["needle"] = phrase[:60]
+
+        # R0 — an exact id the user typed. If it does not exist, say so; never fall through, they
+        # were specific and deserve a straight answer.
+        for tok in re.findall(r"\b[0-9a-f]{12}\b", phrase.lower()):
+            if tok in by_id:
+                return {**out, "status": "one", "job": by_id[tok], "strategy": "id"}
+            return {**out, "status": "bad_id", "needle": tok, "strategy": "id"}
+
+        # Bulk / exclusion never resolve — "cancel everything except the rtx one" is precisely the
+        # phrasing where acting on a best guess is unrecoverable.
+        if self._REF_QUANTIFIER.search(phrase) or self._REF_NEGATION.search(phrase):
+            return {**out, "status": "many", "candidates": jobs, "strategy": "guarded"}
+
+        # R1 — an ordinal against the list we actually rendered.
+        n = self._ref_ordinal(phrase)
+        if n is not None:
+            if not parked:
+                return {**out, "status": "need_list", "strategy": "ordinal"}
+            if n == -1:
+                n = len(parked)
+            if not (1 <= n <= len(parked)):
+                return {**out, "status": "out_of_range", "needle": str(n), "strategy": "ordinal"}
+            p = parked[n - 1]
+            if p["id"] in by_id:
+                return {**out, "status": "one", "job": by_id[p["id"]], "strategy": "ordinal"}
+            return {**out, "status": "gone", "needle": p.get("n") or p["id"], "strategy": "ordinal"}
+
+        tokens = self._ref_tokens(phrase)
+
+        # R2 — an id prefix. Six hex minimum: shorter and ordinary words start colliding.
+        for tok in re.findall(r"\b[0-9a-f]{6,11}\b", phrase.lower()):
+            hits = [j for j in jobs if str(j.get("id") or "").startswith(tok)]
+            if len(hits) == 1:
+                return {**out, "status": "one", "job": hits[0], "strategy": "prefix"}
+            if len(hits) > 1:
+                return {**out, "status": "many", "candidates": hits, "strategy": "prefix"}
+
+        # R3/R4 — name, then name+prompt. Word-boundary matching, not substring containment:
+        # 'btc' must not match 'btcusd-adjacent' text by accident.
+        def _match(field):
+            contiguous, every = [], []
+            needle = " ".join(tokens)
+            for j in jobs:
+                hay = self._fold(field(j))
+                if needle and re.search(rf"\b{re.escape(needle)}\b", hay):
+                    contiguous.append(j)
+                elif tokens and all(re.search(rf"\b{re.escape(t)}\b", hay) for t in tokens):
+                    every.append(j)
+            return contiguous or every
+
+        if tokens:
+            for strat, field in (("name", lambda j: j.get("name")),
+                                 ("prompt", lambda j: f"{j.get('name')} {j.get('prompt') or ''}")):
+                hits = _match(field)
+                if len(hits) == 1:
+                    return {**out, "status": "one", "job": hits[0], "strategy": strat}
+                if len(hits) > 1:
+                    return {**out, "status": "many", "candidates": hits, "strategy": strat}
+
+            # R5 — overlap. Ties are ambiguity, never a margin call.
+            scored = [(sum(1 for t in set(tokens)
+                           if re.search(rf"\b{re.escape(t)}\b",
+                                        self._fold(f"{j.get('name')} {j.get('prompt') or ''}"))), j)
+                      for j in jobs]
+            best = max([s for s, _ in scored], default=0)
+            if best:
+                win = [j for s, j in scored if s == best]
+                if len(win) == 1:
+                    return {**out, "status": "one", "job": win[0], "strategy": "overlap"}
+                return {**out, "status": "many", "candidates": win, "strategy": "overlap"}
+            return {**out, "status": "none", "strategy": "overlap"}
+
+        # R6 — a bare reference ("cancel it", "cancel such and such tracking"). Only resolves when
+        # there is nothing to be ambiguous about.
+        if len(jobs) == 1:
+            return {**out, "status": "one", "job": jobs[0], "strategy": "solo"}
+        if len(parked) == 1 and parked[0]["id"] in by_id:
+            return {**out, "status": "one", "job": by_id[parked[0]["id"]], "strategy": "solo"}
+        return {**out, "status": "many", "candidates": jobs, "strategy": "bare"}
+
     def _is_bg_followup(self, text, messages):
         """True when this short message continues the previous hermes exchange in THIS chat."""
         if not text or len(text) > 120:
@@ -1113,6 +1463,11 @@ class Pipe:
         # chat model, which answered with a hallucinated task list. The swap is safe because
         # _BG_MANAGE is anchored — it only fires when the manage verb is the message's opening move.
         if self._BG_MANAGE.match(raw):
+            return True
+        # BEFORE the question deny-list, and that placement is load-bearing: four of these nine
+        # phrasings open with "what" and _BG_QUESTION would kill them. Also `search`, not `match` —
+        # the arms are internally anchored, but a leading politeness word must not defeat them.
+        if MANAGE_DETERMINISTIC and self._BG_LIST.search(raw):
             return True
         if self._BG_QUESTION.match(raw):
             return False  # asking ABOUT monitoring is chat, whatever else matches
@@ -2602,6 +2957,416 @@ class Pipe:
                 out.append((jid, ", ".join(diffs)))
         return out
 
+    # ---------- rendering the job table ----------
+    @staticmethod
+    def _md_cell(s, n=48):
+        """A job field, safe to drop into a markdown table cell.
+
+        Job names and error text are ATTACKER-INFLUENCED — they come from whatever the agent was
+        told to watch, including page titles and scraped text. So this does more than tidy:
+        neutralising '<!--' and '-->' is what stops a job called 'x--><!--bg-confirm:...' from
+        forging the very marker that arms a delete. Pipes are escaped so a name cannot add columns,
+        newlines collapsed so last_error cannot break the table apart.
+        """
+        t = re.sub(r"\s+", " ", str(s or "")).strip()
+        t = t.replace("`", "'").replace("|", r"\|")
+        t = t.replace("<!--", "<! --").replace("-->", "-- >")
+        return (t[: n - 1] + "…") if len(t) > n else t
+
+    @staticmethod
+    def _when(iso):
+        """'in 12 min' / '18 min ago' when that is honest, an absolute stamp when it is not.
+
+        Relative time is a CLAIM about now. A naive timestamp compared against an aware one (or a
+        clock-skewed record) produces a confident lie like 'in 3 years', so anything that does not
+        parse cleanly, or lands absurdly far away, renders as the raw stamp instead.
+        """
+        if not iso:
+            return ""
+        try:
+            import datetime
+            dt = datetime.datetime.fromisoformat(str(iso))
+            if dt.tzinfo is None:      # naive: cannot be compared honestly against an aware now
+                raise ValueError("naive")
+            delta = (dt - datetime.datetime.now(datetime.timezone.utc)).total_seconds()
+            if abs(delta) > 30 * 86400:
+                raise ValueError("implausible")
+            ahead, s = delta >= 0, abs(delta)
+            if s < 90:
+                out = "now" if ahead else "just now"
+                return out
+            for unit, size in (("min", 60), ("h", 3600), ("d", 86400)):
+                if s < size * (60 if unit == "min" else 24 if unit == "h" else 31):
+                    n = int(round(s / size))
+                    return f"in {n} {unit}" if ahead else f"{n} {unit} ago"
+        except Exception:
+            pass
+        return str(iso)[:16].replace("T", " ")
+
+    @classmethod
+    def _job_glyph(cls, j):
+        """One character for 'what is this job doing'.
+
+        latest_execution is checked FIRST and is the only way to show an in-flight run: `state` has
+        no "running" value, and latest_execution is populated by the list endpoint alone. Bounded
+        on freshness — a run 'claimed' three days ago is a wedged record, not a live run.
+        """
+        ex = j.get("latest_execution") or {}
+        if str(ex.get("status") or "").lower() in ("claimed", "running"):
+            started = cls._when(ex.get("started_at") or ex.get("claimed_at") or "")
+            if "d ago" not in started:
+                return "🔄"
+        state = str(j.get("state") or "").lower()
+        # completed BEFORE the enabled check: a finished job is left enabled=False by hermes, so
+        # testing "not enabled" first labelled every exhausted job as merely paused — and the
+        # header count (which reads state) then disagreed with the glyph on the same row.
+        if state == "completed":
+            return "✓"
+        if state == "paused" or not j.get("enabled", True):
+            return "⏸"
+        if state == "error":
+            return "⚠️"
+        return "▶"
+
+    @classmethod
+    def _job_next(cls, j):
+        """The 'Next run' cell. A blank next_run_at means different things per state, and saying
+        'none' for all of them hides whether a job is off, done, or broken."""
+        ex = j.get("latest_execution") or {}
+        if str(ex.get("status") or "").lower() in ("claimed", "running"):
+            return "running now"
+        nxt = j.get("next_run_at")
+        if nxt:
+            return cls._when(nxt)
+        state = str(j.get("state") or "").lower()
+        if state == "completed":       # same ordering rule as _job_glyph
+            return "— finished"
+        if state == "paused" or not j.get("enabled", True):
+            return "— paused"
+        if state == "error":
+            return "— scheduling error"
+        return "—"
+
+    @classmethod
+    def _job_sched(cls, j):
+        sched = cls._md_cell(j.get("schedule_display") or j.get("schedule") or "", 28) or "*unknown*"
+        rep = j.get("repeat") or {}
+        if isinstance(rep, dict) and isinstance(rep.get("times"), int):
+            sched += f" · {rep.get('completed', 0)} of {rep['times']} runs"
+        return sched
+
+    def _jobs_table(self, jobs, ordinals=True):
+        """The markdown table. Rows stay in API order — sorting by state would renumber the list
+        between two renders the user is comparing, which is the one thing ordinals cannot survive.
+        """
+        rows = ["| # | Task | Schedule | Next run | Last run | ID |",
+                "|---|---|---|---|---|---|"]
+        for i, j in enumerate(jobs[:JOBS_MAX], 1):
+            last = j.get("last_run_at")
+            mark = {"ok": "✅", "error": "⚠️"}.get(str(j.get("last_status") or "").lower(), "")
+            last_cell = f"{mark} {self._when(last)}".strip() if last else "*never*"
+            handle = f"**{i}**" if ordinals else f"**{chr(96 + i)}**"
+            rows.append(f"| {handle} | {self._job_glyph(j)} {self._md_cell(j.get('name'), 44)} "
+                        f"| {self._job_sched(j)} | {self._job_next(j)} | {last_cell} "
+                        f"| `{j.get('id') or 'unknown'}` |")
+        out = "\n".join(rows)
+        if len(jobs) > JOBS_MAX:
+            out += f"\n\n*…and {len(jobs) - JOBS_MAX} more — ask for one by id if you need it.*"
+        return out
+
+    def _jobs_notes(self, jobs):
+        """Legend, plus the failures. last_error is multi-line and belongs BELOW the table: in a
+        cell it would blow the columns apart, and it is the one field a user most needs to read."""
+        # Blank line first: markdown needs one to close the table, or the legend is swallowed into
+        # it as a malformed row.
+        out = ["\n\n▶ active · 🔄 running now · ⏸ paused · ✓ finished · ⚠️ scheduling error"]
+        bad = [(i, j) for i, j in enumerate(jobs[:JOBS_MAX], 1)
+               if str(j.get("last_status") or "").lower() == "error" and j.get("last_error")]
+        for i, j in bad[:3]:
+            out.append(f"\n⚠️ **{i}** failed its last run: `{self._md_cell(j.get('last_error'), 180)}`")
+        if len(bad) > 3:
+            out.append(f"\n*…and {len(bad) - 3} more with failing runs.*")
+        return "".join(out)
+
+    def _jobs_error(self, err, op="list", detail=""):
+        """Copy for every way the scheduler can fail to answer.
+
+        Every string says some version of "that is not the same as having no tasks". An error that
+        reads like an empty list is the worst possible outcome here: the user stops expecting the
+        alert they are still owed.
+        """
+        tail = f" hermes says: {detail}" if detail else ""
+        if err == "no_key":
+            return (f"⚠️ **I could not read the scheduler** — the hermes-agent key file is missing "
+                    f"(`{HERMES_KEY_FILE}`), so I cannot {op} background tasks. That is not the "
+                    f"same as having none: whatever is scheduled is still scheduled, I just cannot "
+                    f"see it.")
+        if err == "unreachable":
+            return ("⚠️ **I could not read the scheduler** — hermes's job API on `127.0.0.1:8642` "
+                    "did not answer. That is not the same as having no tasks. Start it with "
+                    "`systemctl --user start hermes-gateway`, then ask me again.")
+        if err == "timeout":
+            return ("⚠️ **I could not read the scheduler** — hermes's job API did not answer within "
+                    "10 seconds. That is not the same as having no tasks. Try again in a moment.")
+        if err == "http_401" or err == "http_403":
+            return ("⚠️ **The scheduler rejected my key** — I cannot tell you what is scheduled, "
+                    "which is not the same as nothing being scheduled. The staged key no longer "
+                    "matches hermes's own.")
+        if err == "http_501":
+            return ("⚠️ **The scheduler's cron module is not loaded**, so hermes cannot answer "
+                    "questions about jobs at all right now.")
+        return (f"⚠️ **The scheduler errored** ({err}).{tail} Nothing was changed and I cannot show "
+                f"you the list right now.")
+
+    def _render_list(self, jobs, lead=None, ordinals=True, park=True):
+        """The full listing reply: header, table, legend/failures, and the marker that makes
+        ordinals mean something next turn."""
+        if not jobs:
+            return ("**No background tasks are scheduled.** I checked hermes's scheduler directly "
+                    "— this is what it actually has, not a guess.\n\nAsk for one with e.g. "
+                    "*monitor the RTX 5090 price on newegg every 6 hours*." + self._BG_MARK)
+        live = sum(1 for j in jobs if self._job_live(j))
+        paused = sum(1 for j in jobs if not j.get("enabled", True)
+                     and str(j.get("state") or "").lower() != "completed")
+        done = sum(1 for j in jobs if str(j.get("state") or "").lower() == "completed")
+        bits = [f"{live} active"] + ([f"{paused} paused"] if paused else []) \
+            + ([f"{done} finished"] if done else [])
+        head = lead or f"**Your background tasks** — {', '.join(bits)}"
+        tail = ("\n\nSay *pause the second one*, *cancel the btc monitor*, or give me an id. "
+                "I read the real scheduler, and I ask before deleting anything.")
+        return (f"{head}\n\n{self._jobs_table(jobs, ordinals)}{self._jobs_notes(jobs)}{tail}"
+                + (self._park_jobs(jobs) if park else "") + self._BG_MARK)
+
+    def _may_manage(self, user, handle):
+        """Deterministic job management is admin-only.
+
+        hermes has no per-job owner and one shared API key sees — and can delete — every job on the
+        host, so one user's list is every user's list. Until that changes (it needs a hermes-side
+        field, not a pipe-side filter), this stays with admins. Non-admins are not blocked from
+        anything: they fall through to exactly today's agent delegation, which is equally unscoped.
+        """
+        if str((user or {}).get("role", "")).lower() == "admin":
+            return True
+        return (handle or "") in TASK_ADMINS
+
+    async def _do_manage(self, op, job, parked_name=None):
+        """Execute one scheduler write and report what the SCHEDULER says afterwards, not what the
+        API claimed. Returns the finished reply text."""
+        jid = job.get("id") or ""
+        name = self._md_cell(job.get("name"), 60) or parked_name or jid
+        t0 = time.monotonic()
+
+        def _fin(outcome, text, **extra):
+            self._metric(job="manage", op=op, outcome=outcome, job_id=jid,
+                         ms=round((time.monotonic() - t0) * 1000), **extra)
+            return text
+
+        if not self._JOB_ID_RE.match(jid):
+            return _fin("bad_id", f"⚠️ That row has an unusable job id (`{jid}`), so I cannot "
+                                  f"{op} it. Ask hermes directly for this one.")
+        # Pre-checks that make an API call pointless or misleading.
+        state = str(job.get("state") or "").lower()
+        if op == "pause" and state == "completed":
+            return _fin("already_finished",
+                        f"ℹ️ **Nothing to pause** — “{name}” (`{jid}`) has already finished, so it "
+                        f"is not going to run again. Say *cancel {name}* if you want the record "
+                        f"removed.")
+        if op == "resume" and state == "completed":
+            return _fin("already_finished",
+                        f"ℹ️ **That one is finished, not paused** — “{name}” (`{jid}`) used up its "
+                        f"runs. Resuming would not give it any more. Ask me to schedule a new one.")
+
+        path = {"cancel": f"/api/jobs/{jid}",
+                "pause": f"/api/jobs/{jid}/pause",
+                "resume": f"/api/jobs/{jid}/resume"}[op]
+        method = "DELETE" if op == "cancel" else "POST"
+        status, data, err = await asyncio.to_thread(self._hermes_api, method, path)
+
+        if err == "http_404":
+            if op == "cancel":
+                # DELETE is not idempotent server-side, but from the user's point of view a job
+                # that is already gone is a completed request, not a failure.
+                return _fin("gone", f"✅ **Already gone** — “{name}” (`{jid}`) was no longer in the "
+                                    f"scheduler, so there was nothing to cancel. Jobs remove "
+                                    f"themselves when they finish their run budget.")
+            return _fin("gone", f"⚠️ **That task is gone** — “{name}” (`{jid}`) is no longer in the "
+                                f"scheduler; it probably finished and removed itself. Nothing was "
+                                f"changed.")
+        if err:
+            return _fin("api_error", self._jobs_error(err, op, self._api_err_text(data)), err=err)
+
+        # Ground truth: re-read and report what /api/jobs says now.
+        jobs, verr = await asyncio.to_thread(self._jobs_list)
+        after = {j.get("id"): j for j in jobs}
+        if verr:
+            return _fin("verify_unavailable",
+                        f"✅ hermes accepted the **{op}** for “{name}” (`{jid}`), but I could not "
+                        f"re-read the scheduler to confirm it took effect. Ask me to list tasks in "
+                        f"a moment to check.")
+        if op == "cancel":
+            if jid in after:
+                return _fin("verify_failed",
+                            f"⚠️ hermes returned OK for **cancel** on “{name}” (`{jid}`), but the "
+                            f"scheduler still lists it. I am reporting what `/api/jobs` says, not "
+                            f"what the API claimed.")
+            # No undo exists — DELETE also removes the job's saved output — so the reply carries
+            # everything needed to recreate it by hand.
+            sched = self._md_cell(job.get("schedule_display") or job.get("schedule"), 40)
+            return _fin("done",
+                        f"✅ **Cancelled** — “{name}” (`{jid}`) is gone from the scheduler, "
+                        f"confirmed by re-reading it.\n\nIf that was a mistake, there is no undo, "
+                        f"but this recreates it:\n\n> {name} — {sched}" + self._BG_MARK)
+        j2 = after.get(jid) or {}
+        want_paused = op == "pause"
+        is_paused = (not j2.get("enabled", True)) or str(j2.get("state") or "").lower() == "paused"
+        if is_paused != want_paused:
+            return _fin("verify_failed",
+                        f"⚠️ hermes returned OK for **{op}** on “{name}” (`{jid}`), but the "
+                        f"scheduler still shows it as {self._job_glyph(j2)} "
+                        f"{j2.get('state') or 'unknown'}. Reporting what `/api/jobs` says.")
+        nxt = self._job_next(j2)
+        return _fin("done",
+                    f"✅ **{'Paused' if want_paused else 'Resumed'}** — “{name}” (`{jid}`)"
+                    + (f". Next run {nxt}." if not want_paused else
+                       " will not run until you resume it.")
+                    + self._BG_MARK)
+
+    async def _manage_turn(self, text, parked, rule, pending=None, user=None, handle=""):
+        """The whole deterministic manage turn. Returns the reply text, or None to fall through to
+        the agent — the sole escape hatch, so this can never be a dead end.
+
+        Owns every route row it could emit: exactly one per turn, by construction.
+        """
+        if not MANAGE_DETERMINISTIC or not self._may_manage(user, handle):
+            self._route_metric("task.manage", 1, rule, text, deterministic=False,
+                               reason="disabled" if not MANAGE_DETERMINISTIC else "not_admin")
+            return None
+        t0 = time.monotonic()
+        jobs, err = await asyncio.to_thread(self._jobs_list)
+        if err:
+            # A manage turn the scheduler cannot answer: say so rather than delegating, because
+            # the agent would hit the same dead API and cost an eviction to do it.
+            self._route_metric("task.list.error", 1, rule, text, err=err,
+                               ms=round((time.monotonic() - t0) * 1000))
+            return self._jobs_error(err, "list")
+
+        pend = pending or {}
+        op = self._manage_op(text)
+
+        # --- consuming an armed confirmation -----------------------------------------------
+        if pend.get("stage") == "confirm":
+            jid = pend.get("id")
+            by_id = {j.get("id"): j for j in jobs}
+            if self._CONFIRM_YES.match(text or "") or self._CONFIRM_ALT.match(text or ""):
+                if pend.get("expired"):
+                    self._metric(job="confirm", kind="task_cancel", outcome="expired")
+                    self._route_metric("task.manage.abort", 0, "bg_confirm_expired", text)
+                    return ("That confirmation is more than 10 minutes old, so I did not act on it. "
+                            "Ask me again and I will re-confirm against the current list."
+                            + self._BG_MARK)
+                if jid not in by_id:
+                    self._metric(job="confirm", kind="task_cancel", outcome="accepted")
+                    self._route_metric("task.manage.abort", 0, "bg_confirm_gone", text)
+                    return (f"⚠️ **That one is already gone** — “{self._md_cell(pend.get('n'), 60)}” "
+                            f"is no longer in the scheduler, so there was nothing to cancel."
+                            + self._BG_MARK)
+                fresh = by_id[jid]
+                # Did it change under us between the question and the answer? The marker carries
+                # the fingerprint precisely so a "yes" cannot land on a different job than the one
+                # that was described.
+                same = (str(fresh.get("name") or "")[:60] == (pend.get("n") or "")
+                        and str(fresh.get("schedule_display") or fresh.get("schedule")
+                                or "")[:40] == (pend.get("s") or ""))
+                if not same:
+                    self._metric(job="confirm", kind="task_cancel", outcome="changed_under_us")
+                    self._route_metric("task.manage.abort", 0, "bg_confirm_changed", text)
+                    return self._render_list(
+                        [fresh], lead="⚠️ **That task changed since I asked** — I did not cancel "
+                                      "anything. Here it is as it stands now; ask again if you "
+                                      "still want it gone.")
+                if self._CONFIRM_ALT.match(text or ""):
+                    self._metric(job="confirm", kind="task_cancel", outcome="downgraded")
+                    self._route_metric("task.manage.downgrade", 0, "bg_confirm_pause", text)
+                    return await self._do_manage("pause", fresh)
+                self._metric(job="confirm", kind="task_cancel", outcome="accepted")
+                self._route_metric("task.manage.cancel", 0, "bg_confirm_yes", text, job_id=jid)
+                return await self._do_manage("cancel", fresh, pend.get("n"))
+            if self._CONFIRM_NO.match(text or ""):
+                self._metric(job="confirm", kind="task_cancel", outcome="declined")
+                self._route_metric("task.manage.abort", 0, "bg_confirm_no", text)
+                return "Okay — nothing was cancelled." + self._BG_MARK
+            # Anything else: the user moved on. Never act, never swallow the turn.
+            self._metric(job="confirm", kind="task_cancel", outcome="abandoned")
+            return None
+
+        # --- an open disambiguation ("which one?") ------------------------------------------
+        if pend.get("stage") == "choose":
+            op = op or pend.get("op")
+
+        # --- no operation named: this is a listing turn --------------------------------------
+        if not op:
+            self._route_metric("task.list", 1, rule, text, n_jobs=len(jobs),
+                               deterministic=True, ms=round((time.monotonic() - t0) * 1000))
+            return self._render_list(jobs)
+
+        # --- an operation aimed at a specific job --------------------------------------------
+        r = self._resolve_ref(text, jobs, parked)
+        st, job = r["status"], r["job"]
+        if st == "one":
+            if op == "cancel":
+                sched = self._md_cell(job.get("schedule_display") or job.get("schedule"), 40)
+                state = str(job.get("state") or "").lower()
+                note = {"paused": " — currently paused, next run: none",
+                        "completed": " — already finished, it will not run again"}.get(
+                            state, f" — next run {self._job_next(job)}")
+                alt = ("\n\nThat verb can mean either — reply **pause** to just switch it off "
+                       "instead." if re.match(r"^\s*stop\b", (text or "").strip(), re.I) else
+                       "\n\nReply **pause** to keep it and just switch it off instead.")
+                self._metric(job="confirm", kind="task_cancel", outcome="asked")
+                self._route_metric("task.manage.confirm", 0 if r["strategy"] in
+                                   ("ordinal", "id", "prefix") else 1, rule, text,
+                                   op="cancel", strategy=r["strategy"], job_id=job.get("id"))
+                return ("⚠️ **Cancel this task for good?**\n\n| | |\n|---|---|\n"
+                        f"| Task | {self._md_cell(job.get('name'), 60)} |\n"
+                        f"| Schedule | {sched}{note} |\n"
+                        f"| ID | `{job.get('id')}` |\n\n"
+                        "Deleting removes the job **and its saved output**; there is no undo. "
+                        "Reply **yes** to delete it, or anything else to leave it alone." + alt
+                        + self._confirm_park("cancel", job) + self._BG_MARK)
+            self._route_metric(f"task.manage.{op}", 0 if r["strategy"] in
+                               ("ordinal", "id", "prefix") else 1, rule, text,
+                               op=op, strategy=r["strategy"], job_id=job.get("id"))
+            return await self._do_manage(op, job)
+
+        # --- could not resolve: explain and re-render, never guess ---------------------------
+        self._route_metric("task.manage.ambiguous" if st == "many" else "task.manage.nomatch",
+                           1, rule, text, status=st, strategy=r["strategy"], n_jobs=len(jobs))
+        if st == "many":
+            cands = r["candidates"]
+            # Letters, not numbers, for the candidate list: reusing 1..N here would make "2" mean
+            # two different jobs in one conversation.
+            # The candidates ARE parked, so "a" / "the first one" resolve against this shortlist
+            # rather than the full list they were drawn from.
+            return self._render_list(
+                cands, ordinals=False,
+                lead=f"**Which one?** {len(cands)} tasks match "
+                     f"**“{self._md_cell(r['needle'], 40)}”** — say *a*, *b*, or give me an id. "
+                     f"Nothing has been changed.") + self._confirm_park(op, None, stage="choose")
+        leads = {
+            "bad_id": f"I don't have a job with id `{self._md_cell(r['needle'], 20)}`. "
+                      f"Here's what the scheduler actually has:",
+            "out_of_range": f"There's no #{self._md_cell(r['needle'], 4)} — the list I showed you "
+                            f"has {len(parked)} item(s). Here's the current list:",
+            "need_list": "I need to know which one — I haven't shown you a list in this chat yet. "
+                         "Here's what's scheduled; then say *cancel the second one*.",
+            "gone": f"⚠️ **That one is already gone** — “{self._md_cell(r['needle'], 40)}” is no "
+                    f"longer in the scheduler. Nothing was changed; here's what's actually there:",
+        }
+        return self._render_list(
+            jobs, lead=leads.get(st, f"I don't see a task matching "
+                                     f"**“{self._md_cell(r['needle'], 40)}”**. Here's everything "
+                                     f"the scheduler has — nothing was changed:"))
+
     _RESEARCH_BRIEF = (
         "You are answering a ONE-OFF question for the user, using your tools. This is not a "
         "scheduled job.\n"
@@ -2629,25 +3394,90 @@ class Pipe:
         except Exception:
             pass
 
-    def _hermes_jobs(self):
-        """Job ids currently scheduled, straight from hermes's /api/jobs — deterministic ground
-        truth. None on any error (verification then reports 'could not verify', never a false
-        positive)."""
+    _JOB_ID_RE = re.compile(r"^[a-f0-9]{12}$")
+
+    def _hermes_api(self, method, path, body=None, timeout=10):
+        """One call against hermes's REST API. Returns (status, data, err).
+
+        status is the HTTP code, 0 on a transport failure, -1 when there is no key. err is None on
+        2xx, else one of no_key|unreachable|timeout|bad_json|bad_id|http_<n>. Blocking urllib,
+        matching the style this file already uses for hermes — every CALLER wraps it in
+        asyncio.to_thread, because the pipe serves every other conversation on the box.
+
+        4xx/5xx bodies are read rather than discarded: hermes puts the actual reason in there
+        ("Cannot resume: one-shot time is in the past"), and that reason is user-facing copy.
+        """
         key = self._hermes_key()
         if not key:
-            return None
+            return -1, None, "no_key"
+        import urllib.request, urllib.error
+        url = f"{HERMES_URL.rsplit('/v1', 1)[0]}{path}"
+        data = json.dumps(body).encode() if body is not None else None
+        req = urllib.request.Request(url, data=data, method=method,
+                                     headers={"Authorization": f"Bearer {key}",
+                                              **({"Content-Type": "application/json"}
+                                                 if data else {})})
         try:
-            import urllib.request
-            # include_disabled=true is REQUIRED: the plain endpoint omits completed/exhausted
-            # jobs, so a cited id could not be resolved and a finished job looked like a
-            # fabrication. Verification needs the full picture to tell those apart.
-            req = urllib.request.Request(
-                f"{HERMES_URL.rsplit('/v1', 1)[0]}/api/jobs?include_disabled=true",
-                headers={"Authorization": f"Bearer {key}"})
-            with urllib.request.urlopen(req, timeout=10) as r:
-                return {j.get("id"): j for j in json.load(r).get("jobs", [])}
-        except Exception:
+            with urllib.request.urlopen(req, timeout=timeout) as r:
+                raw = r.read()
+                try:
+                    return r.status, (json.loads(raw) if raw else {}), None
+                except Exception:
+                    return r.status, None, "bad_json"
+        except urllib.error.HTTPError as e:
+            try:
+                parsed = json.loads(e.read() or b"{}")
+            except Exception:
+                parsed = None
+            return e.code, parsed, f"http_{e.code}"
+        except TimeoutError:
+            return 0, None, "timeout"
+        except Exception as e:
+            # socket.timeout is an OSError alias on some versions; catch it by name too.
+            return 0, None, "timeout" if "timed out" in str(e).lower() else "unreachable"
+
+    @staticmethod
+    def _api_err_text(data):
+        """hermes's error message, whichever envelope it used.
+
+        Job routes answer {"error": "Job not found"}; the auth and draining paths answer
+        {"error": {"message": ...}}. Reading only one shape would print 'None' at the user in
+        exactly the cases they most need the reason.
+        """
+        e = (data or {}).get("error")
+        if isinstance(e, dict):
+            e = e.get("message") or e.get("code") or ""
+        return str(e or "")[:200]
+
+    def _jobs_list(self):
+        """(jobs in API order, err). include_disabled=true is REQUIRED — the plain endpoint omits
+        completed/exhausted jobs, so a finished job would look like a fabrication."""
+        status, data, err = self._hermes_api("GET", "/api/jobs?include_disabled=true")
+        if err:
+            return [], err
+        jobs = (data or {}).get("jobs")
+        if not isinstance(jobs, list):
+            return [], "bad_json"
+        return jobs, None
+
+    def _hermes_jobs(self):
+        """{job_id: job} straight from /api/jobs — deterministic ground truth for the delegation
+        verifier. None on any error (verification then reports 'could not verify', never a false
+        positive). Kept as a dict-or-None wrapper over _jobs_list so that contract is unchanged."""
+        jobs, err = self._jobs_list()
+        if err:
             return None
+        return {j.get("id"): j for j in jobs}
+
+    @staticmethod
+    def _job_live(j):
+        """Will this job ever run again? The table's glyph and the delegation verifier must never
+        disagree about that, so both read this one predicate.
+
+        NOT a presence test: a job that exists but has finished is still 'there' for the purpose of
+        cancelling it. Presence is `id in {j['id'] for j in jobs}` and nothing else."""
+        return (j.get("enabled", True)
+                and (j.get("state") or "").lower() != "completed")
 
     @staticmethod
     def _alert_username(user):
@@ -2729,10 +3559,9 @@ class Pipe:
                                 # polling at [DONE] raced it and cried wolf on a job that DID exist.
                                 # Retry briefly: a real creation surfaces within a second or two, a
                                 # fabricated one never does.
-                                def _runnable(j):
-                                    return (j.get("enabled", True)
-                                            and (j.get("state") or "").lower() != "completed")
-
+                                # _job_live, not a local copy: the job table and this verifier must
+                                # never disagree about what counts as still-going.
+                                _runnable = self._job_live
                                 new_jobs = None
                                 for _ in range(6):
                                     after = self._hermes_jobs()
@@ -3369,6 +4198,35 @@ class Pipe:
         # request to render never becomes a job) and BEFORE coder routing ("track the price and
         # alert me" contains no code but 'script-like' phrasing must not reach the coder either).
         # `text` is the clean routing prompt, so RAG/search context cannot fabricate a job.
+        # Deterministic job management, answered from hermes's REST API with no model in the path.
+        # Hoisted ABOVE the attached_img gate below on purpose: a job table is text, and gating it
+        # the same way as a render would make "list my tasks" unanswerable for the whole life of
+        # any chat that once produced an image. Only `ref` (a freshly attached image) suppresses
+        # it, because that turn is unambiguously about the picture.
+        if BG_TASKS and MANAGE_DETERMINISTIC and not ref:
+            mhandle = self._alert_username(__user__)
+            pconf = self._pending_confirm(omsgs)
+            parked = self._parked_jobs(omsgs)
+            raw_l = (text or "").strip().lower()
+            mg_manage = bool(self._BG_MANAGE.match(raw_l))
+            mg_list = bool(self._BG_LIST.search(raw_l))
+            # An armed confirmation only claims the turn when the reply is actually an answer to
+            # it; anything else means the user moved on and must route normally.
+            answering = bool(pconf and (pconf.get("stage") == "choose"
+                                        or self._CONFIRM_YES.match(text or "")
+                                        or self._CONFIRM_ALT.match(text or "")
+                                        or self._CONFIRM_NO.match(text or "")))
+            # A reference is only honoured when a table was rendered in the last two turns, which
+            # is what keeps this vocabulary out of ordinary chat: "stop it" mid-conversation
+            # cannot reach the scheduler unless the scheduler was just on screen.
+            referring = bool(parked and self._manage_op(text))
+            if answering or referring or mg_manage or mg_list:
+                rule = ("bg_confirm" if answering else "bg_parked_ref" if referring
+                        else "bg_manage_list" if mg_manage else "bg_list_vocab")
+                done = await self._manage_turn(text, parked, rule, pending=pconf,
+                                               user=__user__, handle=mhandle)
+                if done is not None:
+                    return self._say(done)
         if BG_TASKS and not attached_img and not ref:
             handle = self._alert_username(__user__)
             # One-shot delegation, EXPLICIT ONLY. hermes's chat surface already has web, file,
@@ -3406,6 +4264,12 @@ class Pipe:
             if followup or self._is_bg_task_request(text):
                 raw_l = (text or "").strip().lower()
                 is_manage = bool(self._BG_MANAGE.match(raw_l))
+                # Reaching here with listing vocabulary means the deterministic path DECLINED
+                # (scheduler unreachable, non-admin, feature off). It is still a read-only
+                # question, so it must be threaded exactly like is_manage below — otherwise a
+                # failed list falls into the job-CREATION machinery and asks for a phone number.
+                is_list = bool(self._BG_LIST.search(raw_l))
+                read_only = is_manage or is_list
                 # Rule attribution mirrors _is_bg_task_request's precedence exactly, so the row
                 # names the rule that actually won — not merely one that also matches.
                 if followup:
@@ -3414,17 +4278,19 @@ class Pipe:
                     bg_rule, bg_tier = "bg_slash", 0
                 elif is_manage:
                     bg_rule, bg_tier = "bg_manage", 1
+                elif is_list:
+                    bg_rule, bg_tier = "bg_list", 1
                 else:
                     bg_rule, bg_tier = "bg_verb+recurrence", 1
                 self._route_metric(
-                    "task.manage" if is_manage else
+                    "task.manage" if read_only else
                     ("task.followup" if followup else "task.create"),
-                    bg_tier, bg_rule, text)
+                    bg_tier, bg_rule, text, deterministic=False)
                 # Ask for a number BEFORE scheduling anything. Creating the job first would leave
                 # a monitor that runs, fires, and texts nobody — the user believing they are
                 # covered. Only for genuinely new alerting requests: managing or continuing an
                 # existing task must never be interrupted by a form.
-                if (not followup and not is_manage
+                if (not followup and not read_only
                         and self._WANTS_ALERT.search(text or "")
                         and not self._contact(handle).get("phone")):
                     return self._say(self._phone_prompt(handle, text))
@@ -3438,8 +4304,12 @@ class Pipe:
                 #   phone-number reply  answered above (:3086) — a bare number matches nothing else
                 #   followup            continuing an exchange the user already consented to;
                 #                       re-asking on "yes reenable" would be absurd
-                #   manage verbs        list/pause/cancel are cheap and run no agent job
-                if not followup and not is_manage:
+                #   list/manage verbs   read-only or reversible, and normally answered
+                #                       deterministically above — reaching the agent at all means
+                #                       the REST path declined (scheduler down, non-admin), and
+                #                       gating an explicit "list my tasks" behind a confirmation
+                #                       would ask permission to answer a question
+                if not followup and not read_only:
                     if not await self._confirm_render(
                             confirm, "background task",
                             f"Schedule a background task: “{(text or '')[:120]}”"):
@@ -3457,7 +4327,7 @@ class Pipe:
                             f"Act on it against the REAL scheduler state — call "
                             f"cronjob(action='list') first and work from what is actually there.")
                 return self._hermes_stream(sent, handle,
-                                           verify_creation=not (is_manage or followup))
+                                           verify_creation=not (read_only or followup))
         if not attached_img and not ref and await asyncio.to_thread(self._is_code_request, text):
             code_rule = ("code_strong" if self._CODE_STRONG.search(text or "")
                          else "code_classifier")

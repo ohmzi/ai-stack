@@ -102,10 +102,15 @@ def main():
     check("...and still fails open with no client",
           ask(p, None, "background task", True, "video") is True)
     src = open(PIPE_PATH, encoding="utf-8").read()
-    check("only NEW heuristic jobs are gated, never followups or manage verbs",
-          "if not followup and not is_manage:" in src)
+    # read_only covers both manage verbs and the listing vocabulary: a turn that merely ASKS what
+    # is scheduled must never be gated behind "may I answer that?".
+    check("only NEW heuristic jobs are gated, never followups or read-only task turns",
+          "if not followup and not read_only:" in src)
     check("the /research slash command is not gated (explicit intent already)",
-          src.index("_BG_ONESHOT.match") < src.index("if not followup and not is_manage:"))
+          src.index("_BG_ONESHOT.match") < src.index("if not followup and not read_only:"))
+    check("job mutation does NOT use this gate — it fails open, and a delete must fail closed",
+          "_confirm_render" not in src[src.index("async def _do_manage"):
+                                       src.index("async def _manage_turn")])
 
     print("--- per-request num_ctx rounds UP and never under-sizes ---")
     fit = mod.Pipe._fit_ctx
