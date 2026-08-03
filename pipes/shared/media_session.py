@@ -56,11 +56,28 @@ _TASK_PREFIX = re.compile(r"^\s*#{2,4}\s*Task\s*:", re.I)
 TASK_LLM = "gemma3:1b"
 
 
+# OpenWebUI's RAG / web-search envelope opens with "### Task:" too, and is PREPENDED to the user's
+# real message (middleware.apply_source_context_to_messages -> add_or_update_user_message with
+# append=False). Its own text is the tell: a genuine internal task prompt never carries retrieved
+# sources or a closing </context>.
+_RAG_MARKS = ("</context>", "<source", "Respond to the user query using the provided context")
+
+
 def is_task_request(text, task=None):
-    """True when this invocation is OpenWebUI internal machinery, not the user talking."""
+    """True when this invocation is OpenWebUI internal machinery, not the user talking.
+
+    The `task` kwarg is authoritative; the prefix match is the fallback for versions that do not
+    pass it. That fallback had a live failure: with web search enabled EVERY turn arrives wrapped
+    in the RAG template, which also starts with "### Task:", so every message was answered by the
+    1 B task model on RAG boilerplate — it replied with the template's own example citation
+    ("the proposed method increases efficiency by 20%") and the router never ran at all.
+    """
     if task:
         return True
-    return bool(_TASK_PREFIX.match(text or ""))
+    t = text or ""
+    if not _TASK_PREFIX.match(t):
+        return False
+    return not any(m in t for m in _RAG_MARKS)
 
 
 def answer_task(ollama_url, messages, timeout=90):

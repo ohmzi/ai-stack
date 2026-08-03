@@ -490,6 +490,13 @@ class Pipe:
         ("#### Code Interpreter", "suffix"),
     )
 
+    # OpenWebUI's RAG / web-search envelope, PREPENDED to the user's own message whenever sources
+    # are attached (middleware.apply_source_context_to_messages -> add_or_update_user_message with
+    # append=False). It opens "### Task:" and ends with the retrieved sources in a <context> block;
+    # the user's actual words follow. Cutting through the closing tag leaves the question they
+    # typed, which is the only thing routing should ever see.
+    _RAG_ENVELOPE = re.compile(r"^\s*#{2,4}\s*Task\s*:[\s\S]*?</context>\s*", re.I)
+
     def _strip_injected_context(self, text):
         """Remove app- and filter-injected blocks from the text used for ROUTING.
 
@@ -504,6 +511,9 @@ class Pipe:
         """
         if not isinstance(text, str):
             return text
+        m = self._RAG_ENVELOPE.search(text)
+        if m:
+            text = text[m.end():]
         for marker, pos in self._INJECTED_MARKERS:
             idx = text.find(marker)
             if idx == -1:
@@ -952,9 +962,13 @@ class Pipe:
     # Deleting is irreversible (hermes rmtree's the job's output directory), so a bare "ok" or
     # "sure" is NOT enough to trigger one — those are acknowledgements, not decisions. The
     # permissive set stays for the reversible pause downgrade below.
+    # A confirmation is a bare affirmative. 'delete' on its own is deliberately NOT here: with a
+    # cancel armed on one job, "delete the job <other id>" matched it and deleted the ARMED job
+    # instead of the named one — a fresh instruction read as an answer to a question about
+    # something else. Only the pronoun forms ("delete it") refer back to what was asked.
     _CONFIRM_YES = re.compile(
         r"^\s*(?:yes|yeah|yep|yup|do it|delete it|cancel it|confirm(?:ed)?|"
-        r"yes please|delete|go ahead and delete)\b[\s\S]{0,40}$", re.I)
+        r"yes please|go ahead and delete)\b[\s\S]{0,40}$", re.I)
     _CONFIRM_ALT = re.compile(
         r"^\s*(?:just\s+)?(?:pause|pause it|pause instead|switch it off|turn it off|disable it)\b",
         re.I)
@@ -3525,7 +3539,13 @@ class Pipe:
         if pend.get("stage") == "confirm":
             jid = pend.get("id")
             by_id = {j.get("id"): j for j in jobs}
-            if self._CONFIRM_YES.match(text or "") or self._CONFIRM_ALT.match(text or ""):
+            # A reply that names a DIFFERENT job is a new instruction, whatever affirmative word it
+            # happens to open with. Treating it as an answer would act on the job that was asked
+            # about rather than the one just named — the worst available outcome for a delete.
+            names_other = any(i != jid for i in
+                              re.findall(r"\b[0-9a-f]{12}\b", (text or "").lower()))
+            if not names_other and (self._CONFIRM_YES.match(text or "")
+                                    or self._CONFIRM_ALT.match(text or "")):
                 # Disarm FIRST on every branch below: the armed op is consumed by being answered,
                 # so a second "yes" can never replay a delete.
                 if pend.get("expired"):
@@ -4396,6 +4416,34 @@ class Pipe:
         confirm = __event_call__
         msgs = body.get("messages", [])
         text, ref = self._last_user(msgs)
+        # OpenWebUI PREPENDS retrieved file/knowledge/web-search context to the LAST USER message
+        # (RAG_SYSTEM_CONTEXT defaults false), so `text` can be a multi-kB document blob. Every
+        # routing predicate below reads `text`, and _is_image_request/_is_video_request fire on a
+        # bare "picture of"/"draw"/"video" anywhere in it — while the _QUESTION/_SMALLTALK guards
+        # use anchored .match() and can never fire because the blob starts with "### Task:". Net
+        # effect: attaching a PDF that merely mentions those words launches a multi-minute
+        # Krea/Wan render built from the document text. Middleware stashes the user's verbatim
+        # words BEFORE that injection (middleware.py:2803), so route on those instead.
+        # Chat is unaffected: it uses `msgs`/`omsgs` below, which still carry the full RAG context.
+        #
+        # This resolution has to happen BEFORE the task guard below, not after. The guard's text
+        # fallback matches a leading "### Task:", and OpenWebUI's RAG envelope opens with exactly
+        # that — so with web search on, every ordinary turn looked like internal machinery and was
+        # answered by the 1 B task model on RAG boilerplate. It replied with the template's own
+        # example citation and the router never ran. Testing the guard against the user's real
+        # words is what keeps "delete the job 6dc…" a task instruction rather than boilerplate.
+        routed = (__metadata__ or {}).get("user_prompt")
+        if isinstance(routed, str) and routed.strip():
+            # ...but user_prompt is captured AFTER inlet filters run, so strip their blocks too.
+            # The emptiness check is on the RAW value: an absent user_prompt must fall back to
+            # _last_user (direct-API calls), whereas a prompt that was ENTIRELY injected context
+            # must stay empty and route to chat — falling back there would hand the router the very
+            # block we just removed.
+            text = self._strip_injected_context(routed).strip()
+        else:
+            # No user_prompt (direct API, older middleware): strip the fallback too, so a RAG-
+            # wrapped turn still routes on the question rather than on the envelope.
+            text = self._strip_injected_context(text).strip()
         # OpenWebUI background tasks (title / follow-up / tags / web-search decisions) arrive
         # through this pipe whenever the configured task model isn't visible in the model
         # registry. Before this guard each one ran the FULL router — real 14-174 s GPU renders
@@ -4408,22 +4456,6 @@ class Pipe:
             # other tier/rule means the guard stopped being the first check.
             self._route_metric("task_guard", 0, "task_kwarg" if __task__ else "task_prefix")
             return ms.answer_task(self.ollama, msgs) if ms else ""
-        # OpenWebUI PREPENDS retrieved file/knowledge context to the LAST USER message (RAG_SYSTEM_CONTEXT
-        # defaults false), so `text` can be a multi-kB document blob. Every routing predicate below reads
-        # `text`, and _is_image_request/_is_video_request fire on a bare "picture of"/"draw"/"video"
-        # anywhere in it — while the _QUESTION/_SMALLTALK guards use anchored .match() and can never fire
-        # because the blob starts with "### Task:". Net effect: attaching a PDF that merely mentions those
-        # words launches a multi-minute Krea/Wan render built from the document text. Middleware stashes the
-        # user's verbatim words BEFORE that injection (middleware.py:2803), so route on those instead.
-        # Chat is unaffected: it uses `msgs`/`omsgs` below, which still carry the full RAG context.
-        routed = (__metadata__ or {}).get("user_prompt")
-        if isinstance(routed, str) and routed.strip():
-            # ...but user_prompt is captured AFTER inlet filters run, so strip their blocks too.
-            # The emptiness check is on the RAW value: an absent user_prompt must fall back to
-            # _last_user (direct-API calls), whereas a prompt that was ENTIRELY injected context
-            # must stay empty and route to chat — falling back there would hand the router the very
-            # block we just removed.
-            text = self._strip_injected_context(routed).strip()
         # Manifold dispatch. knowledge/coder are chat-only: returning here means NOT ONE media regex
         # runs, so a document that merely mentions "video" cannot start a render on those entries
         # regardless of what the router would have decided. Belt and braces on top of the

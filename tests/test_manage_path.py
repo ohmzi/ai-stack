@@ -100,6 +100,16 @@ def make(jobs=None, err=None, mutate_err=None, on_delete=None, owners=None):
 
 CID = "chat-1"
 
+# The envelope OpenWebUI actually PREPENDS to the user's message whenever sources are attached.
+# It opens with "### Task:", which is also how OpenWebUI's own internal task prompts open — so the
+# task guard's text fallback claimed every ordinary turn while web search was on and answered it
+# on the 1B task model. What the user saw back was this template's own example citation, verbatim.
+RAG_ENVELOPE = (
+    "### Task:\nRespond to the user query using the provided context, incorporating inline "
+    "citations in the format [id]...\n\n### Example of Citation:\n* \"According to the study, "
+    "the proposed method increases efficiency by 20% [1].\"\n\n"
+    "<context>\n<source id=\"1\">track.amazon.com blah blah</source>\n</context>\n\n")
+
 
 def turn(p, text, msgs=None, user=ADMIN, cid=CID, handle="tester"):
     """One deterministic manage turn, as pipe() would call it.
@@ -293,6 +303,22 @@ def main():
     turn(q, "yes")
     check("a replayed yes cannot delete again", "DELETE" not in [m for m, _ in CALLS], repr(CALLS))
 
+    print("--- a reply naming a DIFFERENT job is an instruction, not a confirmation ---")
+    # Live-shaped failure: with a cancel armed on one job, "delete the job <other id>" matched the
+    # affirmative pattern (bare 'delete' was in it) and deleted the ARMED job instead of the named
+    # one. A fresh instruction must never be read as an answer to a question about something else.
+    q = armed_pipe()          # armed on the RTX job
+    out_other = turn(q, "delete the job 77aa11bb22cc")
+    check("naming another job does not delete the armed one",
+          "DELETE" not in [m for m, _ in CALLS], repr(CALLS))
+    check("...it re-asks about the job that was actually named",
+          "Cancel this task for good?" in out_other and "btc drop" in out_other, out_other[:300])
+    check("bare 'delete' is no longer an affirmative on its own",
+          not mod.Pipe._CONFIRM_YES.match("delete the job 77aa11bb22cc"))
+    check("...while the pronoun forms still confirm",
+          bool(mod.Pipe._CONFIRM_YES.match("delete it"))
+          and bool(mod.Pipe._CONFIRM_YES.match("yes")))
+
     print("--- 'pause instead' downgrades rather than deleting ---")
     out4 = turn(armed_pipe(), "pause")
     check("pauses", "Paused" in (out4 or ""), (out4 or "")[:120])
@@ -377,23 +403,43 @@ def main():
         return (200, {"jobs": JOBS}, None) if path.startswith("/api/jobs?") else (200, {}, None)
 
     pw._hermes_api, pw._chat_id = pw_api, (lambda *a, **k: "c1")
-    polluted = ("<context><source>Top 10 task manager apps of 2026. Draw a picture of your "
-                "workflow. Create a video guide. Monitor your habits every day for a month."
-                "</source></context>\n\nlist all my task")
+    # The real thing: OpenWebUI's RAG template PREPENDED to the user's words.
+    polluted = (RAG_ENVELOPE + "list all my task")
 
-    async def drive_pipe():
+    async def drive_pipe(meta):
         res = await pw.pipe({"messages": [{"role": "user", "content": polluted}],
                              "model": "auto_assistant.auto"},
-                            __metadata__={"user_prompt": "list all my task"},
+                            __metadata__=meta,
                             __user__={"role": "admin", "email": "nobody@example.com"})
         return "".join([c async for c in res]) if hasattr(res, "__aiter__") else res
 
-    wout = asyncio.run(drive_pipe())
+    wout = asyncio.run(drive_pipe({"user_prompt": "list all my task"}))
+    check("the RAG envelope alone would look like an internal task prompt",
+          RAG_ENVELOPE.lstrip().startswith("### Task:"))
+    stripped = pw._strip_injected_context(RAG_ENVELOPE + "list all my task").strip()
+    check("...but stripping leaves exactly the user's question", stripped == "list all my task",
+          repr(stripped))
+
     check("the scheduler answers, not the chat model", "amazon.ca price monitor" in wout, wout[:160])
     check("...reading /api/jobs exactly once", pw_calls == [("GET", "/api/jobs?include_disabled=true")],
           repr(pw_calls))
     check("...and the injected page starts no render",
           "![" not in wout and "<video" not in wout, wout[:200])
+    # Worst case: no user_prompt at all (direct API, or an older middleware). The routing text then
+    # falls back to the raw last message, which IS the envelope — so it has to be stripped there too
+    # or the guard fires on boilerplate and the router never runs.
+    wout2 = asyncio.run(drive_pipe({}))
+    check("even with NO user_prompt the question still routes",
+          "amazon.ca price monitor" in wout2, wout2[:200])
+    # And the guard itself must not mistake the envelope for OpenWebUI's own machinery.
+    import importlib.util as _il
+    _msp = _il.spec_from_file_location("ms_t", "/home/ohmz/ai-stack/pipes/shared/media_session.py")
+    _ms = _il.module_from_spec(_msp); _msp.loader.exec_module(_ms)
+    check("a RAG-wrapped user turn is NOT an internal task request",
+          not _ms.is_task_request(RAG_ENVELOPE + "list all my task"))
+    check("...while a real internal task prompt still is",
+          _ms.is_task_request("### Task:\nGenerate a concise, 3-5 word title for this chat."))
+    check("...and the explicit kwarg always wins", _ms.is_task_request("anything", task="title"))
 
     print("--- ownership: each user sees ONLY their own tasks ---")
     check("an admin's scope is unrestricted", p0._manage_scope({"role": "admin"}, "nobody") is None)
