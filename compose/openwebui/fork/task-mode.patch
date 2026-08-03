@@ -1,0 +1,163 @@
+--- a/src/lib/components/chat/MessageInput.svelte
++++ b/src/lib/components/chat/MessageInput.svelte
+@@ -565,6 +565,50 @@
+ 		codeInterpreterEnabled = false;
+ 	}
+ 
++	// --- ai-stack: Internet / Code / Task as one exclusive control ------------------------
++	// Upstream treats these as independent switches living in the Integrations dropdown. Here
++	// they are three always-visible buttons and exactly one can be active, because they are
++	// three answers to the same question: what should this turn do? Task is a toggle filter
++	// (filters/task_mode.py) rather than a built-in feature, so it lives in selectedFilterIds
++	// while the other two are booleans — setMode is what hides that difference.
++	//
++	// The server enforces the same exclusivity independently (the filter's inlet stands the
++	// other modes down). That is deliberate: this layer is a convenience, not the guarantee.
++	const TASK_FILTER_ID = 'task_mode';
++
++	let showTaskButton = false;
++	$: showTaskButton = (toggleFilters ?? []).some((f) => f.id === TASK_FILTER_ID);
++
++	let taskEnabled = false;
++	$: taskEnabled = (selectedFilterIds ?? []).includes(TASK_FILTER_ID);
++
++	let activeMode = null;
++	$: activeMode = taskEnabled
++		? 'task'
++		: codeInterpreterEnabled
++			? 'code'
++			: webSearchEnabled
++				? 'web'
++				: null;
++
++	const setMode = (mode) => {
++		const off = activeMode === mode; // clicking the active one clears it
++		webSearchEnabled = !off && mode === 'web';
++		codeInterpreterEnabled = !off && mode === 'code';
++		selectedFilterIds =
++			!off && mode === 'task'
++				? [...(selectedFilterIds ?? []).filter((id) => id !== TASK_FILTER_ID), TASK_FILTER_ID]
++				: (selectedFilterIds ?? []).filter((id) => id !== TASK_FILTER_ID);
++		onWebSearchToggle(webSearchEnabled);
++	};
++
++	const MODE_ON =
++		'text-sky-500 dark:text-sky-300 bg-sky-50 hover:bg-sky-100 dark:bg-sky-400/10 dark:hover:bg-sky-600/10 border border-sky-200/40 dark:border-sky-500/20';
++	const MODE_OFF =
++		'bg-transparent text-gray-600 dark:text-gray-300 hover:bg-gray-50 dark:hover:bg-gray-800 border border-transparent';
++	const MODE_BASE =
++		'shrink-0 px-2 py-[5px] flex gap-1.5 items-center text-xs rounded-full transition-colors duration-300 focus:outline-hidden';
++
+ 	// Clear selected terminal when model doesn't support terminal
+ 	$: if ($selectedTerminalId && terminalCapableModels.length === 0) {
+ 		selectedTerminalId.set(null);
+@@ -1754,13 +1798,78 @@
+ 									{/if}
+ 
+ 									<div class="flex flex-1 items-center min-w-0 overflow-x-auto scrollbar-none">
+-										{#if showWebSearchButton || showImageGenerationButton || showCodeInterpreterButton || showToolsButton || showSkillsButton || (toggleFilters && toggleFilters.length > 0)}
++										<!-- ai-stack: the three modes, always visible, exactly one active -->
++										{#if showWebSearchButton}
++											<Tooltip content={$i18n.t('Search the internet')} placement="top">
++												<button
++													type="button"
++													aria-pressed={webSearchEnabled}
++													aria-label={webSearchEnabled
++														? $i18n.t('Disable Web Search')
++														: $i18n.t('Enable Web Search')}
++													on:click|preventDefault={() => setMode('web')}
++													class="{MODE_BASE} {webSearchEnabled ? MODE_ON : MODE_OFF}"
++												>
++													<GlobeAlt className="size-4" strokeWidth="1.75" />
++													<span class="hidden sm:block">{$i18n.t('Internet')}</span>
++												</button>
++											</Tooltip>
++										{/if}
++
++										{#if showCodeInterpreterButton}
++											<Tooltip content={$i18n.t('Code Interpreter')} placement="top">
++												<button
++													type="button"
++													aria-pressed={codeInterpreterEnabled}
++													aria-label={codeInterpreterEnabled
++														? $i18n.t('Disable Code Interpreter')
++														: $i18n.t('Enable Code Interpreter')}
++													on:click|preventDefault={() => setMode('code')}
++													class="{MODE_BASE} {codeInterpreterEnabled ? MODE_ON : MODE_OFF}"
++												>
++													<Terminal className="size-3.5" strokeWidth="2" />
++													<span class="hidden sm:block">{$i18n.t('Code')}</span>
++												</button>
++											</Tooltip>
++										{/if}
++
++										{#if showTaskButton}
++											{@const taskFilter = (toggleFilters ?? []).find(
++												(f) => f.id === TASK_FILTER_ID
++											)}
++											<Tooltip content={taskFilter?.description} placement="top">
++												<button
++													type="button"
++													aria-pressed={taskEnabled}
++													aria-label={taskEnabled ? $i18n.t('Disable Task') : $i18n.t('Enable Task')}
++													on:click|preventDefault={() => setMode('task')}
++													class="{MODE_BASE} {taskEnabled ? MODE_ON : MODE_OFF}"
++												>
++													{#if taskFilter?.icon}
++														<img
++															src={taskFilter.icon}
++															alt={taskFilter?.name ?? 'Task'}
++															class="size-3.5 {taskFilter.icon.includes('data:image/svg')
++																? 'dark:invert-[80%]'
++																: ''}"
++														/>
++													{:else}
++														<Sparkles className="size-4" strokeWidth="1.75" />
++													{/if}
++													<span class="hidden sm:block">{taskFilter?.name ?? $i18n.t('Task')}</span>
++												</button>
++											</Tooltip>
++										{/if}
++
++										{#if showImageGenerationButton || showToolsButton || showSkillsButton || (toggleFilters && toggleFilters.filter((f) => f.id !== TASK_FILTER_ID).length > 0)}
+ 											<IntegrationsMenu
+ 												selectedModels={selectedModelIds}
+-												{toggleFilters}
+-												{showWebSearchButton}
++												toggleFilters={(toggleFilters ?? []).filter(
++													(f) => f.id !== TASK_FILTER_ID
++												)}
++												showWebSearchButton={false}
+ 												{showImageGenerationButton}
+-												{showCodeInterpreterButton}
++												showCodeInterpreterButton={false}
+ 												bind:selectedToolIds
+ 												bind:selectedSkillIds
+ 												bind:selectedFilterIds
+@@ -1862,7 +1971,7 @@
+ 
+ 											{#each selectedFilterIds as filterId (filterId)}
+ 												{@const filter = toggleFilters.find((f) => f.id === filterId)}
+-												{#if filter}
++												{#if filter && !(showTaskButton && filterId === TASK_FILTER_ID)}
+ 													<Tooltip content={filter?.name} placement="top">
+ 														<button
+ 															on:click|preventDefault={() => {
+@@ -1920,7 +2029,7 @@
+ 												{/if}
+ 											{/each}
+ 
+-											{#if webSearchEnabled}
++											{#if webSearchEnabled && !showWebSearchButton}
+ 												<Tooltip content={$i18n.t('Web Search')} placement="top">
+ 													<button
+ 														on:click|preventDefault={() => (webSearchEnabled = !webSearchEnabled)}
+@@ -1956,7 +2065,7 @@
+ 												</Tooltip>
+ 											{/if}
+ 
+-											{#if codeInterpreterEnabled}
++											{#if codeInterpreterEnabled && !showCodeInterpreterButton}
+ 												<Tooltip content={$i18n.t('Code Interpreter')} placement="top">
+ 													<button
+ 														aria-label={codeInterpreterEnabled

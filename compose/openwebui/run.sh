@@ -22,6 +22,13 @@
 #   WEBUI_NAME           — env.py appends " (Open WebUI)" to any custom value; the branding
 #                          loader.js rewrites /api/config suffix-free instead.
 #
+# The image is a LOCAL FORK, not upstream: compose/openwebui/fork/ rebuilds only the frontend so
+# the chat input carries three mutually-exclusive mode buttons (Internet / Code / Task). The Python
+# backend and CUDA layers come straight from a digest-pinned upstream image and are untouched.
+# Build it with:  docker build -t ai-stack/open-webui:task-mode compose/openwebui/fork/
+# To go back to stock, put the digest from that Dockerfile's FROM line here instead — the fork adds
+# nothing the backend depends on, so nothing else has to change.
+#
 # After a RECREATE or image pull: run branding/apply.sh (both static dirs live inside the image).
 # A plain restart no longer needs it — apply.sh writes /app/build/static too, so config.py's
 # startup rebuild reproduces the brand. Then: python3 tests/test_deployed.py.
@@ -62,7 +69,7 @@ docker run -d --name open-webui \
   `# Whisper: cut hallucinated transcription on silence, stop auto-detect guessing the language.` \
   -e WHISPER_VAD_FILTER=true \
   -e WHISPER_LANGUAGE=en \
-  ghcr.io/open-webui/open-webui:cuda
+  ai-stack/open-webui:task-mode
 
 echo -n "waiting for open-webui"
 until curl -sf http://127.0.0.1:4567/health >/dev/null 2>&1; do echo -n .; sleep 3; done

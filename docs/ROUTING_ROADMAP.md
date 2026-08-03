@@ -111,11 +111,36 @@ blocks in `test_manage_path.py`, attribution/verdict-filter checks in `test_herm
 and routing checks in `test_hermes_delivery.py`. See `HERMES_AGENT.md` for the stated limits
 (handle collisions, concurrent-creation misattribution, host-shell access).
 
+### Done — 2026-08-03 (step 4: the Task control)
+
+Detection-by-wording is no longer the only way in. `filters/task_mode.py` is a toggle filter, so
+OpenWebUI treats Task as a user-controlled mode; while it is on, `pipe()` sends the turn to the
+agent from a branch that sits above every media branch and the coder tier. The control settles
+whether to delegate, not what the request is — every sub-intent is still decided by the helper
+that decided it before, so listing stays on the deterministic path and never loads the agent.
+
+The frontend is a local fork (`compose/openwebui/fork/`): only the SvelteKit bundle is rebuilt,
+grafted onto a digest-pinned upstream image, adding three always-visible mutually-exclusive mode
+buttons (Internet / Code / Task). Exclusivity is enforced *again* server-side in the filter's
+inlet, because the browser is advisory and a direct-API caller bypasses it entirely.
+
+Scheduling still requires positive evidence, but any one signal suffices; without it the turn is
+answered rather than scheduled. The two briefs fail asymmetrically — a question given the
+scheduling brief leaves a job behind and reports a false verification failure, while a monitoring
+request given the research brief gets an answer plus an offer to watch it. So the control makes
+delegation sure-fire, not cron creation, and it fails to the recoverable side.
+
+Two defects fixed on the way: the assistant had no `defaultFeatureIds`, so it inherited
+OpenWebUI's admin default and had **Code Interpreter on by default** (the reason price requests
+came back as scraping scripts); and the `### Task:` guard silently vanished whenever the
+`media_session` sidecar was absent, which under this control would have delegated OpenWebUI's own
+title prompts to the agent.
+
 ### Next
-4. **Explicit entries** — agent manifold entry (+ its 0.10.2 `access_grant` row),
-   `filters/agent_toggle.py`, action button; marker strings pinned by coupling tests.
-   The authorization half of this step is **done** (2026-08-03): jobs are owner-tagged, so the
-   access grant no longer implies exposing everyone's tasks to everyone.
+4b. **Remaining explicit entries** — agent manifold entry (+ its 0.10.2 `access_grant` row) and an
+   escalate-to-agent action button. The authorization half is done (jobs are owner-tagged, so the
+   access grant no longer implies exposing everyone's tasks to everyone); the Task control above
+   supersedes the planned `filters/agent_toggle.py`.
 5. **Shadow tier 2** — versioned exemplar file, embed-at-init on bge-m3, cosine scorer logging
    into the route rows on every turn without acting; replay the historical metrics corpus; fit
    thresholds; promotion needs ≥50 in-scope shadow decisions, and demotion triggers are defined
