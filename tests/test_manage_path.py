@@ -81,12 +81,19 @@ def make(jobs=None, err=None, mutate_err=None, on_delete=None):
     return p
 
 
-def turn(p, text, msgs=None, user=ADMIN):
-    """One deterministic manage turn, as pipe() would call it."""
+CID = "chat-1"
+
+
+def turn(p, text, msgs=None, user=ADMIN, cid=CID):
+    """One deterministic manage turn, as pipe() would call it.
+
+    State lives on the pipe INSTANCE keyed by chat id, not in the message text, so `p` must be
+    reused across the turns of a scenario — a fresh make() is a fresh conversation.
+    """
     msgs = msgs or []
     return asyncio.run(p._manage_turn(
-        text, p._parked_jobs(msgs), "test",
-        pending=p._pending_confirm(msgs), user=user, handle="tester"))
+        cid, text, p._parked_jobs(cid, msgs), "test",
+        pending=p._pending_confirm(cid, msgs), user=user, handle="tester"))
 
 
 def assistant(text):
@@ -132,15 +139,20 @@ def main():
               "what is my monitor refresh rate", "list my task management tools"]:
         check(f"stays chat: {t!r}", not p0._is_bg_task_request(t))
 
-    print("--- markers must be invisible: block-positioned, never inline ---")
-    _out = turn(make(), "list my tasks")
-    check("markers start their own line after a blank one (else OWUI escapes and shows them)",
-          "\n\n<!--bg-jobs:" in _out, repr(_out[-140:]))
-    check("...and nothing marker-ish leaks into the visible body",
-          "<!--" not in _out[:_out.index("\n\n<!--")], _out[-200:])
-    _armed = turn(make(), "cancel the RTX one", assistant(_out))
-    check("the confirm marker is block-positioned too",
-          "\n\n<!--" in _armed and _armed.rstrip().endswith("-->"), repr(_armed[-140:]))
+    print("--- the reply carries NO hidden payload (state lives on the pipe, not in the text) ---")
+    # Two rendering theories failed live before this: an HTML comment inline in a paragraph is
+    # escaped and shown, and so is the same comment as its own block after a blank line. OpenWebUI
+    # escapes them wherever they sit, so users saw a wall of base64 under every answer. Nothing is
+    # embedded in the message any more — every string below must be free of it.
+    _p = make()
+    _out = turn(_p, "list my tasks")
+    _armed = turn(_p, "cancel the RTX one")
+    _cancelled = turn(_p, "yes")
+    for label, body in (("list", _out), ("confirm", _armed), ("cancelled", _cancelled)):
+        check(f"the {label} reply contains no HTML comment", "<!--" not in body, repr(body[-160:]))
+        check(f"...and no stray base64 blob", "bg-jobs" not in body and "bg-task" not in body,
+              repr(body[-160:]))
+    check("...yet the list is still parked, on the pipe", len(_p._parked_jobs(CID)) == 3)
 
     print("--- ...without dragging ordinary conversation with them ---")
     for t in ["what are you watching on netflix", "what are you monitoring in the lab",
@@ -165,8 +177,6 @@ def main():
     check("...and its Next run says finished, not paused", "— finished" in done_row, done_row)
     check("the legend is separated from the table by a blank line (markdown closes it)",
           "|\n\n▶ active" in out, repr(out[out.index("▶ active") - 20:out.index("▶ active") + 8]))
-    check("parks the list for the next turn", bool(p0._JOBS_MARK_RE.search(out)), out[-120:])
-    check("carries the bg-task marker", out.endswith(mod.Pipe._BG_MARK), repr(out[-30:]))
     check("no model was consulted — only /api/jobs",
           all(c[1].startswith("/api/jobs?") for c in CALLS), repr(CALLS))
 
@@ -181,12 +191,14 @@ def main():
               "not the same as" in out and "No background tasks" not in out, out[:200])
 
     print("--- reference resolution: the worked examples ---")
-    parked = assistant(turn(make(), "list my tasks"))
+    _lp = make()
+    turn(_lp, "list my tasks")
+    parked = _lp._parked_jobs(CID)
     for text, want in [("cancel the RTX one", "RTX 5090"), ("delete the btc monitor", "btc drop"),
                        ("stop the newegg watch", "RTX 5090"), ("pause the second one", "btc drop"),
                        ("cancel #2", "btc drop"), ("cancel the last one", "amazon.ca"),
                        ("cancel 6dc7813ef231", "amazon.ca")]:
-        r = make()._resolve_ref(text, JOBS, p0._parked_jobs(parked))
+        r = make()._resolve_ref(text, JOBS, parked)
         check(f"{text!r} -> {want}", r["status"] == "one" and want in (r["job"] or {}).get("name", ""),
               f"{r['status']}/{r['strategy']}")
 
@@ -196,7 +208,7 @@ def main():
                       ("cancel the one that isn't the btc one", "negation"),
                       ("cancel such and such tracking", "placeholder"),
                       ("cancel it", "bare, 3 jobs")]:
-        r = make()._resolve_ref(text, JOBS, p0._parked_jobs(parked))
+        r = make()._resolve_ref(text, JOBS, parked)
         check(f"{why}: {text!r} asks instead of guessing", r["status"] == "many",
               f"{r['status']}/{r['strategy']}")
     r = make()._resolve_ref("cancel it", [JOBS[0]], [])
@@ -209,24 +221,24 @@ def main():
           r["status"] == "none", r["status"])
     r = make()._resolve_ref("cancel the second one", JOBS, [])
     check("an ordinal with no list rendered asks for one", r["status"] == "need_list", r["status"])
-    r = make()._resolve_ref("cancel the ninth one", JOBS, p0._parked_jobs(parked))
+    r = make()._resolve_ref("cancel the ninth one", JOBS, parked)
     check("an out-of-range ordinal says how many there are",
           r["status"] == "out_of_range", r["status"])
 
     print("--- cancelling takes TWO turns, and turn one writes nothing ---")
     p = make()
-    out = turn(p, "cancel the RTX one", parked)
+    turn(p, "list my tasks")
+    CALLS.clear()
+    out = turn(p, "cancel the RTX one")
     check("turn 1 asks", "Cancel this task for good?" in out, out[:120])
     check("...naming the job and its schedule",
           "RTX 5090 newegg price watch" in out and "every 30m" in out, out[:400])
     check("...warning there is no undo", "no undo" in out, out[:400])
     check("...offering the reversible alternative", "**pause**" in out, out[:400])
-    check("...arming the op in a marker", bool(p0._CONFIRM_MARK_RE.search(out)), out[-160:])
+    check("...arming the op", (p._pending_confirm(CID) or {}).get("stage") == "confirm")
     check("TURN 1 MADE NO WRITE", all(m == "GET" for m, _ in CALLS), repr(CALLS))
 
-    armed = assistant(out)
-    p = make()
-    out2 = turn(p, "yes", armed)
+    out2 = turn(p, "yes")
     check("turn 2 with an explicit yes deletes", "Cancelled" in out2, out2[:160])
     check("...verified by re-reading the scheduler",
           "confirmed by re-reading" in out2 and
@@ -237,85 +249,102 @@ def main():
           [m for m, _ in CALLS].count("DELETE") == 1, repr(CALLS))
 
     print("--- ...and every other reply on turn 2 leaves the job alone ---")
+    def armed_pipe(**kw):
+        """A conversation already sitting on an armed cancel."""
+        q = make(**kw)
+        turn(q, "list my tasks")
+        turn(q, "cancel the RTX one")
+        CALLS.clear()
+        return q
+
     for reply, why in [("ok", "a bare acknowledgement is not a decision"),
                        ("sure", "neither is 'sure'"),
                        ("go ahead", "nor 'go ahead' — that is agreement, not an instruction"),
                        ("no", "an explicit no"), ("never mind", "a change of heart"),
                        ("what does it check?", "an unrelated question")]:
-        p = make()
-        out3 = turn(p, reply, armed)
-        deleted = "DELETE" in [m for m, _ in CALLS]
-        check(f"{why}: {reply!r} does not delete", not deleted, repr(CALLS))
-    p = make()
-    out3 = turn(p, "no", armed)
+        out3 = turn(armed_pipe(), reply)
+        check(f"{why}: {reply!r} does not delete",
+              "DELETE" not in [m for m, _ in CALLS], repr(CALLS))
+    out3 = turn(armed_pipe(), "no")
     check("...and an explicit no says so", "nothing was cancelled" in (out3 or "").lower(), out3)
-    p = make()
     check("an unrelated reply falls through to normal routing",
-          turn(p, "what's the weather", armed) is None)
+          turn(armed_pipe(), "what's the weather") is None)
+    # The armed op is consumed by being answered: a replayed "yes" must not delete a second time.
+    q = armed_pipe()
+    turn(q, "yes")
+    CALLS.clear()
+    turn(q, "yes")
+    check("a replayed yes cannot delete again", "DELETE" not in [m for m, _ in CALLS], repr(CALLS))
 
     print("--- 'pause instead' downgrades rather than deleting ---")
-    p = make()
-    out4 = turn(p, "pause", armed)
+    out4 = turn(armed_pipe(), "pause")
     check("pauses", "Paused" in (out4 or ""), (out4 or "")[:120])
     check("...and never issued a DELETE", "DELETE" not in [m for m, _ in CALLS], repr(CALLS))
 
     print("--- races and staleness ---")
-    p = make(jobs=[j for j in JOBS if j["id"] != "ab12cd34ef56"])
-    out5 = turn(p, "yes", armed)
+    # The job disappears between the question and the answer (a repeat budget running out pops the
+    # row with no tombstone, so this is the ordinary case, not an exotic one).
+    q = armed_pipe()
+    q._state["jobs"] = [j for j in q._state["jobs"] if j["id"] != "ab12cd34ef56"]
+    out5 = turn(q, "yes")
     check("a job that vanished before the yes is reported, not deleted blindly",
           "already gone" in out5.lower() and "DELETE" not in [m for m, _ in CALLS], out5[:160])
-    changed = [dict(j) for j in JOBS]
-    changed[0]["schedule_display"] = "every 5m"
-    p = make(jobs=changed)
-    out6 = turn(p, "yes", armed)
+    q = armed_pipe()
+    for j in q._state["jobs"]:
+        if j["id"] == "ab12cd34ef56":
+            j["schedule_display"] = "every 5m"
+    out6 = turn(q, "yes")
     check("a job that CHANGED under us is not deleted",
           "changed since I asked" in out6 and "DELETE" not in [m for m, _ in CALLS], out6[:200])
-    stale = json.loads(base64.b64decode(p0._CONFIRM_MARK_RE.search(out).group(1)).decode())
-    stale["t"] = int(time.time()) - (mod.CONFIRM_TTL_S + 60)
-    old = assistant("armed <!--bg-confirm:%s-->" %
-                    base64.b64encode(json.dumps(stale).encode()).decode())
-    p = make()
-    out7 = turn(p, "yes", old)
+    q = armed_pipe()
+    q._armed[CID]["t"] = time.time() - (mod.CONFIRM_TTL_S + 60)
+    out7 = turn(q, "yes")
     check("an expired confirmation is refused and SAID so, not silently ignored",
           "more than 10 minutes old" in out7 and "DELETE" not in [m for m, _ in CALLS], out7[:160])
 
     print("--- disambiguation never renumbers the ordinals it already used ---")
     p = make()
-    out8 = turn(p, "cancel the price one", parked)
+    turn(p, "list my tasks")
+    CALLS.clear()
+    out8 = turn(p, "cancel the price one")
     check("two matches ask which", "Which one?" in out8, out8[:120])
     check("...using letters, so a number cannot mean two things",
           "| **a** |" in out8 and "| **1** |" not in out8, out8[:400])
     check("...and nothing was changed", "Nothing has been changed" in out8, out8[:200])
     check("...no write was issued", "DELETE" not in [m for m, _ in CALLS], repr(CALLS))
-    p = make()
-    out9 = turn(p, "a", assistant(out8))
+    out9 = turn(p, "a")
     check("answering the disambiguation with a letter resolves it",
           "Cancel this task for good?" in out9, out9[:120])
 
     print("--- pause / resume are immediate and reversible, never confirmed ---")
-    p = make()
-    out10 = turn(p, "pause the first one", parked)
+    p = make(); turn(p, "list my tasks")
+    out10 = turn(p, "pause the first one")
     check("pause acts on the turn it was asked", "Paused" in out10, out10[:120])
     check("...and is verified against a re-read",
           not next(j for j in p._state["jobs"] if j["id"] == "ab12cd34ef56")["enabled"])
-    p = make()
-    out11 = turn(p, "resume the btc one", parked)
+    p = make(); turn(p, "list my tasks")
+    out11 = turn(p, "resume the btc one")
     check("resume acts too", "Resumed" in out11, out11[:120])
-    p = make()
-    out12 = turn(p, "pause the amazon one", parked)
+    p = make(); turn(p, "list my tasks"); CALLS.clear()
+    out12 = turn(p, "pause the amazon one")
     check("pausing a FINISHED job explains instead of pretending",
           "already finished" in out12 and not any(m == "POST" for m, _ in CALLS), out12[:160])
 
-    print("--- a job name cannot forge a marker ---")
+    print("--- a job name is attacker-influenced text and cannot break the render ---")
+    # Forging cross-turn state is impossible now that none of it travels in the message. What is
+    # still worth pinning is that a hostile name cannot break the table or smuggle markup: these
+    # strings come from whatever the agent was told to watch, including scraped page titles.
     evil = [job("aabbccddeeff", "x--><!--bg-confirm:ZZZZ--> pwned")]
-    out13 = turn(make(jobs=evil), "list my tasks")
-    body = out13[:out13.index("<!--bg-jobs")]
-    check("the injected comment is neutralised in the table body",
-          "<!--bg-confirm:ZZZZ-->" not in body, body[-200:])
-    check("...and the real marker is still the one that parses",
-          len(p0._parked_jobs(assistant(out13))) == 1)
+    pe = make(jobs=evil)
+    out13 = turn(pe, "list my tasks")
+    check("no comment survives into the reply at all", "<!--" not in out13, out13[:200])
+    check("...and the row still renders", "aabbccddeeff" in out13, out13[:200])
+    check("...with the state held on the pipe, where a name cannot reach it",
+          [d["id"] for d in pe._parked_jobs(CID)] == ["aabbccddeeff"])
     check("a pipe in a name cannot add table columns",
           r"\|" in mod.Pipe._md_cell("a|b"), mod.Pipe._md_cell("a|b"))
+    check("a newline in an error cannot break the table apart",
+          "\n" not in mod.Pipe._md_cell("line one\nline two"))
 
     print("--- web search ON must not get a vote: routing reads the user's verbatim words ---")
     # With search enabled, OpenWebUI PREPENDS retrieved context to the last user message before the
@@ -370,18 +399,38 @@ def main():
     finally:
         mod.MANAGE_DETERMINISTIC = old_flag
 
-    print("--- markers survive a turn, expire, and reject junk ---")
+    print("--- parked state: per chat, expires, and survives interposed turns ---")
+    ps = make()
+    turn(ps, "list my tasks")
     check("a parked list round-trips",
-          [d["id"] for d in p0._parked_jobs(parked)] == [j["id"] for j in JOBS])
-    interposed = parked + [{"role": "user", "content": "what does the second one check?"},
-                           {"role": "assistant", "content": "It watches newegg."}]
-    check("...and survives one interposed exchange",
-          len(p0._parked_jobs(interposed)) == 3)
-    check("junk in the marker is ignored, not crashed on",
-          p0._parked_jobs(assistant("<!--bg-jobs:!!!notbase64!!!-->")) == [])
-    check("an unknown marker version is ignored",
-          p0._parked_jobs(assistant("<!--bg-jobs:%s-->" % base64.b64encode(
+          [d["id"] for d in ps._parked_jobs(CID)] == [j["id"] for j in JOBS])
+    check("...and is scoped to its own chat — another conversation sees nothing",
+          ps._parked_jobs("some-other-chat") == [])
+    check("...and survives an interposed exchange (the store is not a one-shot)",
+          len(ps._parked_jobs(CID)) == 3)
+    ps._parked[CID]["t"] = time.time() - (mod.PARK_TTL_S + 60)
+    check("an expired list stops backing ordinals", ps._parked_jobs(CID) == [])
+
+    print("--- ...and conversations from before the store still resolve (legacy markers) ---")
+    # History written by the previous build really does contain the comments, and those chats must
+    # keep working even though nothing writes them any more.
+    legacy = base64.b64encode(json.dumps(
+        {"v": 1, "t": int(time.time()), "ids": [j["id"] for j in JOBS],
+         "ns": [j["name"][:20] for j in JOBS]}).encode()).decode()
+    fresh = make()
+    check("a legacy in-message marker is still read",
+          [d["id"] for d in fresh._parked_jobs("unseen-chat",
+                                               assistant(f"table <!--bg-jobs:{legacy}-->"))]
+          == [j["id"] for j in JOBS])
+    check("junk in a legacy marker is ignored, not crashed on",
+          fresh._parked_jobs("unseen-chat", assistant("<!--bg-jobs:!!!notbase64!!!-->")) == [])
+    check("an unknown legacy version is ignored",
+          fresh._parked_jobs("unseen-chat", assistant("<!--bg-jobs:%s-->" % base64.b64encode(
               b'{"v":99,"ids":["x"]}').decode())) == [])
+    check("a legacy bg-task marker still counts as a background turn",
+          fresh._was_bg_turn("unseen-chat", assistant("done " + mod.Pipe._BG_MARK)))
+    check("...and ordinary chat history does not",
+          not fresh._was_bg_turn("unseen-chat", assistant("Paris is the capital of France.")))
 
     fails = results.count(False)
     print(f"\n{len(results)} checks — {'ALL PASS' if not fails else str(fails) + ' FAILURE(S)'}")

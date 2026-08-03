@@ -419,6 +419,17 @@ class Pipe:
         # prefix and answers them as plain text; see media_session.is_task_request.
         self._recent = {}        # chat_id -> last produced image b64 (for follow-up edits without re-upload)
         self._recent_video = {}  # chat_id -> (prompt, seed) of the last produced video (for follow-up changes)
+        # Cross-turn state for background tasks, keyed by chat and held HERE rather than hidden in
+        # the message text. It used to ride in HTML comments (<!--bg-jobs:…-->); OpenWebUI escapes
+        # those and printed a wall of base64 under every answer, wherever in the message they sat —
+        # inline or as their own block. Anything embedded in the reply is potentially visible, so
+        # the reply now carries nothing at all. Same lifetime and eviction policy as _recent above:
+        # lost on a pipe reload, which costs one turn of continuity and never correctness, because
+        # every reader re-fetches /api/jobs and confirms against a live record before acting.
+        self._parked = {}        # chat_id -> {"t", "ids", "ns"} — the job list last rendered
+        self._armed = {}         # chat_id -> the destructive op awaiting a yes
+        self._bg_turn = {}       # chat_id -> ts of the last background-task reply
+        self._phone_ask = {}     # chat_id -> the request parked behind "what number should I text?"
 
     # ONE entry. It chats, sees images, writes code on the big coder tenant, renders images and
     # video, searches the web, reads your documents and remembers things — choosing the model per
@@ -1126,9 +1137,13 @@ class Pipe:
         return ("\n\n**How you'll be alerted**\n\n"
                 "| | |\n|---|---|\n" + "\n".join(rows) + "\n\n" + " ".join(notes))
 
-    def _phone_prompt(self, handle, pending_request):
-        """Ask for a number BEFORE scheduling, and carry the request across the turn."""
-        blob = base64.b64encode((pending_request or "").encode()).decode()
+    def _phone_prompt(self, handle, pending_request, cid=None):
+        """Ask for a number BEFORE scheduling, and carry the request across the turn.
+
+        The request is held in the per-chat store, not in the message: OpenWebUI escapes HTML
+        comments, so anything parked in the reply body is shown to the user as base64 noise."""
+        if cid:
+            self._lru(self._phone_ask, cid, {"t": time.time(), "req": pending_request or ""})
         prof = self._read_json(ALERT_PROFILE_FILE, {}) or {}
         email = self._alert_email(handle)
         alt = (f"Or reply **email only** — alerts still go to `{email}`."
@@ -1146,23 +1161,40 @@ class Pipe:
                 f"Reply with your mobile number and I'll save it and schedule the task in one go. "
                 f"Any of these work:\n"
                 f"`5145550123` · `514-555-0123` · `+1 514 555 0123`\n\n"
-                f"{alt}{heads_up}\n\n"
-                f"<!--bg-need-phone:{blob}-->")
+                f"{alt}{heads_up}")
 
-    @classmethod
-    def _marks(cls, *extra):
-        """Trailing state markers, positioned so the client cannot render them.
+    @staticmethod
+    def _marks(*extra):
+        """Nothing. Kept as the single seam where trailing state used to be appended.
 
-        The leading blank line is the whole point. An HTML comment sitting INLINE in a paragraph is
-        inline raw HTML, and OpenWebUI's renderer escapes it — the user sees a wall of
-        '<!--bg-jobs:eyJ2Ijox...-->' under their answer. Starting its own line after a blank one
-        makes it an HTML *block*, which is passed through and stays invisible. Adjacent markers can
-        follow on the same line: the block runs until the next blank line.
-
-        _BG_MARK itself is deliberately still the bare comment, because history written before this
-        contains the bare form and every `_BG_MARK in prev` continuity check must keep matching it.
+        Two rendering theories were tried and both were wrong: an HTML comment inline in a
+        paragraph is escaped and shown, and so is the same comment as its own block after a blank
+        line. OpenWebUI escapes them wherever they appear, so no invisible payload can be smuggled
+        through the message body. State moved to the per-chat stores in __init__ instead; this
+        returns the empty string so every former call site stays a no-op rather than being deleted
+        and silently re-added by a future edit.
         """
-        return "\n\n" + "".join(x for x in extra if x) + cls._BG_MARK
+        return ""
+
+    def _mark_bg(self, cid):
+        """Record that this chat's last reply was a background-task reply.
+
+        Replaces `_BG_MARK in prev`, which needed the marker to survive in the message text.
+        Reading still falls back to the marker so conversations from before this change keep
+        working — history written then really does contain it.
+        """
+        if cid:
+            self._bg_turn.pop(cid, None)
+            self._bg_turn[cid] = time.time()
+            while len(self._bg_turn) > 60:
+                self._bg_turn.pop(next(iter(self._bg_turn)))
+
+    def _was_bg_turn(self, cid, messages):
+        if cid and (time.time() - self._bg_turn.get(cid, 0)) < PARK_TTL_S:
+            return True
+        prev = next((m.get("content") or "" for m in reversed(messages or [])
+                     if m.get("role") == "assistant"), "")
+        return self._BG_MARK in prev          # legacy: history written before the stores existed
 
     @staticmethod
     async def _say(text):
@@ -1176,17 +1208,22 @@ class Pipe:
             return
         yield f"✅ Saved `{self._pretty_phone(e164)}` for texts.\n\n"
         if not pending:
-            yield ("Now tell me what to watch and I'll set it up." + self._marks())
+            yield ("Now tell me what to watch and I'll set it up." )
             return
         async for chunk in self._hermes_stream(pending, handle, verify_creation=True):
             yield chunk
 
-    def _phone_reply(self, text, handle, pending):
-        """Handle the turn AFTER a phone prompt. None => not a phone answer, route normally."""
+    def _phone_reply(self, text, handle, pending, cid=None):
+        """Handle the turn AFTER a phone prompt. None => not a phone answer, route normally.
+
+        Consuming the prompt clears the parked request: "no thanks" a turn after the task was
+        already scheduled used to re-submit it as a duplicate."""
         t = (text or "").strip()
+        if cid and (self._PHONE_DECLINE.match(t) or self._PHONE_RE.search(t)):
+            self._phone_ask.pop(cid, None)
         if self._PHONE_DECLINE.match(t):
             if not pending:
-                return self._say("No problem — no number saved." + self._marks())
+                return self._say("No problem — no number saved." )
             return self._hermes_stream(pending, handle, verify_creation=True)
         m = self._PHONE_RE.search(t)
         if not m:
@@ -1202,23 +1239,33 @@ class Pipe:
             attempt = m.group(1)
         e164 = self._norm_phone(attempt)
         if not e164:
-            # Reject at the point they typed it, not silently at send time three days later.
+            # Reject at the point they typed it, not silently at send time three days later. The
+            # request stays parked on the pipe (this branch never popped it), so the retry still
+            # has something to schedule.
+            if cid:
+                self._lru(self._phone_ask, cid, {"t": time.time(), "req": pending or ""})
             return self._say(
                 f"`{attempt.strip()}` doesn't look like a mobile number I can text — I need "
-                f"10 digits (or +country code). Try again, or reply **email only**.\n"
-                f"<!--bg-need-phone:{base64.b64encode((pending or '').encode()).decode()}-->")
+                f"10 digits (or +country code). Try again, or reply **email only**.")
         return self._phone_then_task(e164, handle, pending)
 
-    def _pending_phone_request(self, messages):
+    def _pending_phone_request(self, messages, cid=None):
         """The request parked by a previous _phone_prompt, or None.
 
-        Scans the last TWO assistant turns, not one: the prompt asks a question, and people
-        answer questions out of order — phone prompt, "wait, how much does a text cost?",
-        answer, and only THEN the number. A single-turn scan had already forgotten the parked
-        request by then, so the bare number fell through to the chat model. Two turns is the
-        whole allowance on purpose: further back, the prompt has scrolled away and a stray
-        digit string should be ordinary chat again.
+        Reads the per-chat store first, then falls back to the legacy in-message marker so
+        conversations that predate the store still complete their phone flow. The store is cleared
+        by _phone_reply, which is what stops a consumed prompt being resurrected.
+
+        The legacy scan covers the last TWO assistant turns, not one: people answer questions out
+        of order — phone prompt, "wait, how much does a text cost?", answer, and only THEN the
+        number. A single-turn scan had already forgotten the parked request by then, so the bare
+        number fell through to the chat model. Two turns is the whole allowance on purpose:
+        further back, the prompt has scrolled away and a stray digit string should be ordinary
+        chat again.
         """
+        d = self._phone_ask.get(cid) if cid else None
+        if d:
+            return d["req"] if time.time() - d["t"] <= PARK_TTL_S else None
         recent = [m.get("content") or "" for m in reversed(messages or [])
                   if m.get("role") == "assistant"]
         for prev in recent[:2]:
@@ -1239,34 +1286,41 @@ class Pipe:
         return None
 
     # ---------- cross-turn state for job management ----------
-    def _park_jobs(self, jobs):
-        """The marker that makes "the second one" mean something next turn.
+    @staticmethod
+    def _lru(store, cid, value, cap=60):
+        store.pop(cid, None)          # move-to-end so an active chat is not evicted first
+        store[cid] = value
+        while len(store) > cap:
+            store.pop(next(iter(store)))
 
-        Base64 for the same reason _phone_prompt uses it: a job name can contain quotes, newlines
-        or '--', any of which would break the HTML comment or leak into the rendered chat.
-        Parallel arrays rather than objects to keep the history small.
+    def _park_jobs(self, cid, jobs):
+        """Remember the list just rendered, so "the second one" means something next turn.
+
+        Returns "" — the reply carries no payload. Ordinal N maps to ids[N-1] and is never
+        recomputed, because a job that vanishes between two turns would silently shift every
+        number below it.
         """
-        try:
-            blob = json.dumps({"v": 1, "t": int(time.time()),
-                               "ids": [j.get("id") for j in jobs[:JOBS_MAX]],
-                               "ns": [str(j.get("name") or "")[:20] for j in jobs[:JOBS_MAX]]},
-                              separators=(",", ":"))
-            return f"<!--bg-jobs:{base64.b64encode(blob.encode()).decode()}-->"
-        except Exception:
-            return ""
+        if cid:
+            self._lru(self._parked, cid,
+                      {"t": time.time(),
+                       "ids": [j.get("id") for j in jobs[:JOBS_MAX]],
+                       "ns": [str(j.get("name") or "")[:40] for j in jobs[:JOBS_MAX]]})
+        return ""
 
-    def _parked_jobs(self, messages):
+    def _parked_jobs(self, cid, messages=None):
         """[{i, id, n}] from the most recent rendered list, or [].
 
-        Scans the last TWO assistant turns because people interleave a question between the list
-        and the instruction ("what does the second one check?" then "cancel it"). Unlike
-        _pending_phone_request this does NOT stop at _BG_MARK — the table itself carries that
-        marker, so stopping there would abort on the very message being looked for.
+        Reads the per-chat store, falling back to the legacy HTML-comment marker so conversations
+        that predate the store still resolve ordinals.
 
         Staleness is not really handled by this clock: jobs vanish with no tombstone when a repeat
         budget is exhausted, so every caller re-fetches /api/jobs and uses this only to map
-        ordinal -> id. The TTL is belt-and-braces against a list resurrected by history editing.
+        ordinal -> id. The TTL is belt-and-braces.
         """
+        d = self._parked.get(cid) if cid else None
+        if d and time.time() - d["t"] <= PARK_TTL_S:
+            return [{"i": i + 1, "id": jid, "n": (d["ns"][i] if i < len(d["ns"]) else "")}
+                    for i, jid in enumerate(d["ids"]) if jid]
         seen = 0
         for m in reversed(messages or []):
             if m.get("role") != "assistant":
@@ -1278,51 +1332,51 @@ class Pipe:
             if not hits:
                 continue
             try:
-                # LAST match, not first: a message could contain an earlier marker quoted back.
-                d = json.loads(base64.b64decode(hits[-1]).decode())
-                if d.get("v") != 1 or time.time() - float(d.get("t", 0)) > PARK_TTL_S:
+                legacy = json.loads(base64.b64decode(hits[-1]).decode())
+                if legacy.get("v") != 1 or time.time() - float(legacy.get("t", 0)) > PARK_TTL_S:
                     return []
-                ids, ns = d.get("ids") or [], d.get("ns") or []
+                ids, ns = legacy.get("ids") or [], legacy.get("ns") or []
                 return [{"i": i + 1, "id": jid, "n": (ns[i] if i < len(ns) else "")}
                         for i, jid in enumerate(ids) if jid]
             except Exception:
                 return []
         return []
 
-    def _confirm_park(self, op, job, stage="confirm"):
-        """Arm an operation for the NEXT turn. The name and schedule ride along so the yes-turn can
+    def _confirm_park(self, cid, op, job, stage="confirm"):
+        """Arm an operation for the NEXT turn. The name and schedule are kept so the yes-turn can
         check the job did not change under us between the question and the answer."""
-        try:
-            blob = json.dumps({"v": 1, "t": int(time.time()), "stage": stage, "op": op,
-                               "id": (job or {}).get("id"),
-                               "n": str((job or {}).get("name") or "")[:60],
-                               "s": str((job or {}).get("schedule_display")
-                                        or (job or {}).get("schedule") or "")[:40]},
-                              separators=(",", ":"))
-            return f"<!--bg-confirm:{base64.b64encode(blob.encode()).decode()}-->"
-        except Exception:
-            return ""
+        if cid:
+            self._lru(self._armed, cid,
+                      {"t": time.time(), "stage": stage, "op": op,
+                       "id": (job or {}).get("id"),
+                       "n": str((job or {}).get("name") or "")[:60],
+                       "s": str((job or {}).get("schedule_display")
+                                or (job or {}).get("schedule") or "")[:40]})
+        return ""
 
-    def _pending_confirm(self, messages):
-        """The armed op from the LAST assistant turn, or None.
-
-        Deliberately stricter than the jobs marker: one intervening assistant turn means the user
-        moved on, and a stray "yes" three messages later must never arm a delete. An expired marker
-        is REPORTED as expired rather than ignored, so a slow "yes" gets an explanation.
-        """
-        prev = next((m.get("content") or "" for m in reversed(messages or [])
-                     if m.get("role") == "assistant"), "")
-        hits = self._CONFIRM_MARK_RE.findall(prev)
-        if not hits:
-            return None
-        try:
-            d = json.loads(base64.b64decode(hits[-1]).decode())
-        except Exception:
-            return None
-        if d.get("v") != 1:
-            return None
+    def _pending_confirm(self, cid, messages=None):
+        """The armed op, or None. Expiry is REPORTED rather than ignored, so a slow "yes" gets an
+        explanation instead of silence."""
+        d = dict(self._armed.get(cid) or {}) if cid else {}
+        if not d:
+            prev = next((m.get("content") or "" for m in reversed(messages or [])
+                         if m.get("role") == "assistant"), "")
+            hits = self._CONFIRM_MARK_RE.findall(prev)
+            if not hits:
+                return None
+            try:
+                d = json.loads(base64.b64decode(hits[-1]).decode())
+            except Exception:
+                return None
+            if d.get("v") != 1:
+                return None
         d["expired"] = (time.time() - float(d.get("t", 0))) > CONFIRM_TTL_S
         return d
+
+    def _disarm(self, cid):
+        """Consume the armed op. Called on every terminal branch so a second "yes" cannot replay a
+        delete against a chat whose job is already gone."""
+        self._armed.pop(cid, None)
 
     # ---------- resolving "the RTX one" to a real job ----------
     @classmethod
@@ -1480,13 +1534,11 @@ class Pipe:
             return {**out, "status": "one", "job": by_id[parked[0]["id"]], "strategy": "solo"}
         return {**out, "status": "many", "candidates": jobs, "strategy": "bare"}
 
-    def _is_bg_followup(self, text, messages):
+    def _is_bg_followup(self, text, messages, cid=None):
         """True when this short message continues the previous hermes exchange in THIS chat."""
         if not text or len(text) > 120:
             return False
-        prev = next((m.get("content") or "" for m in reversed(messages or [])
-                     if m.get("role") == "assistant"), "")
-        return self._BG_MARK in prev and bool(self._BG_FOLLOWUP.match(text.strip()))
+        return self._was_bg_turn(cid, messages) and bool(self._BG_FOLLOWUP.match(text.strip()))
 
     def _is_bg_task_request(self, t):
         raw = (t or "").strip().lower()
@@ -3153,13 +3205,13 @@ class Pipe:
         return (f"⚠️ **The scheduler errored** ({err}).{tail} Nothing was changed and I cannot show "
                 f"you the list right now.")
 
-    def _render_list(self, jobs, lead=None, ordinals=True, park=True):
+    def _render_list(self, cid, jobs, lead=None, ordinals=True, park=True):
         """The full listing reply: header, table, legend/failures, and the marker that makes
         ordinals mean something next turn."""
         if not jobs:
             return ("**No background tasks are scheduled.** I checked hermes's scheduler directly "
                     "— this is what it actually has, not a guess.\n\nAsk for one with e.g. "
-                    "*monitor the RTX 5090 price on newegg every 6 hours*." + self._marks())
+                    "*monitor the RTX 5090 price on newegg every 6 hours*." )
         live = sum(1 for j in jobs if self._job_live(j))
         paused = sum(1 for j in jobs if not j.get("enabled", True)
                      and str(j.get("state") or "").lower() != "completed")
@@ -3170,7 +3222,7 @@ class Pipe:
         tail = ("\n\nSay *pause the second one*, *cancel the btc monitor*, or give me an id. "
                 "I read the real scheduler, and I ask before deleting anything.")
         return (f"{head}\n\n{self._jobs_table(jobs, ordinals)}{self._jobs_notes(jobs)}{tail}"
-                + self._marks(self._park_jobs(jobs) if park else ""))
+                + (self._park_jobs(cid, jobs) if park else ""))
 
     def _may_manage(self, user, handle):
         """Deterministic job management is admin-only.
@@ -3250,7 +3302,7 @@ class Pipe:
             return _fin("done",
                         f"✅ **Cancelled** — “{name}” (`{jid}`) is gone from the scheduler, "
                         f"confirmed by re-reading it.\n\nIf that was a mistake, there is no undo, "
-                        f"but this recreates it:\n\n> {name} — {sched}" + self._marks())
+                        f"but this recreates it:\n\n> {name} — {sched}" )
         j2 = after.get(jid) or {}
         want_paused = op == "pause"
         is_paused = (not j2.get("enabled", True)) or str(j2.get("state") or "").lower() == "paused"
@@ -3264,9 +3316,9 @@ class Pipe:
                     f"✅ **{'Paused' if want_paused else 'Resumed'}** — “{name}” (`{jid}`)"
                     + (f". Next run {nxt}." if not want_paused else
                        " will not run until you resume it.")
-                    + self._marks())
+                    )
 
-    async def _manage_turn(self, text, parked, rule, pending=None, user=None, handle=""):
+    async def _manage_turn(self, cid, text, parked, rule, pending=None, user=None, handle=""):
         """The whole deterministic manage turn. Returns the reply text, or None to fall through to
         the agent — the sole escape hatch, so this can never be a dead end.
 
@@ -3293,45 +3345,52 @@ class Pipe:
             jid = pend.get("id")
             by_id = {j.get("id"): j for j in jobs}
             if self._CONFIRM_YES.match(text or "") or self._CONFIRM_ALT.match(text or ""):
+                # Disarm FIRST on every branch below: the armed op is consumed by being answered,
+                # so a second "yes" can never replay a delete.
                 if pend.get("expired"):
                     self._metric(job="confirm", kind="task_cancel", outcome="expired")
                     self._route_metric("task.manage.abort", 0, "bg_confirm_expired", text)
+                    self._disarm(cid)
                     return ("That confirmation is more than 10 minutes old, so I did not act on it. "
-                            "Ask me again and I will re-confirm against the current list."
-                            + self._marks())
+                            "Ask me again and I will re-confirm against the current list.")
                 if jid not in by_id:
                     self._metric(job="confirm", kind="task_cancel", outcome="accepted")
                     self._route_metric("task.manage.abort", 0, "bg_confirm_gone", text)
+                    self._disarm(cid)
                     return (f"⚠️ **That one is already gone** — “{self._md_cell(pend.get('n'), 60)}” "
-                            f"is no longer in the scheduler, so there was nothing to cancel."
-                            + self._marks())
+                            f"is no longer in the scheduler, so there was nothing to cancel.")
                 fresh = by_id[jid]
-                # Did it change under us between the question and the answer? The marker carries
-                # the fingerprint precisely so a "yes" cannot land on a different job than the one
-                # that was described.
+                # Did it change under us between the question and the answer? The armed record
+                # carries the fingerprint precisely so a "yes" cannot land on a different job than
+                # the one that was described.
                 same = (str(fresh.get("name") or "")[:60] == (pend.get("n") or "")
                         and str(fresh.get("schedule_display") or fresh.get("schedule")
                                 or "")[:40] == (pend.get("s") or ""))
                 if not same:
                     self._metric(job="confirm", kind="task_cancel", outcome="changed_under_us")
                     self._route_metric("task.manage.abort", 0, "bg_confirm_changed", text)
+                    self._disarm(cid)
                     return self._render_list(
-                        [fresh], lead="⚠️ **That task changed since I asked** — I did not cancel "
-                                      "anything. Here it is as it stands now; ask again if you "
-                                      "still want it gone.")
+                        cid, [fresh],
+                        lead="⚠️ **That task changed since I asked** — I did not cancel anything. "
+                             "Here it is as it stands now; ask again if you still want it gone.")
                 if self._CONFIRM_ALT.match(text or ""):
                     self._metric(job="confirm", kind="task_cancel", outcome="downgraded")
                     self._route_metric("task.manage.downgrade", 0, "bg_confirm_pause", text)
+                    self._disarm(cid)
                     return await self._do_manage("pause", fresh)
                 self._metric(job="confirm", kind="task_cancel", outcome="accepted")
                 self._route_metric("task.manage.cancel", 0, "bg_confirm_yes", text, job_id=jid)
+                self._disarm(cid)
                 return await self._do_manage("cancel", fresh, pend.get("n"))
             if self._CONFIRM_NO.match(text or ""):
                 self._metric(job="confirm", kind="task_cancel", outcome="declined")
                 self._route_metric("task.manage.abort", 0, "bg_confirm_no", text)
-                return "Okay — nothing was cancelled." + self._marks()
+                self._disarm(cid)
+                return "Okay — nothing was cancelled."
             # Anything else: the user moved on. Never act, never swallow the turn.
             self._metric(job="confirm", kind="task_cancel", outcome="abandoned")
+            self._disarm(cid)
             return None
 
         # --- an open disambiguation ("which one?") ------------------------------------------
@@ -3342,7 +3401,7 @@ class Pipe:
         if not op:
             self._route_metric("task.list", 1, rule, text, n_jobs=len(jobs),
                                deterministic=True, ms=round((time.monotonic() - t0) * 1000))
-            return self._render_list(jobs)
+            return self._render_list(cid, jobs)
 
         # --- an operation aimed at a specific job --------------------------------------------
         r = self._resolve_ref(text, jobs, parked)
@@ -3367,7 +3426,7 @@ class Pipe:
                         f"| ID | `{job.get('id')}` |\n\n"
                         "Deleting removes the job **and its saved output**; there is no undo. "
                         "Reply **yes** to delete it, or anything else to leave it alone." + alt
-                        + self._marks(self._confirm_park("cancel", job)))
+                        + self._confirm_park(cid, "cancel", job))
             self._route_metric(f"task.manage.{op}", 0 if r["strategy"] in
                                ("ordinal", "id", "prefix") else 1, rule, text,
                                op=op, strategy=r["strategy"], job_id=job.get("id"))
@@ -3383,10 +3442,10 @@ class Pipe:
             # The candidates ARE parked, so "a" / "the first one" resolve against this shortlist
             # rather than the full list they were drawn from.
             return self._render_list(
-                cands, ordinals=False,
+                cid, cands, ordinals=False,
                 lead=f"**Which one?** {len(cands)} tasks match "
                      f"**“{self._md_cell(r['needle'], 40)}”** — say *a*, *b*, or give me an id. "
-                     f"Nothing has been changed.") + self._confirm_park(op, None, stage="choose")
+                     f"Nothing has been changed.") + self._confirm_park(cid, op, None, stage="choose")
         leads = {
             "bad_id": f"I don't have a job with id `{self._md_cell(r['needle'], 20)}`. "
                       f"Here's what the scheduler actually has:",
@@ -3398,9 +3457,9 @@ class Pipe:
                     f"longer in the scheduler. Nothing was changed; here's what's actually there:",
         }
         return self._render_list(
-            jobs, lead=leads.get(st, f"I don't see a task matching "
-                                     f"**“{self._md_cell(r['needle'], 40)}”**. Here's everything "
-                                     f"the scheduler has — nothing was changed:"))
+            cid, jobs, lead=leads.get(st, f"I don't see a task matching "
+                                          f"**“{self._md_cell(r['needle'], 40)}”**. Here's "
+                                          f"everything the scheduler has — nothing was changed:"))
 
     _RESEARCH_BRIEF = (
         "You are answering a ONE-OFF question for the user, using your tools. This is not a "
@@ -3668,7 +3727,6 @@ class Pipe:
                                     yield "\n\n(could not verify job creation — /api/jobs unreachable)"
                             else:
                                 outcome = "n/a"  # list/cancel/followup turns verify nothing by design
-                            yield self._marks()
                             return
                         try:
                             d = json.loads(data)
@@ -3685,12 +3743,10 @@ class Pipe:
             # The marker survives the failure ON PURPOSE. Both advice lines above invite a reply
             # ("ask me to list tasks", "start it and retry") — and without the marker that reply
             # matched no predicate and landed in plain chat, exactly when continuity mattered most.
-            yield self._marks()
         except aiohttp.ClientConnectorError:
             outcome = "unreachable_gateway"
             yield ("⚠️ hermes-agent is not reachable on 127.0.0.1:8642. "
                    "Start it with: `systemctl --user start hermes-gateway`")
-            yield self._marks()
         finally:
             # One row per delegation with the verification CLASS — the ready-made outcome signal
             # ("created" vs "failed" vs "timeout") that until now existed only as chat prose.
@@ -4240,8 +4296,8 @@ class Pipe:
         # it, because that turn is unambiguously about the picture.
         if BG_TASKS and MANAGE_DETERMINISTIC and not ref:
             mhandle = self._alert_username(__user__)
-            pconf = self._pending_confirm(omsgs)
-            parked = self._parked_jobs(omsgs)
+            pconf = self._pending_confirm(cid, omsgs)
+            parked = self._parked_jobs(cid, omsgs)
             raw_l = (text or "").strip().lower()
             mg_manage = bool(self._BG_MANAGE.match(raw_l))
             mg_list = bool(self._BG_LIST.search(raw_l))
@@ -4258,9 +4314,10 @@ class Pipe:
             if answering or referring or mg_manage or mg_list:
                 rule = ("bg_confirm" if answering else "bg_parked_ref" if referring
                         else "bg_manage_list" if mg_manage else "bg_list_vocab")
-                done = await self._manage_turn(text, parked, rule, pending=pconf,
+                done = await self._manage_turn(cid, text, parked, rule, pending=pconf,
                                                user=__user__, handle=mhandle)
                 if done is not None:
+                    self._mark_bg(cid)
                     return self._say(done)
         if BG_TASKS and not attached_img and not ref:
             handle = self._alert_username(__user__)
@@ -4284,18 +4341,20 @@ class Pipe:
                                      "`/research what changed in the Wan 2.2 release notes`.")
                 self._route_metric("agent.oneshot", 0,
                                    f"slash_{oneshot.group(1).lower()}", text)
+                self._mark_bg(cid)
                 return self._hermes_stream(question, handle, verify_creation=False,
                                            brief=self._RESEARCH_BRIEF)
             # A turn that answers "what number should I text?" is handled before anything else —
             # a bare "514-555-0123" matches no task predicate and would otherwise reach the chat
             # model, which would cheerfully claim to have saved it.
-            pending = self._pending_phone_request(omsgs)
+            pending = self._pending_phone_request(omsgs, cid)
             if pending is not None:
-                answered = self._phone_reply(text, handle, pending)
+                answered = self._phone_reply(text, handle, pending, cid)
                 if answered is not None:
                     self._route_metric("task.create", 0, "phone_reply", text)
+                    self._mark_bg(cid)
                     return answered
-            followup = self._is_bg_followup(text, omsgs)
+            followup = self._is_bg_followup(text, omsgs, cid)
             if followup or self._is_bg_task_request(text):
                 raw_l = (text or "").strip().lower()
                 is_manage = bool(self._BG_MANAGE.match(raw_l))
@@ -4328,7 +4387,8 @@ class Pipe:
                 if (not followup and not read_only
                         and self._WANTS_ALERT.search(text or "")
                         and not self._contact(handle).get("phone")):
-                    return self._say(self._phone_prompt(handle, text))
+                    self._mark_bg(cid)
+                    return self._say(self._phone_prompt(handle, text, cid))
                 # Confirm ONLY a genuinely new, heuristically-detected job. Delegating loads the
                 # 65536-ctx agent runner, which cannot co-reside with the 32768-ctx chat tenant —
                 # so a false positive costs the user an eviction plus a reload for a job they
@@ -4361,6 +4421,7 @@ class Pipe:
                             f"The user now replies: {text}\n"
                             f"Act on it against the REAL scheduler state — call "
                             f"cronjob(action='list') first and work from what is actually there.")
+                self._mark_bg(cid)
                 return self._hermes_stream(sent, handle,
                                            verify_creation=not (read_only or followup))
         if not attached_img and not ref and await asyncio.to_thread(self._is_code_request, text):

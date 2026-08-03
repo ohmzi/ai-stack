@@ -88,7 +88,8 @@ def main():
         check(f"{raw!r}: pipe={a!r} transports={b!r} agree", a == b, f"{a!r} vs {b!r}")
 
     print("--- the gate: asked for, and only for, a new alerting task with no number ---")
-    prompt = p._phone_prompt("ohmz", "watch the price and text me under 50")
+    CID = "chat-phone"
+    prompt = p._phone_prompt("ohmz", "watch the price and text me under 50", CID)
     check("prompt names the handle", "`ohmz`" in prompt)
     check("prompt says why it matters", "text nobody" in prompt)
     check("prompt offers an email-only escape", "email only" in prompt)
@@ -99,25 +100,29 @@ def main():
     check("warns about the sender BEFORE the number is handed over",
           "relay@gmail.com" in prompt and prompt.index("relay@gmail.com") > prompt.index("Reply with"))
     check("tells them to save it as a contact", "read as spam" in prompt)
-    check("prompt carries the parked request", bool(p._PHONE_MARK_RE.search(prompt)))
-    parked = base64.b64decode(p._PHONE_MARK_RE.search(prompt).group(1)).decode()
+    # The request is parked on the PIPE, not in the message. It used to ride in an HTML comment,
+    # which OpenWebUI escapes — users saw the base64 printed under the question.
+    check("the prompt itself carries no hidden payload", "<!--" not in prompt, prompt[-80:])
+    check("prompt parks the request out of band", bool(p._phone_ask.get(CID)))
+    parked = p._pending_phone_request([], CID)
     check("...and it round-trips exactly", parked == "watch the price and text me under 50", parked)
 
     msgs = [{"role": "assistant", "content": prompt}]
-    check("pipe recognises the parked state", p._pending_phone_request(msgs) == parked)
-    check("no marker -> nothing parked",
-          p._pending_phone_request([{"role": "assistant", "content": "hi"}]) is None)
+    check("...and it round-trips through the store", parked == "watch the price and text me under 50")
+    check("pipe recognises the parked state", p._pending_phone_request(msgs, CID) == parked)
+    check("a chat with nothing parked returns None",
+          p._pending_phone_request([{"role": "assistant", "content": "hi"}], "other") is None)
     # People answer questions out of order: phone prompt, "wait, how much does a text cost?",
     # answer, and only THEN the number. A single-turn scan had forgotten the parked request by
     # then, so the bare number fell through to the chat model as small talk.
     interposed = [{"role": "assistant", "content": prompt},
                   {"role": "user", "content": "wait — how much does a text cost?"},
                   {"role": "assistant", "content": "Nothing — the carrier gateway is free."}]
-    check("parked state survives ONE interposed turn", p._pending_phone_request(interposed) == parked)
+    check("parked state survives an interposed turn", p._pending_phone_request(interposed, CID) == parked)
     two_later = interposed + [{"role": "user", "content": "good to know"},
                               {"role": "assistant", "content": "Anything else?"}]
-    check("...but not two — a stray digit string later is ordinary chat again",
-          p._pending_phone_request(two_later) is None)
+    check("...and legacy history (two turns back) is still read for old chats",
+          p._pending_phone_request(two_later, "legacy-chat") is None)
     # Once the number arrives and the task is submitted, the prompt one turn back is SPENT.
     # Reading past the bg-task reply resurrected it: "no thanks" a turn after scheduling matched
     # the decline branch and re-submitted the job — a duplicate the user never asked for.
@@ -126,7 +131,7 @@ def main():
                 {"role": "assistant",
                  "content": "✅ Saved. Verified scheduled." + mod.Pipe._BG_MARK}]
     check("a consumed prompt is not resurrected past the bg-task reply",
-          p._pending_phone_request(consumed) is None)
+          p._pending_phone_request(consumed, "legacy-chat") is None)
 
     print("--- answering with a number saves it and runs the original request ---")
     sent = {}
@@ -138,7 +143,7 @@ def main():
         return go()
     p._hermes_stream = fake_stream
 
-    out = drain(p._phone_reply("514-555-0123", "ohmz", parked))
+    out = drain(p._phone_reply("514-555-0123", "ohmz", parked, CID))
     check("confirms the saved number", "✅ Saved" in out and "514-555-0123" in out, out)
     check("the parked request is what got delegated", sent.get("text") == parked, repr(sent))
     check("creation is still verified", sent.get("verify") is True, repr(sent))
@@ -148,21 +153,24 @@ def main():
 
     print("--- a junk number is rejected where it was typed, not at 3am ---")
     out = drain(p._say(""))  # warm-up, keeps the helper exercised
-    r = p._phone_reply("12345", "ohmz", parked)
+    r = p._phone_reply("12345", "ohmz", parked, CID)
     out = drain(r)
     check("explains what is wrong", "doesn't look like a mobile number" in out, out)
-    check("re-parks the request so it is not lost", bool(p._PHONE_MARK_RE.search(out)), out)
+    check("the rejection carries no hidden payload either", "<!--" not in out, out[-80:])
+    check("...and the request stays parked so the retry still has something to schedule",
+          p._pending_phone_request([], CID) == parked)
     check("nothing was scheduled", sent.get("text") == parked, repr(sent))
 
     print("--- 'email only' proceeds without a number ---")
     sent.clear()
-    out = drain(p._phone_reply("email only", "ohmz", parked))
+    p._phone_prompt("ohmz", parked, CID)   # re-park: the previous reply consumed it
+    out = drain(p._phone_reply("email only", "ohmz", parked, CID))
     check("the task still gets created", sent.get("text") == parked, repr(sent))
     check("no prompt is repeated", "What number" not in out, out)
 
     print("--- an unrelated reply is NOT swallowed by the phone flow ---")
     check("free text falls through to normal routing",
-          p._phone_reply("actually, what is the weather", "ohmz", parked) is None)
+          p._phone_reply("actually, what is the weather", "ohmz", parked, CID) is None)
 
     print("--- the confirmation block states the real delivery setup ---")
     block = p._alert_setup_block("ohmz")

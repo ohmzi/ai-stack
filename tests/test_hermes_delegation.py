@@ -224,8 +224,11 @@ def main():
     check("a list/cancel turn (verify_creation=False) adds no verdict",
           "Verified" not in out and "Verification failed" not in out, out[-160:])
     check("the agent's own text is still streamed through", "here are your jobs" in out, out[:120])
-    check("every hermes turn carries the invisible follow-up marker",
-          out.endswith(mod.Pipe._BG_MARK), repr(out[-40:]))
+    # Continuity used to ride in the reply as <!--bg-task-->. OpenWebUI escapes HTML comments, so
+    # that printed as visible junk under every answer; it now lives on the pipe (_mark_bg), set at
+    # the pipe() call site BEFORE the stream starts — which also means it survives a stream that
+    # never finishes. What the reply must contain is nothing at all.
+    check("no marker leaks into the reply body", "<!--" not in out, repr(out[-60:]))
 
     out = drive("nope", [before, before], status=503)
     check("a non-200 from hermes surfaces as an error, not a silent pass",
@@ -238,14 +241,22 @@ def main():
     out = drive("partial answer", [before, before], verify=False, exc=asyncio.TimeoutError())
     check("a timeout explains itself", "did not finish" in out, out[-200:])
     check("...streams what arrived before dying", "partial answer" in out, out[:120])
-    check("...and still carries the follow-up marker",
-          out.endswith(mod.Pipe._BG_MARK), repr(out[-40:]))
+    check("...without leaking a marker", "<!--" not in out, repr(out[-60:]))
 
     dead = mod.aiohttp.ClientConnectorError.__new__(mod.aiohttp.ClientConnectorError)
     out = drive("never sent", [before, before], verify=False, post_exc=dead)
     check("a dead gateway names the fix", "hermes-gateway" in out, out[:160])
-    check("...and still carries the follow-up marker",
-          out.endswith(mod.Pipe._BG_MARK), repr(out[-40:]))
+    check("...without leaking a marker", "<!--" not in out, repr(out[-60:]))
+
+    print("--- continuity is held on the pipe, so it survives a stream that never finishes ---")
+    pc = mod.Pipe()
+    check("a fresh chat is not mid-task", not pc._was_bg_turn("c9", []))
+    pc._mark_bg("c9")
+    check("marking makes the next short reply a follow-up", pc._is_bg_followup("yes, retry", [], "c9"))
+    check("...and only in THAT chat", not pc._is_bg_followup("yes, retry", [], "c-other"))
+    check("legacy history still counts as a task turn",
+          pc._is_bg_followup("yes, retry",
+                             [{"role": "assistant", "content": "x" + mod.Pipe._BG_MARK}], "c-old"))
 
     print("--- the GPU handoff ---")
     # The cron tag runs at num_ctx 65536 and chat at 32768; Ollama keys runners by model+options,
