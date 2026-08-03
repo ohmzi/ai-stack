@@ -296,3 +296,61 @@
  									onChange={(data) => {
  										if (!$temporaryChatEnabled) {
  											saveDraft(data);
+--- a/src/lib/components/layout/Sidebar.svelte
++++ b/src/lib/components/layout/Sidebar.svelte
+@@ -118,6 +118,14 @@
+ 
+ 	$: pinnedItems = $settings?.pinnedMenuItems ?? DEFAULT_PINNED_ITEMS;
+ 
++	// ai-stack: the channel background-task results are delivered to. Resolved by NAME from the
++	// channel list the sidebar already loads, so this works on any install and renders nothing
++	// when the channel is absent — a hardcoded id would be wrong everywhere else and would go
++	// quietly dead here the day the channel is recreated.
++	const TASKS_CHANNEL_NAME = 'background-tasks';
++	let tasksChannel = null;
++	$: tasksChannel = ($channels ?? []).find((c) => c?.name === TASKS_CHANNEL_NAME) ?? null;
++
+ 	const isMenuItemVisible = (id) => {
+ 		switch (id) {
+ 			case 'notes':
+@@ -1227,6 +1235,40 @@
+ 							{/if}
+ 						{/each}
+ 					</div>
++
++					<!-- ai-stack: alerts and run logs live in a channel; this is the way in -->
++					{#if tasksChannel && $config?.features?.enable_channels && ($user?.role === 'admin' || ($user?.permissions?.features?.channels ?? true))}
++						<div class="px-[0.4375rem] flex justify-center text-gray-800 dark:text-gray-200">
++							<a
++								id="sidebar-background-tasks-button"
++								class="grow flex items-center space-x-3 rounded-2xl px-2.5 py-2 hover:bg-gray-100 dark:hover:bg-gray-900 transition"
++								href="/channels/{tasksChannel.id}"
++								on:click={itemClickHandler}
++								draggable="false"
++								aria-label={$i18n.t('Background tasks')}
++							>
++								<div class="self-center">
++									<svg
++										xmlns="http://www.w3.org/2000/svg"
++										fill="none"
++										viewBox="0 0 24 24"
++										stroke-width="2"
++										stroke="currentColor"
++										class="size-4.5"
++									>
++										<path
++											stroke-linecap="round"
++											stroke-linejoin="round"
++											d="M14.857 17.082a23.848 23.848 0 0 0 5.454-1.31A8.967 8.967 0 0 1 18 9.75V9A6 6 0 0 0 6 9v.75a8.967 8.967 0 0 1-2.312 6.022c1.733.64 3.56 1.085 5.455 1.31m5.714 0a24.255 24.255 0 0 1-5.714 0m5.714 0a3 3 0 1 1-5.714 0"
++										/>
++									</svg>
++								</div>
++								<div class="self-center text-sm font-primary">
++									{$i18n.t('Background tasks')}
++								</div>
++							</a>
++						</div>
++					{/if}
+ 				</div>
+ 
+ 				{#if ($models ?? []).length > 0 && (($settings?.pinnedModels ?? []).length > 0 || $config?.default_pinned_models)}
