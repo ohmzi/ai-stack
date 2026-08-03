@@ -128,7 +128,11 @@ def owui_preflight(src, is_filter=False):
         "    p = ns.get('Pipe')\n"
         "    out['pipes'] = p().pipes() if p and hasattr(p(), 'pipes') else None\n"
         "    out['is_filter'] = ns.get('Filter') is not None\n"
-        "    out['toggle'] = ns.get('toggle')\n"
+        # OpenWebUI instantiates the Filter and reads `toggle` off the INSTANCE, so that is what
+        # has to be checked. A module-level toggle alone loads fine, passes every static check,
+        # and produces no control in the interface.
+        "    f = ns.get('Filter')\n"
+        "    out['toggle'] = getattr(f(), 'toggle', None) if f else None\n"
         "except Exception as e:\n"
         "    out['loads'] = False\n"
         "    out['error'] = f'{type(e).__name__}: {e}'\n"
@@ -153,7 +157,9 @@ def owui_preflight(src, is_filter=False):
         # force web search and the code interpreter off on every turn of every chat, with nothing
         # in the interface to show for it. Nothing else in the stack would notice.
         if d.get("toggle") is not True:
-            return None, "the filter has no `toggle = True` — it would run on every turn, invisibly"
+            return None, ("the Filter instance has no `toggle = True` (set it in __init__ — "
+                          "OpenWebUI reads it off the instance, not the module). Without it the "
+                          "filter has no control in the UI and runs on every turn instead.")
     return d.get("manifest") or {}, None
 
 

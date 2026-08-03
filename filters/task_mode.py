@@ -78,6 +78,13 @@ class Filter:
 
     def __init__(self):
         self.valves = self.Valves()
+        # These have to be on the INSTANCE, not just at module level. OpenWebUI's loader
+        # instantiates the Filter class and then reads `getattr(function_module, "toggle")` off
+        # that instance — so a module-level declaration alone is invisible to it, and the control
+        # simply never appears in the interface with nothing logged anywhere. Declared once above
+        # and mirrored here so the two can never drift.
+        self.toggle = toggle
+        self.icon = icon
 
     def inlet(
         self,

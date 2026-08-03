@@ -276,6 +276,13 @@ def main():
     # on every turn of every chat, with nothing in the interface to show for it.
     check("the filter is a toggle, not an always-on filter",
           bool(re.search(r"^toggle\s*=\s*True\s*$", fsrc, re.M)))
+    # ...and it has to be on the INSTANCE. OpenWebUI instantiates the Filter and reads `toggle`
+    # off that object, so a module-level declaration alone loads cleanly, passes every static
+    # check, and still produces no control in the interface — which is exactly what happened.
+    check("...and the INSTANCE exposes it, which is what OpenWebUI actually reads",
+          getattr(tm.Filter(), "toggle", None) is True)
+    check("...along with the icon, resolved the same way",
+          str(getattr(tm.Filter(), "icon", "")).startswith("data:image/svg+xml"))
     check("it carries frontmatter starting on line 1 (or the icon never reaches the UI)",
           fsrc.startswith('"""\n') and "\ntitle: " in fsrc[:400])
 
