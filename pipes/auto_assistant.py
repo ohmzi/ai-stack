@@ -954,8 +954,14 @@ class Pipe:
     # deliberately ABSENT — it reads as run-now, which re-arms and then deletes a one-shot, so it
     # stays with the agent rather than being silently absorbed by resume.
     _MANAGE_VERB = re.compile(
-        r"^\s*(?:please\s+|pls\s+|hey\s+|ok(?:ay)?[,\s]+|now\s+)*"
+        # "also"/"and then" open a follow-up instruction, not a new subject — "also cancel b" was
+        # falling through to the agent for want of one word.
+        r"^\s*(?:please\s+|pls\s+|hey\s+|ok(?:ay)?[,\s]+|now\s+|also\s+|and\s+(?:also\s+|then\s+)?"
+        r"|then\s+)*"
         r"(?:(?:can|could|would|will)\s+you\s+(?:please\s+)?)?(?:go\s+ahead\s+and\s+)?"
+        # A leading "yes"/"ok" is agreement with the previous turn, not a different request —
+        # "yes cancel this" was falling through to the agent for want of these five words.
+        r"(?:(?:yes|yeah|yep|ok(?:ay)?|sure)[,\s]+)?"
         r"(?P<verb>cancel|delete|remove|stop|end|kill|get\s+rid\s+of|unsubscribe\s+from"
         r"|pause|hold|disable|suspend|turn\s+off"
         r"|resume|unpause|re-?enable|re-?activate|turn\s+back\s+on)\b", re.I)
@@ -981,9 +987,21 @@ class Pipe:
         monitors monitoring watch watches watching watcher tracker trackers tracking alert alerts
         reminder reminders cron crons automation automations background scheduled active running
         such is are was were do does did i you he she they them there here what which""".split())
-    # Bulk and exclusion are exactly where a wrong guess is unrecoverable, so neither ever resolves
-    # to a single job — they always fall through to "which one?".
-    _REF_QUANTIFIER = re.compile(r"\b(?:all|every|everything|each|both|the\s+rest|any\s+of\s+them)\b", re.I)
+    # "All of them" is a real request, not an ambiguity. Refusing it and offering a single-choice
+    # menu ("say a, b, or give me an id") is a dead end — the user has to cancel one, wait, then
+    # find the next one in a renumbered list. So bulk RESOLVES, and safety comes from the
+    # confirmation naming every job it is about to delete.
+    _REF_BULK = re.compile(
+        r"\b(?:all|everything|every\s+one|everyone|each\s+of\s+them|both|the\s+lot|"
+        r"all\s+of\s+(?:them|the|my)|any\s+of\s+them)\b", re.I)
+    # Exclusion still refuses: "everything except the rtx one" is a set the user described by what
+    # is NOT in it, and getting that wrong deletes the one thing they wanted to keep.
+    _REF_QUANTIFIER = re.compile(r"\b(?:the\s+rest)\b", re.I)
+    # Filler around a bare handle. "b too" and "also b" mean the same thing as "b", and losing them
+    # is what made a follow-up cancel fall through to a no-match.
+    _REF_FILLER = re.compile(r"\b(?:too|also|as\s+well|please|then|next|now|one)\b", re.I)
+    # Multi-select: "a and b", "1, 2", "the first and the third".
+    _REF_JOINER = re.compile(r"\s*(?:,|&|\+|\band\b)\s*", re.I)
     _REF_NEGATION = re.compile(
         r"\b(?:not|isn'?t|aren'?t|except|other\s+than|besides|apart\s+from|rather\s+than"
         r"|instead\s+of|but\s+the|the\s+other)\b", re.I)
@@ -1498,12 +1516,23 @@ class Pipe:
                 return []
         return []
 
-    def _confirm_park(self, cid, op, job, stage="confirm", handle=""):
-        """Arm an operation for the NEXT turn. The name and schedule are kept so the yes-turn can
-        check the job did not change under us between the question and the answer."""
+    def _confirm_park(self, cid, op, job, stage="confirm", handle="", jobs=None):
+        """Arm an operation for the NEXT turn. The names and schedules are kept so the yes-turn can
+        check nothing changed under us between the question and the answer.
+
+        `jobs` arms the same op over several at once. Stored as a list either way so the consuming
+        branch has one shape to handle — a bulk delete is the last place to want two code paths.
+        """
+        batch = list(jobs) if jobs else ([job] if job else [])
         if cid:
             self._lru(self._armed, cid,
                       {"t": time.time(), "stage": stage, "op": op, "h": handle or "",
+                       "ids": [j.get("id") for j in batch],
+                       "ns": [str(j.get("name") or "")[:60] for j in batch],
+                       "ss": [str(j.get("schedule_display") or j.get("schedule") or "")[:40]
+                              for j in batch],
+                       # Kept for the single case so existing copy and the legacy marker keep
+                       # working unchanged.
                        "id": (job or {}).get("id"),
                        "n": str((job or {}).get("name") or "")[:60],
                        "s": str((job or {}).get("schedule_display")
@@ -1575,7 +1604,10 @@ class Pipe:
         """1-based position, or None. Deliberately not a general number parser: a bare number only
         counts when it is the WHOLE reference, so "cancel 2" resolves and "cancel the 60k alert"
         does not."""
-        p = phrase.strip()
+        # Strip conversational filler first: "b too" and "also b" name the same row as "b", and
+        # dropping them turned a perfectly clear follow-up into "I don't see a task matching".
+        p = cls._REF_FILLER.sub(" ", phrase).strip().strip(",.")
+        p = re.sub(r"\s+", " ", p).strip()
         if re.fullmatch(r"\d{1,2}", p):
             return int(p)
         # Disambiguation candidates are lettered so a number can never mean two different jobs in
@@ -1602,12 +1634,17 @@ class Pipe:
     def _ref_tokens(cls, phrase):
         return [t for t in cls._fold(phrase).split() if t not in cls._REF_STOP and len(t) > 1]
 
-    def _resolve_ref(self, text, jobs, parked):
-        """Map the user's words onto exactly one job, or refuse.
+    def _resolve_ref(self, text, jobs, parked, _split=True):
+        """Map the user's words onto the job(s) they meant, or refuse.
 
         Ordered strategies, and the FIRST stage producing a candidate decides — a weaker signal
         must never override a stronger one. Ambiguity is never broken by a score margin: a
         threshold is a guess, and a wrong guess here deletes the wrong monitor.
+
+        `status="bulk"` means the user named a SET on purpose ("all of them", "a and b"). That is
+        answered, not refused: refusing it and offering a one-at-a-time menu made cancelling two
+        tasks a four-turn negotiation with a renumbered list in the middle. Safety moves to the
+        confirmation, which names every job it is about to delete.
         """
         out = {"status": "none", "job": None, "candidates": [], "strategy": "", "needle": ""}
         by_id = {j.get("id"): j for j in jobs}
@@ -1625,10 +1662,33 @@ class Pipe:
                 return {**out, "status": "one", "job": by_id[tok], "strategy": "id"}
             return {**out, "status": "bad_id", "needle": tok, "strategy": "id"}
 
-        # Bulk / exclusion never resolve — "cancel everything except the rtx one" is precisely the
-        # phrasing where acting on a best guess is unrecoverable.
+        # Exclusion still never resolves: "everything except the rtx one" describes a set by what
+        # is missing from it, and getting that wrong deletes the one thing they meant to keep.
         if self._REF_QUANTIFIER.search(phrase) or self._REF_NEGATION.search(phrase):
             return {**out, "status": "many", "candidates": jobs, "strategy": "guarded"}
+
+        # "all of them" / "both" — the whole visible set, which for a scoped user is already only
+        # their own jobs.
+        if jobs and self._REF_BULK.search(phrase):
+            return {**out, "status": "bulk", "candidates": list(jobs), "strategy": "bulk"}
+
+        # "a and b", "1, 2", "the first and the third" — each part must resolve on its own, and to
+        # a DIFFERENT job, or this is not a multi-select and the normal ladder should have it.
+        if _split:
+            parts = [q for q in (x.strip() for x in self._REF_JOINER.split(phrase)) if q]
+            if len(parts) > 1:
+                picked, seen = [], set()
+                for part in parts:
+                    r = self._resolve_ref(part, jobs, parked, _split=False)
+                    if r["status"] != "one" or not r["job"]:
+                        picked = []
+                        break
+                    jid = r["job"].get("id")
+                    if jid not in seen:
+                        seen.add(jid)
+                        picked.append(r["job"])
+                if len(picked) > 1:
+                    return {**out, "status": "bulk", "candidates": picked, "strategy": "multi"}
 
         # R1 — an ordinal against the list we actually rendered.
         n = self._ref_ordinal(phrase)
@@ -3530,6 +3590,37 @@ class Pipe:
                        " will not run until you resume it.")
                     )
 
+    async def _do_manage_bulk(self, op, jobs, scope=None):
+        """Run one operation across several jobs and report it as one result.
+
+        Deliberately not N copies of _do_manage's prose: eight paragraphs saying the same thing is
+        how a real failure in the middle goes unread. One line per job, and anything that did NOT
+        work gets its own line with the reason.
+        """
+        done, failed = [], []
+        for j in jobs:
+            out = await self._do_manage(op, j, scope=scope)
+            name = self._md_cell(j.get("name"), 48)
+            # _do_manage words every outcome; the leading glyph is what separates worked from did
+            # not, and it is the same set the table uses.
+            (done if out.lstrip().startswith(("✅", "ℹ️")) else failed).append((name, j, out))
+        verb = {"cancel": "Cancelled", "pause": "Paused", "resume": "Resumed"}[op]
+        lines = [f"**{verb} {len(done)} of {len(jobs)} tasks.**" if failed
+                 else f"✅ **{verb} {len(done)} task{'s' if len(done) != 1 else ''}.**"]
+        for name, j, _ in done:
+            lines.append(f"- {name} (`{j.get('id')}`)")
+        for name, j, out in failed:
+            first = " ".join(out.split())[:160]
+            lines.append(f"- ⚠️ **{name}** — not {op}led. {first}")
+        if op == "cancel" and done:
+            # There is no undo and the saved output goes too, so the recreate details have to be
+            # in the same message rather than one list away.
+            lines.append("\nNo undo. To recreate them:")
+            for name, j, _ in done:
+                sched = self._md_cell(j.get("schedule_display") or j.get("schedule"), 40)
+                lines.append(f"> {name} — {sched}")
+        return "\n".join(lines)
+
     async def _manage_turn(self, cid, text, parked, rule, pending=None, user=None, handle=""):
         """The whole deterministic manage turn. Returns the reply text, or None to fall through to
         the agent — the sole escape hatch, so this can never be a dead end.
@@ -3577,7 +3668,9 @@ class Pipe:
 
         # --- consuming an armed confirmation -----------------------------------------------
         if pend.get("stage") == "confirm":
-            jid = pend.get("id")
+            # One shape for one job and for many: the armed record always carries a list.
+            jids = list(pend.get("ids") or ([pend.get("id")] if pend.get("id") else []))
+            jid = jids[0] if len(jids) == 1 else None
             by_id = {j.get("id"): j for j in jobs}
             # A reply that names a DIFFERENT job is a new instruction, whatever affirmative word it
             # happens to open with. Treating it as an answer would act on the job that was asked
@@ -3594,12 +3687,46 @@ class Pipe:
                     self._disarm(cid)
                     return ("That confirmation is more than 10 minutes old, so I did not act on it. "
                             "Ask me again and I will re-confirm against the current list.")
-                if jid not in by_id:
+                present = [i for i in jids if i in by_id]
+                if not present:
                     self._metric(job="confirm", kind="task_cancel", outcome="accepted")
                     self._route_metric("task.manage.abort", 0, "bg_confirm_gone", text)
                     self._disarm(cid)
-                    return (f"⚠️ **That one is already gone** — “{self._md_cell(pend.get('n'), 60)}” "
-                            f"is no longer in the scheduler, so there was nothing to cancel.")
+                    gone = self._md_cell((pend.get("ns") or [pend.get("n") or ""])[0], 60)
+                    return (f"⚠️ **Already gone** — “{gone}”"
+                            + (f" and {len(jids) - 1} other(s)" if len(jids) > 1 else "")
+                            + " no longer in the scheduler, so there was nothing to cancel.")
+                # --- several at once ------------------------------------------------------
+                if len(jids) > 1:
+                    names = pend.get("ns") or []
+                    changed = [i for n, i in enumerate(jids)
+                               if i in by_id
+                               and str(by_id[i].get("name") or "")[:60] != (
+                                   names[n] if n < len(names) else None)]
+                    if changed:
+                        self._metric(job="confirm", kind="task_cancel",
+                                     outcome="changed_under_us")
+                        self._route_metric("task.manage.abort", 0, "bg_confirm_changed", text)
+                        self._disarm(cid)
+                        return self._render_list(
+                            cid, [by_id[i] for i in present], handle=handle,
+                            scoped=scope is not None,
+                            lead="⚠️ **Something changed since I asked** — I did not cancel "
+                                 "anything. Here is where things actually stand; ask again if you "
+                                 "still want them gone.")
+                    batch = [by_id[i] for i in present]
+                    bulk_op = "pause" if self._CONFIRM_ALT.match(text or "") else "cancel"
+                    self._metric(job="confirm", kind="task_cancel",
+                                 outcome="downgraded" if bulk_op == "pause" else "accepted",
+                                 n=len(batch))
+                    self._route_metric(f"task.manage.{'downgrade' if bulk_op == 'pause' else 'cancel'}",
+                                       0, "bg_confirm_yes", text, op=bulk_op, n=len(batch))
+                    self._disarm(cid)
+                    missing = len(jids) - len(present)
+                    out = await self._do_manage_bulk(bulk_op, batch, scope=scope)
+                    if missing:
+                        out += (f"\n\n*{missing} of them had already gone from the scheduler.*")
+                    return out
                 fresh = by_id[jid]
                 # Did it change under us between the question and the answer? The armed record
                 # carries the fingerprint precisely so a "yes" cannot land on a different job than
@@ -3658,6 +3785,32 @@ class Pipe:
         # --- an operation aimed at a specific job --------------------------------------------
         r = self._resolve_ref(text, jobs, parked)
         st, job = r["status"], r["job"]
+
+        # --- ...or at several of them, named on purpose ---------------------------------------
+        if st == "bulk":
+            batch = r["candidates"]
+            if op == "cancel":
+                rows = "\n".join(
+                    f"| {self._md_cell(j.get('name'), 52)} | "
+                    f"{self._md_cell(j.get('schedule_display') or j.get('schedule'), 24)} | "
+                    f"`{j.get('id')}` |" for j in batch)
+                self._metric(job="confirm", kind="task_cancel", outcome="asked", n=len(batch))
+                self._route_metric("task.manage.confirm", 1, rule, text, op="cancel",
+                                   strategy=r["strategy"], n=len(batch))
+                # Every job named. A count alone ("delete 4 tasks?") is not something anyone can
+                # actually check, and this is the one operation with no undo.
+                return (f"⚠️ **Cancel {len(batch)} tasks for good?**\n\n"
+                        f"| Task | Schedule | ID |\n|---|---|---|\n{rows}\n\n"
+                        "That is everything listed above — deleting removes each job **and its "
+                        "saved output**, and there is no undo. Reply **yes** to delete them all, "
+                        "**pause** to switch them off instead, or anything else to leave them "
+                        "alone." + self._confirm_park(cid, "cancel", None, handle=handle,
+                                                      jobs=batch))
+            # pause / resume are reversible, so they act now, exactly as they do for one job.
+            self._route_metric(f"task.manage.{op}", 1, rule, text, op=op,
+                               strategy=r["strategy"], n=len(batch))
+            return await self._do_manage_bulk(op, batch, scope=scope)
+
         if st == "one":
             if op == "cancel":
                 sched = self._md_cell(job.get("schedule_display") or job.get("schedule"), 40)

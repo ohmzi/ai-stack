@@ -13,7 +13,10 @@ with it. So the contract this file pins is mostly about refusing to act:
 
   * no single user message can ever delete a job — the confirmation is a two-turn marker gate;
   * a bare "ok" or "sure" is NOT a delete confirmation, only an explicit yes is;
-  * ambiguity, bulk ("cancel everything") and exclusion ("all except the rtx one") NEVER resolve;
+  * ambiguity and exclusion ("all except the rtx one") NEVER resolve;
+  * naming a SET on purpose ("cancel all of them", "cancel a and b") DOES resolve — refusing it
+    and offering a one-at-a-time menu made cancelling two tasks a four-turn negotiation with a
+    renumbered list in the middle — but the confirmation then names every job it would delete;
   * a job that changed between the question and the answer is not deleted;
   * an unreachable scheduler never renders as "you have no tasks".
 
@@ -230,8 +233,7 @@ def main():
               f"{r['status']}/{r['strategy']}")
 
     print("--- ...and the ones that must NEVER resolve to a single job ---")
-    for text, why in [("cancel everything", "bulk"), ("cancel all my tasks", "bulk"),
-                      ("cancel all except the rtx one", "exclusion"),
+    for text, why in [("cancel all except the rtx one", "exclusion"),
                       ("cancel the one that isn't the btc one", "negation"),
                       ("cancel such and such tracking", "placeholder"),
                       ("cancel it", "bare, 3 jobs")]:
@@ -251,6 +253,60 @@ def main():
     r = make()._resolve_ref("cancel the ninth one", JOBS, parked)
     check("an out-of-range ordinal says how many there are",
           r["status"] == "out_of_range", r["status"])
+
+    print("--- ...but naming a SET on purpose is a request, not an ambiguity ---")
+    # Refusing "cancel all of them" and offering a one-at-a-time menu turned cancelling two tasks
+    # into a four-turn negotiation with a renumbered list in the middle. Bulk resolves; the safety
+    # moves to a confirmation that names every job it is about to delete.
+    for text, why in [("cancel all my tasks", "all"), ("cancel everything", "everything"),
+                      ("cancel both", "both"), ("delete all of them", "all of them"),
+                      ("cancel a and b", "two handles"), ("cancel 1 and 2", "two ordinals")]:
+        r = make()._resolve_ref(text, JOBS, parked)
+        check(f"{why}: {text!r} resolves to the whole set",
+              r["status"] == "bulk" and len(r["candidates"]) >= 2,
+              f"{r['status']}/{r['strategy']}/{len(r['candidates'])}")
+    r = make()._resolve_ref("cancel a and b", [JOBS[0]], parked[:1])
+    check("...but a multi-select that cannot resolve every part is not a bulk",
+          r["status"] != "bulk", r["status"])
+    # Follow-up shapes that used to fall through to "I don't see a task matching 'b too'".
+    for text in ["cancel b too", "also cancel b", "cancel b as well"]:
+        r = make()._resolve_ref(text, JOBS, parked)
+        check(f"filler around a handle is ignored: {text!r}",
+              r["status"] == "one" and (r["job"] or {}).get("id") == JOBS[1]["id"],
+              f"{r['status']}/{r['strategy']}")
+    check("a leading affirmative still reads as an instruction",
+          mod.Pipe._manage_op("yes cancel this") == "cancel")
+
+    print("--- bulk cancel is one confirmation that names everything, then one delete each ---")
+    pb = make()
+    turn(pb, "list my tasks")
+    CALLS.clear()
+    ask = turn(pb, "cancel all my tasks")
+    check("it asks once, for all of them", "Cancel 3 tasks for good?" in ask, ask[:120])
+    check("...naming every job it would delete",
+          all(j["name"][:18] in ask for j in JOBS), ask[:400])
+    check("...and writes nothing yet", "DELETE" not in [m for m, _ in CALLS], repr(CALLS))
+    out = turn(pb, "yes")
+    check("...then deletes them all on one yes", "Cancelled 3 tasks" in out, out[:160])
+    check("...one DELETE per job", [m for m, _ in CALLS].count("DELETE") == 3, repr(CALLS))
+    check("...and hands back what it would take to recreate them", "No undo" in out, out[-260:])
+    check("the scheduler really is empty", pb._state["jobs"] == [], repr(pb._state["jobs"]))
+
+    pb = make()
+    turn(pb, "list my tasks")
+    CALLS.clear()
+    out = turn(pb, "pause all my tasks")
+    check("pausing in bulk is reversible, so it just happens", "Paused" in out, out[:120])
+    check("...with no confirmation step", "for good?" not in out, out[:160])
+
+    pb = make()
+    turn(pb, "list my tasks")
+    turn(pb, "cancel all my tasks")
+    CALLS.clear()
+    out = turn(pb, "no")
+    check("declining a bulk cancel deletes nothing",
+          "DELETE" not in [m for m, _ in CALLS] and "nothing was cancelled" in out.lower(),
+          repr(CALLS))
 
     print("--- cancelling takes TWO turns, and turn one writes nothing ---")
     p = make()
