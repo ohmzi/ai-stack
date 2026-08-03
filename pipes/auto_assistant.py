@@ -1264,19 +1264,21 @@ class Pipe:
         if "email" in chans:
             rows.append(f"| ✉️ Email | `{email}` |" if email
                         else "| ✉️ Email | *no address on file* |")
-        rows.append("| 📋 Every run | one line in **background-tasks** |")
+        rows.append("| 📋 Every check | logged in **background-tasks** |")
         if not rows:
             return ""
         notes = [
             # The single most common first-week misdiagnosis: a channel post arrives, no text does,
             # and the user concludes the alerting is broken. It is not — the condition simply was
-            # not met. Say so before it happens.
-            "Every check posts a line to the channel; only a check that **meets your condition** "
-            "texts you.",
+            # not met. Say so before it happens, but say it the way a person would.
+            "You'll only get a text when it actually hits your price — every other check just "
+            "gets logged.",
         ]
         if phone and prof.get("sms_strips_links", True):
-            notes.append("Texts arrive without links — carriers drop any message containing one — "
-                         "so the link is in the email.")
+            # Why the text has no link is worth one short clause; the carrier mechanics behind it
+            # are not something the reader can act on.
+            notes.append("The text won't have a link in it (phone carriers block those), so check "
+                         "the email for that.")
         return ("\n\n**How you'll be alerted**\n\n"
                 "| | |\n|---|---|\n" + "\n".join(rows) + "\n\n" + " ".join(notes))
 
@@ -3143,6 +3145,11 @@ class Pipe:
         "error handling or retry logic around it — it already confirms a failure across runs "
         "before telling the user, and alerts once per outage rather than every run.\n"
         "6. Before creating, call cronjob(action='list') and look at STATE, not just names. Only a job that is ACTIVE and still has runs left counts as a duplicate — say so and stop. A job that is completed, exhausted, disabled or has no next run is FINISHED: it will never run again, so create a NEW one instead of pointing at it. Never describe a finished job as 'already running'.\n"
+        "6a. Do that check SILENTLY. The list is for you, not for the user: never mention, name, "
+        "count or summarise the other jobs you saw. The ONLY existing job you may refer to is one "
+        "that is genuinely a duplicate of what was just asked for — and then only to say it is "
+        "already running. 'I see an existing X watch, now creating your Y watch' is exactly the "
+        "sentence not to write: the user asked about Y and did not ask what else is scheduled.\n"
         "6b. NEVER write your own script into a job and run it with --no-agent. A script YOU "
        "generate has no reasoning to recover when markup shifts, and its bugs fail silently — one "
        "such job computed its ALERT text into a variable it never printed, so the alert could "
@@ -4097,14 +4104,18 @@ class Pipe:
                                 # just asked for it.
                                 _attribute(after)
                                 if new_jobs:
+                                    # Verified, and deliberately SILENT about it. The check itself
+                                    # is load-bearing — the agent has claimed jobs it never
+                                    # created — but a success line is the pipe narrating its own
+                                    # internals: the agent has already told the user what was
+                                    # scheduled and quoted the id. Every verdict below still
+                                    # speaks, because each of those is the check DISAGREEING with
+                                    # the agent, which is the only part the reader needs.
                                     outcome = "created"
-                                    j = new_jobs[0]
-                                    sched = j.get("schedule_display") or str(j.get("schedule", "?"))
-                                    extra = (f" (plus {len(new_jobs) - 1} more)"
-                                             if len(new_jobs) > 1 else "")
-                                    yield (f"\n\n✅ **Verified scheduled**: job `{j.get('id')}` "
-                                           f"({sched}){extra} — confirmed against the scheduler, "
-                                           f"not the agent's word.")
+                                    if len(new_jobs) > 1:
+                                        # Except this: more jobs exist than the agent described.
+                                        yield (f"\n\nℹ️ Note: {len(new_jobs)} tasks were created, "
+                                               f"not one. Say *list my tasks* to see them.")
                                     yield self._alert_setup_block(uname)
                                 elif new_jobs is not None and self._changed_jobs(
                                         before, after, owner=uname if scoped else None,

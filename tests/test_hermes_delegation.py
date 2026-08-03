@@ -6,14 +6,16 @@ Why this file exists. `_hermes_stream` ends every background-task turn by compar
 block is the single load-bearing anti-hallucination guard in the background-task path — it exists
 because the agent has, live:
 
-  * claimed jobs it never created (hence "confirmed against the scheduler, not the agent's word");
+  * claimed jobs it never created;
   * correctly RESCHEDULED a job while the pipe reported that nothing had been created — the
     loudest possible way to report success;
   * pointed at a job of the right name that had already FINISHED and called it "already running",
     leaving the user with a monitor that silently did not exist.
 
 Every one of those is a case where the agent's prose and the scheduler's state disagree, and each
-verdict below is the specific wording that tells them apart. Nothing tested it until now: the
+verdict below is the specific wording that tells them apart. When the check AGREES it now says
+nothing: a success line was the pipe narrating its own internals over an answer the agent had
+already given. The check still runs — it is only the reporting that is conditional on disagreement. Nothing tested it until now: the
 existing harnesses cover whether a request *reaches* hermes (test_bgtask_intent.py) and whether a
 finished run's output is parsed (test_hermes_delivery.py), but not what the pipe concludes.
 
@@ -153,6 +155,8 @@ def drive(reply, snapshots, verify=True, status=200, brief=None, exc=None, post_
 
     p._hermes_jobs = fake_jobs
     p._hermes_key = lambda: "test-key"
+    drive.metrics = []
+    p._metric = lambda **f: drive.metrics.append(f)
     p._alert_setup_block = lambda uname: "\n<alert-setup>"
     # Never touch the real Ollama from a test; record that the handoff released the tenant.
     p._release_chat_tenant = lambda: released.append(p.chat_model)
@@ -200,9 +204,18 @@ def main():
     before = {"old": job("old")}
 
     out = drive("scheduled it for you", [before, {**before, "new1": job("new1", "every 5m")}])
-    check("a real creation is Verified scheduled", "✅ **Verified scheduled**" in out, out[-160:])
-    check("...names the job and its schedule", "`new1`" in out and "every 5m" in out, out[-160:])
-    check("...and shows how alerts will reach the user", "<alert-setup>" in out, out[-160:])
+    # The check still runs — that is the anti-hallucination guard — but it says nothing when it
+    # AGREES with the agent. A success line is the pipe narrating its own internals: the agent has
+    # already told the user what was scheduled and quoted the id. Every verdict below still speaks,
+    # because each of those is the check DISAGREEING, which is the part the reader needs.
+    check("a verified creation is confirmed in the metrics",
+          any(m.get("job") == "hermes" and m.get("outcome") == "created" for m in drive.metrics),
+          repr(drive.metrics)[:200])
+    check("...and says nothing about it in the reply", "Verified scheduled" not in out, out[-160:])
+    check("...but still shows how alerts will reach the user", "<alert-setup>" in out, out[-160:])
+    out = drive("made two", [before, {**before, "n1": job("n1"), "n2": job("n2")}])
+    check("more jobs than the agent described IS worth saying", "2 tasks were created" in out,
+          out[-200:])
 
     # A completed job appearing is NOT a creation — _runnable() must reject it, or "cancel this"
     # would report a brand new monitor.

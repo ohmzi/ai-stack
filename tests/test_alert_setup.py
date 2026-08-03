@@ -180,12 +180,16 @@ def main():
     check("shows the address the text arrives from", "relay@gmail.com" in block, block)
     check("shows the email destination", "o@gmail.com" in block, block)
     check("mentions the run log channel", "background-tasks" in block, block)
-    check("sets the no-links expectation", "carriers drop" in block, block)
-    check("explains where the link is instead", "link is in the email" in block, block)
+    # These pin the FACTS the block has to convey, not the sentences it uses. The wording was
+    # rewritten once already for being written from the system's side of the screen ("carriers
+    # drop any message containing one"), and a test that pins prose makes plain-language edits
+    # look like regressions.
+    check("sets the no-links expectation", "won't have a link" in block, block)
+    check("explains where the link is instead", "email" in block.split("link")[-1], block)
     # The #1 first-week misdiagnosis: a channel line arrives, no text does, and the user concludes
     # alerting is broken when the condition simply was not met.
     check("pre-empts 'I got a channel post but no text'",
-          "meets your condition" in block, block)
+          "only get a text when" in block, block)
 
     json.dump({"nobody": {}}, open(contacts, "w"))
     block = p._alert_setup_block("nobody")
