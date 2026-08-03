@@ -1,6 +1,16 @@
 --- a/src/lib/components/chat/MessageInput.svelte
 +++ b/src/lib/components/chat/MessageInput.svelte
-@@ -565,6 +565,50 @@
+@@ -110,6 +110,9 @@
+ 	export let onUpload: Function = (e) => {};
+ 	export let onChange: Function = () => {};
+ 	export let onWebSearchToggle: Function = () => {};
++	// ai-stack: fired only when the USER changes mode, so Chat.svelte can remember the choice
++	// without also remembering every incidental reset.
++	export let onModeChange: Function = () => {};
+ 
+ 	export let createMessagePair: Function;
+ 	export let stopResponse: Function;
+@@ -565,6 +568,51 @@
  		codeInterpreterEnabled = false;
  	}
  
@@ -39,6 +49,7 @@
 +				? [...(selectedFilterIds ?? []).filter((id) => id !== TASK_FILTER_ID), TASK_FILTER_ID]
 +				: (selectedFilterIds ?? []).filter((id) => id !== TASK_FILTER_ID);
 +		onWebSearchToggle(webSearchEnabled);
++		onModeChange();
 +	};
 +
 +	const MODE_ON =
@@ -51,7 +62,7 @@
  	// Clear selected terminal when model doesn't support terminal
  	$: if ($selectedTerminalId && terminalCapableModels.length === 0) {
  		selectedTerminalId.set(null);
-@@ -1754,13 +1798,78 @@
+@@ -1754,13 +1802,78 @@
  									{/if}
  
  									<div class="flex flex-1 items-center min-w-0 overflow-x-auto scrollbar-none">
@@ -134,7 +145,7 @@
  												bind:selectedToolIds
  												bind:selectedSkillIds
  												bind:selectedFilterIds
-@@ -1862,7 +1971,7 @@
+@@ -1862,7 +1975,7 @@
  
  											{#each selectedFilterIds as filterId (filterId)}
  												{@const filter = toggleFilters.find((f) => f.id === filterId)}
@@ -143,7 +154,7 @@
  													<Tooltip content={filter?.name} placement="top">
  														<button
  															on:click|preventDefault={() => {
-@@ -1920,7 +2029,7 @@
+@@ -1920,7 +2033,7 @@
  												{/if}
  											{/each}
  
@@ -152,7 +163,7 @@
  												<Tooltip content={$i18n.t('Web Search')} placement="top">
  													<button
  														on:click|preventDefault={() => (webSearchEnabled = !webSearchEnabled)}
-@@ -1956,7 +2065,7 @@
+@@ -1956,7 +2069,7 @@
  												</Tooltip>
  											{/if}
  
@@ -161,3 +172,127 @@
  												<Tooltip content={$i18n.t('Code Interpreter')} placement="top">
  													<button
  														aria-label={codeInterpreterEnabled
+--- a/src/lib/components/chat/Chat.svelte
++++ b/src/lib/components/chat/Chat.svelte
+@@ -303,7 +303,9 @@
+ 						codeInterpreterEnabled = input.codeInterpreterEnabled;
+ 					}
+ 				} catch (e) {}
+-			} else {
++			} else if (!restoreMode(chatIdProp)) {
++				// ai-stack: only fall back to the model's defaults when this chat has no mode of
++				// its own. Otherwise sending a message would silently reset it.
+ 				await setDefaults();
+ 			}
+ 
+@@ -992,6 +994,11 @@
+ 
+ 		const init = async () => {
+ 			if (!chatIdProp) {
++				// ai-stack: a brand-new chat starts from the model's defaults (Internet on), so a
++				// mode left over from an earlier new chat must not be inherited here.
++				try {
++					sessionStorage.removeItem(MODE_KEY(null));
++				} catch (e) {}
+ 				loading = false;
+ 				await tick();
+ 			}
+@@ -1022,6 +1029,10 @@
+ 						codeInterpreterEnabled = input.codeInterpreterEnabled;
+ 					}
+ 				} catch (e) {}
++			} else if (chatIdProp) {
++				// ai-stack: opening a saved chat with no unsent draft — keep the mode it was left
++				// in rather than resetting to the model's defaults.
++				restoreMode(chatIdProp);
+ 			}
+ 
+ 			const chatInput = document.getElementById('chat-input');
+@@ -2998,6 +3009,71 @@
+ 		}
+ 	};
+ 
++	// --- ai-stack: the selected mode belongs to the CHAT, not to the draft ------------------
++	// Upstream stores the mode alongside the unsent draft, and clears the draft on submit. So the
++	// first message of a chat wipes it, and the re-init that follows (chatIdProp changes, so
++	// navigateHandler runs) finds nothing and falls through to setDefaults() — which turns
++	// Internet back on and Task off, mid-conversation, without anyone asking. Whatever the user
++	// picked has to survive sending a message; only the user gets to change it.
++	//
++	// Kept under its own key so clearDraft cannot reach it, and written ONLY from the mode
++	// buttons' own callback: an incidental reset during init must never be mistaken for a choice.
++	const MODE_KEY = (id: string | null = null) => `chat-mode${id ? `-${id}` : ''}`;
++	// A mode chosen before the chat had an id is handed over exactly once, and only if it was
++	// chosen moments ago — so it follows the message that created the chat, and cannot leak into
++	// some unrelated chat opened later.
++	const MODE_HANDOFF_MS = 120000;
++
++	const saveMode = (id: string | null = null) => {
++		try {
++			sessionStorage.setItem(
++				MODE_KEY(id),
++				JSON.stringify({
++					t: Date.now(),
++					selectedFilterIds,
++					webSearchEnabled,
++					codeInterpreterEnabled,
++					imageGenerationEnabled
++				})
++			);
++		} catch (e) {}
++	};
++
++	const applyMode = (raw: string | null) => {
++		if (!raw) return false;
++		try {
++			const m = JSON.parse(raw);
++			selectedFilterIds = m.selectedFilterIds ?? [];
++			webSearchEnabled = !!m.webSearchEnabled;
++			codeInterpreterEnabled = !!m.codeInterpreterEnabled;
++			imageGenerationEnabled = !!m.imageGenerationEnabled;
++			return true;
++		} catch (e) {
++			return false;
++		}
++	};
++
++	// True when a remembered mode was applied, i.e. the caller must NOT run setDefaults().
++	const restoreMode = (id: string | null = null) => {
++		try {
++			if (applyMode(sessionStorage.getItem(MODE_KEY(id)))) return true;
++			if (!id) return false;
++			// The chat has just been created: adopt what was chosen while it had no id.
++			const pending = sessionStorage.getItem(MODE_KEY(null));
++			if (!pending) return false;
++			let fresh = false;
++			try {
++				fresh = Date.now() - (JSON.parse(pending).t ?? 0) < MODE_HANDOFF_MS;
++			} catch (e) {}
++			sessionStorage.removeItem(MODE_KEY(null));
++			if (!fresh || !applyMode(pending)) return false;
++			saveMode(id);
++			return true;
++		} catch (e) {
++			return false;
++		}
++	};
++
+ 	const clearDraft = async (chatId: string | null = null) => {
+ 		if (saveDraftTimeout) {
+ 			clearTimeout(saveDraftTimeout);
+@@ -3352,6 +3428,7 @@
+ 											}
+ 										}}
+ 										onWebSearchToggle={handleWebSearchToggle}
++										onModeChange={() => saveMode(chatIdProp)}
+ 										on:submit={async (e) => {
+ 											clearDraft($chatId);
+ 											if (e.detail || files.length > 0) {
+@@ -3394,6 +3471,7 @@
+ 									{onSelect}
+ 									{onUpload}
+ 									onWebSearchToggle={handleWebSearchToggle}
++										onModeChange={() => saveMode(chatIdProp)}
+ 									onChange={(data) => {
+ 										if (!$temporaryChatEnabled) {
+ 											saveDraft(data);
