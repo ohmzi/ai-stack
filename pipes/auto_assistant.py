@@ -822,10 +822,17 @@ class Pipe:
     # trivia question ("what are the biggest jobs in tech?") into a consent-free hermes delegation
     # — the reorder is only safe because this arm cannot match general-knowledge phrasing.
     _BG_MANAGE = re.compile(
-        r"^\s*(?:please\s+)?(?:(?:list|show|what are)\b.{0,20}?\b"
+        r"^\s*(?:please\s+)?(?:(?:list|show|what\s+(?:are|is)|what's)\b.{0,20}?\b"
         r"(?:my\s+(?:background\s+|scheduled\s+|monitoring\s+)?"
         r"|(?:the\s+)?(?:background|scheduled|monitoring|active|running|cron)\s+)"
-        r"(?:tasks|monitors|jobs|watches)\b"
+        # SINGULAR TOO. "list all my task" was plural-only and fell through to the chat model,
+        # which reached for the code interpreter and listed the upload directory instead.
+        #
+        # The noun must END the request. Allowing a singular noun mid-sentence immediately claimed
+        # "show me my monitor resolution settings" and "list all my task list app ideas" — there
+        # the word is a modifier on something else entirely, not the object of the request.
+        r"(?:tasks?|monitors?|jobs?|watch(?:es)?)\b"
+        r"(?=\s*[?.!]*\s*$|\s+(?:right\s+now|currently|again|please)\b)"
         r"|(?:cancel|stop|pause|resume|remove|delete)\b.{0,40}?\b(?:"
         r"(?:task|monitor|watch)(?:es|s)?\b"
         r"|jobs?\b(?!\s+(?:app(?:lication)?s?|offers?|interviews?|postings?|listings?"
@@ -1126,8 +1133,23 @@ class Pipe:
                 f"Reply with your mobile number and I'll save it and schedule the task in one go. "
                 f"Any of these work:\n"
                 f"`5145550123` · `514-555-0123` · `+1 514 555 0123`\n\n"
-                f"{alt}{heads_up}\n"
+                f"{alt}{heads_up}\n\n"
                 f"<!--bg-need-phone:{blob}-->")
+
+    @classmethod
+    def _marks(cls, *extra):
+        """Trailing state markers, positioned so the client cannot render them.
+
+        The leading blank line is the whole point. An HTML comment sitting INLINE in a paragraph is
+        inline raw HTML, and OpenWebUI's renderer escapes it — the user sees a wall of
+        '<!--bg-jobs:eyJ2Ijox...-->' under their answer. Starting its own line after a blank one
+        makes it an HTML *block*, which is passed through and stays invisible. Adjacent markers can
+        follow on the same line: the block runs until the next blank line.
+
+        _BG_MARK itself is deliberately still the bare comment, because history written before this
+        contains the bare form and every `_BG_MARK in prev` continuity check must keep matching it.
+        """
+        return "\n\n" + "".join(x for x in extra if x) + cls._BG_MARK
 
     @staticmethod
     async def _say(text):
@@ -1141,7 +1163,7 @@ class Pipe:
             return
         yield f"✅ Saved `{self._pretty_phone(e164)}` for texts.\n\n"
         if not pending:
-            yield ("Now tell me what to watch and I'll set it up." + self._BG_MARK)
+            yield ("Now tell me what to watch and I'll set it up." + self._marks())
             return
         async for chunk in self._hermes_stream(pending, handle, verify_creation=True):
             yield chunk
@@ -1151,7 +1173,7 @@ class Pipe:
         t = (text or "").strip()
         if self._PHONE_DECLINE.match(t):
             if not pending:
-                return self._say("No problem — no number saved." + self._BG_MARK)
+                return self._say("No problem — no number saved." + self._marks())
             return self._hermes_stream(pending, handle, verify_creation=True)
         m = self._PHONE_RE.search(t)
         if not m:
@@ -3124,7 +3146,7 @@ class Pipe:
         if not jobs:
             return ("**No background tasks are scheduled.** I checked hermes's scheduler directly "
                     "— this is what it actually has, not a guess.\n\nAsk for one with e.g. "
-                    "*monitor the RTX 5090 price on newegg every 6 hours*." + self._BG_MARK)
+                    "*monitor the RTX 5090 price on newegg every 6 hours*." + self._marks())
         live = sum(1 for j in jobs if self._job_live(j))
         paused = sum(1 for j in jobs if not j.get("enabled", True)
                      and str(j.get("state") or "").lower() != "completed")
@@ -3135,7 +3157,7 @@ class Pipe:
         tail = ("\n\nSay *pause the second one*, *cancel the btc monitor*, or give me an id. "
                 "I read the real scheduler, and I ask before deleting anything.")
         return (f"{head}\n\n{self._jobs_table(jobs, ordinals)}{self._jobs_notes(jobs)}{tail}"
-                + (self._park_jobs(jobs) if park else "") + self._BG_MARK)
+                + self._marks(self._park_jobs(jobs) if park else ""))
 
     def _may_manage(self, user, handle):
         """Deterministic job management is admin-only.
@@ -3215,7 +3237,7 @@ class Pipe:
             return _fin("done",
                         f"✅ **Cancelled** — “{name}” (`{jid}`) is gone from the scheduler, "
                         f"confirmed by re-reading it.\n\nIf that was a mistake, there is no undo, "
-                        f"but this recreates it:\n\n> {name} — {sched}" + self._BG_MARK)
+                        f"but this recreates it:\n\n> {name} — {sched}" + self._marks())
         j2 = after.get(jid) or {}
         want_paused = op == "pause"
         is_paused = (not j2.get("enabled", True)) or str(j2.get("state") or "").lower() == "paused"
@@ -3229,7 +3251,7 @@ class Pipe:
                     f"✅ **{'Paused' if want_paused else 'Resumed'}** — “{name}” (`{jid}`)"
                     + (f". Next run {nxt}." if not want_paused else
                        " will not run until you resume it.")
-                    + self._BG_MARK)
+                    + self._marks())
 
     async def _manage_turn(self, text, parked, rule, pending=None, user=None, handle=""):
         """The whole deterministic manage turn. Returns the reply text, or None to fall through to
@@ -3263,13 +3285,13 @@ class Pipe:
                     self._route_metric("task.manage.abort", 0, "bg_confirm_expired", text)
                     return ("That confirmation is more than 10 minutes old, so I did not act on it. "
                             "Ask me again and I will re-confirm against the current list."
-                            + self._BG_MARK)
+                            + self._marks())
                 if jid not in by_id:
                     self._metric(job="confirm", kind="task_cancel", outcome="accepted")
                     self._route_metric("task.manage.abort", 0, "bg_confirm_gone", text)
                     return (f"⚠️ **That one is already gone** — “{self._md_cell(pend.get('n'), 60)}” "
                             f"is no longer in the scheduler, so there was nothing to cancel."
-                            + self._BG_MARK)
+                            + self._marks())
                 fresh = by_id[jid]
                 # Did it change under us between the question and the answer? The marker carries
                 # the fingerprint precisely so a "yes" cannot land on a different job than the one
@@ -3294,7 +3316,7 @@ class Pipe:
             if self._CONFIRM_NO.match(text or ""):
                 self._metric(job="confirm", kind="task_cancel", outcome="declined")
                 self._route_metric("task.manage.abort", 0, "bg_confirm_no", text)
-                return "Okay — nothing was cancelled." + self._BG_MARK
+                return "Okay — nothing was cancelled." + self._marks()
             # Anything else: the user moved on. Never act, never swallow the turn.
             self._metric(job="confirm", kind="task_cancel", outcome="abandoned")
             return None
@@ -3332,7 +3354,7 @@ class Pipe:
                         f"| ID | `{job.get('id')}` |\n\n"
                         "Deleting removes the job **and its saved output**; there is no undo. "
                         "Reply **yes** to delete it, or anything else to leave it alone." + alt
-                        + self._confirm_park("cancel", job) + self._BG_MARK)
+                        + self._marks(self._confirm_park("cancel", job)))
             self._route_metric(f"task.manage.{op}", 0 if r["strategy"] in
                                ("ordinal", "id", "prefix") else 1, rule, text,
                                op=op, strategy=r["strategy"], job_id=job.get("id"))
@@ -3633,7 +3655,7 @@ class Pipe:
                                     yield "\n\n(could not verify job creation — /api/jobs unreachable)"
                             else:
                                 outcome = "n/a"  # list/cancel/followup turns verify nothing by design
-                            yield self._BG_MARK
+                            yield self._marks()
                             return
                         try:
                             d = json.loads(data)
@@ -3650,12 +3672,12 @@ class Pipe:
             # The marker survives the failure ON PURPOSE. Both advice lines above invite a reply
             # ("ask me to list tasks", "start it and retry") — and without the marker that reply
             # matched no predicate and landed in plain chat, exactly when continuity mattered most.
-            yield self._BG_MARK
+            yield self._marks()
         except aiohttp.ClientConnectorError:
             outcome = "unreachable_gateway"
             yield ("⚠️ hermes-agent is not reachable on 127.0.0.1:8642. "
                    "Start it with: `systemctl --user start hermes-gateway`")
-            yield self._BG_MARK
+            yield self._marks()
         finally:
             # One row per delegation with the verification CLASS — the ready-made outcome signal
             # ("created" vs "failed" vs "timeout") that until now existed only as chat prose.

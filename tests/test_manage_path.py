@@ -103,6 +103,27 @@ def main():
               "do i have any monitors running?", "what jobs do i have scheduled?",
               "anything running in the background?"]:
         check(f"routes to the scheduler: {t[:44]!r}", p0._is_bg_task_request(t))
+    print("--- singular nouns count (live miss: 'list all my task' hit the code interpreter) ---")
+    for t in ["list all my task", "list my task", "show my job", "what is my task",
+              "show me my monitor", "show the active jobs", "list my background tasks"]:
+        check(f"routes to the scheduler: {t!r}", p0._is_bg_task_request(t))
+    # ...but a singular noun mid-sentence is a MODIFIER on something else, not the object of the
+    # request. Allowing it unguarded claimed all of these.
+    for t in ["show me my monitor resolution settings", "list all my task list app ideas",
+              "what is my task for today at work", "show my job application status",
+              "what is my monitor refresh rate", "list my task management tools"]:
+        check(f"stays chat: {t!r}", not p0._is_bg_task_request(t))
+
+    print("--- markers must be invisible: block-positioned, never inline ---")
+    _out = turn(make(), "list my tasks")
+    check("markers start their own line after a blank one (else OWUI escapes and shows them)",
+          "\n\n<!--bg-jobs:" in _out, repr(_out[-140:]))
+    check("...and nothing marker-ish leaks into the visible body",
+          "<!--" not in _out[:_out.index("\n\n<!--")], _out[-200:])
+    _armed = turn(make(), "cancel the RTX one", assistant(_out))
+    check("the confirm marker is block-positioned too",
+          "\n\n<!--" in _armed and _armed.rstrip().endswith("-->"), repr(_armed[-140:]))
+
     print("--- ...without dragging ordinary conversation with them ---")
     for t in ["what are you watching on netflix", "what are you monitoring in the lab",
               "what are you tracking in your fitness app", "anything running late tonight?",
@@ -277,6 +298,38 @@ def main():
           len(p0._parked_jobs(assistant(out13))) == 1)
     check("a pipe in a name cannot add table columns",
           r"\|" in mod.Pipe._md_cell("a|b"), mod.Pipe._md_cell("a|b"))
+
+    print("--- web search ON must not get a vote: routing reads the user's verbatim words ---")
+    # With search enabled, OpenWebUI PREPENDS retrieved context to the last user message before the
+    # pipe ever sees it, and keeps the verbatim words in metadata.user_prompt. Routing reads the
+    # latter, so a page about task-manager apps cannot turn "list my task" into a chat answer — nor
+    # can its "draw a picture"/"create a video"/"monitor habits every day" wording start a render
+    # or invent a job. The deterministic answer is decided before any of it matters.
+    pw = mod.Pipe()
+    pw_calls = []
+
+    def pw_api(m, path, body=None, timeout=10):
+        pw_calls.append((m, path))
+        return (200, {"jobs": JOBS}, None) if path.startswith("/api/jobs?") else (200, {}, None)
+
+    pw._hermes_api, pw._chat_id = pw_api, (lambda *a, **k: "c1")
+    polluted = ("<context><source>Top 10 task manager apps of 2026. Draw a picture of your "
+                "workflow. Create a video guide. Monitor your habits every day for a month."
+                "</source></context>\n\nlist all my task")
+
+    async def drive_pipe():
+        res = await pw.pipe({"messages": [{"role": "user", "content": polluted}],
+                             "model": "auto_assistant.auto"},
+                            __metadata__={"user_prompt": "list all my task"},
+                            __user__={"role": "admin", "email": "nobody@example.com"})
+        return "".join([c async for c in res]) if hasattr(res, "__aiter__") else res
+
+    wout = asyncio.run(drive_pipe())
+    check("the scheduler answers, not the chat model", "amazon.ca price monitor" in wout, wout[:160])
+    check("...reading /api/jobs exactly once", pw_calls == [("GET", "/api/jobs?include_disabled=true")],
+          repr(pw_calls))
+    check("...and the injected page starts no render",
+          "![" not in wout and "<video" not in wout, wout[:200])
 
     print("--- authorization: admin-only while hermes has no per-job owner ---")
     check("an admin may manage", p0._may_manage({"role": "admin"}, "nobody"))
