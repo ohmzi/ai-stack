@@ -7,7 +7,18 @@ brand sheet and verified against Open WebUI **0.10.2**.
 python3 branding/build_assets.py   # render the mark (only after editing it)
 ./branding/apply.sh                # install into the running container
 ./branding/apply.sh --revert       # put the stock look back
+python3 tests/test_branding.py     # 43 checks; --restart adds the restart case
 ```
+
+There are **four** surfaces here, not one, and each needs a different lever —
+which is most of what this file is about:
+
+| Surface | Lever | Why the others cannot reach it |
+|---|---|---|
+| Look | `ohmz.css` | — |
+| App name in the running UI | `loader.js` rewrites `/api/config` | `WEBUI_NAME` would render "OhmzAI (Open WebUI)" |
+| Home-screen shortcut, tab title, icons | `apply.sh` edits `index.html` | a browser fetches the manifest itself, not via `window.fetch` |
+| UI copy saying *WebUI* | `i18n_brand.py` | i18n resources arrive by dynamic `import()`, also not via `window.fetch` |
 
 ## Caching — read this before debugging a "it didn't apply" report
 
@@ -55,6 +66,7 @@ browser actually run the current file?" in one lookup.
 |---|---|
 | `ohmz.css` | The theme. Installs as `custom.css`. |
 | `loader.js` | App-name override for the running app. Installs as `loader.js`. |
+| `i18n_brand.py` | Rebrands the UI copy that says *WebUI*. |
 | `assets/` | Rendered marks — favicons, splash, manifest icons. Committed. |
 | `assets/site.webmanifest` | The PWA manifest — what names a home-screen shortcut. |
 | `fonts/` | Space Grotesk + IBM Plex Mono `woff2`, self-hosted. |
@@ -221,6 +233,57 @@ specifically (`--color-gray-900` / `--color-black`).
 
 An already-added home-screen shortcut keeps the name and icon it was created
 with — the OS copies both at install time. Remove it and add it again.
+
+### The UI copy that says WebUI
+
+A third path again, and `loader.js` reaches this one no better than it reaches
+the manifest. The pending-activation page, *WebUI Settings*, *WebUI URL* and the
+webhook hints are **i18n keys compiled into the frontend**, and i18next pulls
+its resources with a dynamic `import()` — which does not go through
+`window.fetch`, so the wrapper never sees them.
+
+`i18n_brand.py` uses the lever i18next already provides. `en-US/translation.json`
+ships every value as `""`; English is the fallback, so what renders **is the
+key**. Give a key a non-empty value and that value wins — no source patched, no
+key broken for any other locale, and no frontend rebuild.
+
+It finds the chunk through the app's own locale registry
+(`"./locales/en-US/translation.json": () => import("./DwGFF-zt.js")`) rather
+than by filename, because Vite content-hashes those on every build.
+
+The rewrite is a **rule, not a list**, so a string added upstream is picked up
+instead of quietly keeping stock wording:
+
+```
+"the WebUI"  -> "OhmzAI"                 "Open WebUI" -> "OhmzAI"
+"your WebUI" -> "your OhmzAI instance"    "WebUI"     -> "OhmzAI"
+```
+
+Order is load-bearing. The article rules exist because a bare substitution reads
+as *"To access the OhmzAI"*, and they must run before `"Open WebUI"` or
+*"maintained by the Open WebUI team"* loses its article too. Note that
+`"the OhmzAI team"` is a correct result — the tests assert each rule's **output**
+rather than the absence of `"the OhmzAI"`, since no cheap pattern separates that
+from `"the OhmzAI, please"`.
+
+Idempotent in both directions, because the rule is applied to the current value
+when there is one and already-branded text has nothing left to match. `--revert`
+restores the chunk byte-for-byte.
+
+Why not a fork rebuild: `compose/openwebui/fork/` is the right tool when
+*behaviour* changes. This is product copy — a replacement either matched or it
+did not, and the script asserts every occurrence is accounted for — against
+which a rebuild is `npm ci && npm run build` plus a container recreate.
+
+`/_app/immutable/` sounds like it would fight this and does not: the build sends
+no `cache-control` there, only `etag` + `last-modified`, and Cloudflare reports
+`REVALIDATED`. Editing a chunk changes its etag and both layers pick it up. If
+upstream ever starts sending `immutable`, this has to rename the chunk instead.
+
+Scope was the owner's call (2026-08-04): **every** occurrence, including the ones
+naming the upstream project — version strings, Community links, the funding
+notice. Some of those now label an external service with our name; that is
+known. The licence permits removing the branding at 50 users or fewer.
 
 Open WebUI's licence permits removing its branding for deployments of 50 users
 or fewer (or with a commercial agreement). This is a single-user instance. The

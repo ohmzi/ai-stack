@@ -163,6 +163,9 @@ if [ "${1:-}" = "--revert" ]; then
      && sed -i -E \"s@'$BRAND_THEME'@'$STOCK_THEME'@g\" $INDEX \
      && sed -i -E 's@(<link rel=\"manifest\" href=)\"[^\"]*\"@\1\"$STOCK_MANIFEST\"@' $INDEX \
      && sed -i -E 's@<title>[^<]*</title>@<title>$STOCK_NAME</title>@' $INDEX"
+  # The UI copy lives in a frontend chunk, not in either static dir — its own
+  # script, which puts the empty en-US values back.
+  OWUI_CONTAINER="$CONTAINER" python3 "$HERE/i18n_brand.py" --revert
   echo "reverted to stock assets. Hard-refresh the browser (ctrl-shift-r)."
   exit 0
 fi
@@ -275,6 +278,14 @@ docker exec "$CONTAINER" sh -c \
    && sed -i -E 's@<meta name=\"apple-mobile-web-app-title\"[^>]*>@@g' $INDEX \
    && sed -i -E 's@<meta name=\"theme-color\" content=\"[^\"]*\" />@<meta name=\"theme-color\" content=\"$BRAND_THEME\" /><meta name=\"apple-mobile-web-app-title\" content=\"$BRAND_NAME\" />@' $INDEX \
    && sed -i -E \"s@'$STOCK_THEME'@'$BRAND_THEME'@g\" $INDEX"
+
+# The UI copy that still says WebUI — the pending-activation page, WebUI
+# Settings, the webhook URL hints. These are i18n keys compiled into the
+# frontend and resolved through a dynamically imported chunk, so neither
+# loader.js nor anything under /static can reach them. See i18n_brand.py; it
+# fails loudly rather than quietly leaving stock wording in place.
+echo "branding the UI copy"
+OWUI_CONTAINER="$CONTAINER" python3 "$HERE/i18n_brand.py"
 
 cat <<DONE
 

@@ -99,6 +99,15 @@ def fetch_abs(path):
         return None, None
 
 
+CHUNKS = "/app/build/_app/immutable/chunks"
+
+
+def docker_sh(cmd):
+    r = subprocess.run(["docker", "exec", CONTAINER, "sh", "-c", cmd],
+                       capture_output=True, timeout=120)
+    return r.stdout.decode("utf-8", "replace") if r.returncode == 0 else ""
+
+
 def png_size(b):
     """(w, h) from a PNG's IHDR — 8-byte signature, 4 length, 4 type, then two big-endian u32.
 
@@ -208,6 +217,64 @@ def verify_shell(stage):
           f"got {ctype!r} — the catch-all is answering, so consumers of it get HTML")
 
 
+def verify_copy(stage):
+    """The UI copy that still said WebUI.
+
+    These are i18n KEYS compiled into the frontend, resolved through a dynamically imported
+    chunk — so they are reachable neither by loader.js (import() does not go through
+    window.fetch) nor by anything under /static. branding/i18n_brand.py fills in the en-US
+    values, which is the lever i18next already provides: English ships as "" and falls back to
+    the key, so a non-empty value is what renders.
+
+    Checked against the SERVED chunk, and located the same way the app locates it — through the
+    locale registry, never by filename, because Vite content-hashes those on every build.
+    """
+    listing = docker_sh(f"grep -l 'locales/en-US/translation.json' {CHUNKS}/*.js || true")
+    name = None
+    for path in listing.split():
+        if path.endswith(".map"):
+            continue
+        m = re.search(r'locales/en-US/translation\.json".{0,160}?import\("\./([^"]+\.js)"',
+                      docker_sh(f"cat {path}"))
+        if m:
+            name = m.group(1)
+            break
+    check(f"{stage}: the en-US locale chunk is findable", bool(name),
+          "no chunk maps ./locales/en-US/translation.json — i18n registration changed shape")
+    if not name:
+        return
+
+    body, _ = fetch_abs(f"/_app/immutable/chunks/{name}")
+    check(f"{stage}: the en-US locale chunk is served", bool(body), f"{name} not reachable")
+    if not body:
+        return
+    body = body.decode("utf-8", "replace")
+
+    # Every key naming the app must carry a value. An empty one means i18next falls back to the
+    # key and the stock wording renders — the exact state this was written to end.
+    empty = re.findall(r'"((?:[^"\\]|\\.)*WebUI(?:[^"\\]|\\.)*)":""', body)
+    empty += re.findall(r"'((?:[^'\\]|\\.)*WebUI(?:[^'\\]|\\.)*)':\"\"", body)
+    check(f"{stage}: no 'WebUI' string is left to fall back to its key", not empty,
+          f"{len(empty)} unbranded: {[k[:45] for k in empty[:4]]} — run branding/apply.sh")
+
+    # The page that prompted this, spelled out: a rule that silently stopped matching would
+    # still pass the count check above if the keys vanished too.
+    for want in ("Contact Admin for OhmzAI Access",
+                 "To access OhmzAI, please reach out to the administrator"):
+        check(f"{stage}: pending page says {want[:34]!r}...", want in body)
+
+    # Each article rule, by the phrase it produces. A bare substitution would leave "To access
+    # the OhmzAI" and "your OhmzAI." here, so these are what proves those rules still fire.
+    #
+    # Deliberately NOT a blanket "the OhmzAI never appears": "maintained by the OhmzAI team" is
+    # correct English, and no cheap pattern separates it from "the OhmzAI, please" without
+    # guessing at parts of speech. Assert the outputs, not the absence of a shape.
+    for rule, want in (('"the WebUI"', "Please serve OhmzAI from the backend"),
+                       ('"your WebUI"', "Enter the public URL of your OhmzAI instance")):
+        check(f"{stage}: the {rule} article rule still fires", want in body,
+              f"expected {want!r} — a bare substitution would read 'the OhmzAI' here")
+
+
 def main():
     if fetch("custom.css") is None:
         print(f"OpenWebUI not reachable at {BASE} — nothing to check")
@@ -219,6 +286,9 @@ def main():
     print("--- the shell asks for what is actually there ---")
     verify_shell("live")
 
+    print("--- the UI copy no longer says WebUI ---")
+    verify_copy("live")
+
     if "--restart" in sys.argv:
         print(f"--- restarting {CONTAINER} (the regression) ---")
         subprocess.run(["docker", "restart", CONTAINER], capture_output=True, timeout=180)
@@ -228,6 +298,7 @@ def main():
             subprocess.run(["sleep", "2"])
         verify("after restart")
         verify_shell("after restart")
+        verify_copy("after restart")
 
     fails = results.count(False)
     print(f"\n{len(results)} checks — {'ALL PASS' if not fails else str(fails) + ' FAILURE(S)'}")
