@@ -1,0 +1,129 @@
+# SearXNG settings for the BACKGROUND MONITOR path (scripts/web_search.py -> price_search.py).
+#
+# WHY A SECOND INSTANCE instead of editing compose/searxng/settings.yml:
+#
+#  1. The two consumers want OPPOSITE rosters. The chat instance is tuned for interactive load
+#     (~1 query per question, all day), so it needs engines that tolerate constant use. This one
+#     serves discovery (~1 query per monitor LIFETIME) and can therefore afford engines that
+#     CAPTCHA under sustained load, because it never sustains any.
+#  2. The roster IS the fan-out, so the client never sends `engines=`. That matters: an unknown
+#     `engines=` value is SILENTLY IGNORED and falls back to SearXNG's FULL default roster
+#     (dozens of engines). One typo would be the fastest way to CAPTCHA this IP, with no error
+#     anywhere. Keeping the roster in this file makes that typo unreachable.
+#  3. compose/searxng/settings.yml must stay byte-for-byte identical. An OpenWebUI chat-search
+#     regression is INVISIBLE — the model just answers from training data and still looks
+#     grounded — and tests/test_websearch.py is the only thing that catches it. A test in
+#     tests/test_web_search.py pins that file's sha256 so it can only change deliberately.
+#  4. Engine rate limits are per SOURCE IP, not per container, so an engine on BOTH rosters has
+#     its budget spent by both consumers. The rosters are therefore kept almost disjoint: google,
+#     startpage, brave and qwant are hermes-only, so a monitor can never CAPTCHA an engine that
+#     chat depends on.
+#
+# Measured constraints this file respects (docs/CAPABILITY_UPGRADE_PLAN.md:427-458):
+#   ~50-60 queries per engine per 10 min CAPTCHA'd google/duckduckgo/startpage/brave together.
+#   A CAPTCHA lasts ~3600 s; a plain rate-limit ~180 s; probing at expiry RE-TRIGGERS it.
+#   server.limiter does nothing about any of that — the limits are upstream, not local.
+# Measured load on this instance: <=1 query per unresolved monitor per 600 s, and zero for a
+# monitor whose page is healthy. Three unresolved monitors is ~3 q/10 min per engine, ~6% of the
+# break point. There is deliberately NO canary against this port: a canary would spend google's
+# budget on monitoring, and the whole point of this instance is that its budget belongs to
+# monitors. Poll GET /config instead — it costs zero upstream queries.
+#
+# Verify after any change, BOTH commands, in this order:
+#   docker logs --tail 40 searxng-hermes    # an unknown engine NAME in `engines:` fails LOUDLY here
+#   curl -s localhost:8889/config | python3 -c \
+#     "import json,sys; [print(e['name'], e.get('enabled')) for e in json.load(sys.stdin)['engines']]"
+# Expect exactly the six names below, all True. A MISSING name means keep_only dropped it
+# silently — fix this file and web_search.ENGINE_ORDER together (a drift test pins them equal).
+use_default_settings:
+  engines:
+    keep_only:
+      - google        # best long-tail recall for product and fare pages; also the highest CAPTCHA
+                      # risk here, and safe only because it is absent from the chat roster, so
+                      # chat can never spend its budget and it can never spend chat's
+      - startpage     # Google's index through a different front end: a second chance at
+                      # Google-quality results when google itself is blocked
+      - brave         # genuinely independent crawl (not a Bing/Google reseller), keyless,
+                      # its own limit bucket, good retail coverage
+      - qwant         # Bing-class coverage from a DIFFERENT bucket than bing, so it adds that
+                      # index without spending bing's budget; en-CA-leaning suits .ca retailers
+      - mojeek        # independent crawler, measured on this host never to rate-limit
+                      # (compose/searxng/settings.yml:33). This is the FLOOR: it is what stops a
+                      # fan-out ever returning zero results, which is what keeps the
+                      # outage-vs-fruitless conjunction in web_search.search() harmless
+      - bing          # measured "the most tolerant of server-to-server use from this IP"
+                      # (compose/searxng/settings.yml:32) and the one engine that survived the
+                      # audit's 50-query burst. Second floor engine.
+      # NOT kept, deliberately:
+      #   wikipedia / wikidata — they populate infoboxes[] with url=None and title="", never
+      #     results[]. Excluding them removes that hazard from this instance structurally.
+      #     (web_search._usable() still guards it, because SEARXNG_URL can be pointed at :8888.)
+      #   duckduckgo — its budget is already spent by chat AND by scripts/search_canary.py, whose
+      #     comment records "DuckDuckGo CAPTCHAs constantly". It is Bing-backed, so qwant already
+      #     covers that index from a cheaper bucket.
+
+general:
+  debug: false
+  instance_name: "searxng-hermes"
+  # No public instance — donation/contact links are noise here.
+  donation_url: false
+  contact_url: false
+
+server:
+  # Overridden at runtime by SEARXNG_SECRET (compose/.env). A non-empty value is still required
+  # here: SearXNG refuses to start without one. It protects nothing reachable off-host — this
+  # port is bound to 127.0.0.1, same as the chat instance.
+  secret_key: "rotated-out-of-git-use-SEARXNG_SECRET-env"
+  limiter: false      # server-to-server. A `true` here is 403/429 on every query.
+  image_proxy: false
+  method: "GET"       # our client GETs /search?...; SearXNG's POST-only default would 405 it
+
+search:
+  safe_search: 0
+  autocomplete: ""
+  # en-CA, not en: every retailer in price_search.DEFAULT_PREFER is a .ca domain, and the one
+  # live search monitor on this box resolved to amazon.COM. This costs zero extra queries.
+  # If the container logs reject this value, fall back to "en" — verify at bring-up.
+  default_lang: "en-CA"
+  # THE required line — without json here, webapp.py returns 404 for format=json and search
+  # silently does nothing. html is kept so a bad result set can be eyeballed at
+  # http://127.0.0.1:8889.
+  formats:
+    - html
+    - json
+
+outgoing:
+  # A six-engine fan-out finishes when its slowest engine does. Bound that well under the
+  # client's SEARCH_TIMEOUT (20 s) so one stalled engine cannot eat the job's 180 s terminal
+  # budget: a slow engine then lands in unresponsive_engines instead, which is a signal
+  # web_search.search() already handles.
+  request_timeout: 5.0
+  max_request_timeout: 10.0
+
+ui:
+  static_use_hash: true
+
+# BOTH directives are required and they do different jobs, exactly as documented in
+# compose/searxng/settings.yml:64-78:
+#   use_default_settings.engines.keep_only (above) RESTRICTS which engines exist at all.
+#   this `engines:` list FLIPS THE disabled FLAG on the ones that ship disabled upstream
+#   (bing and mojeek do — measured on this host; keep_only alone left them switched off).
+#
+# All six are listed even though only two need flipping, and that is deliberate. A name in
+# keep_only that does not exist is dropped SILENTLY — you could end up with a one-engine instance
+# and never know. A name HERE that does not exist is a new engine definition with no engine
+# module, which fails at container start, loudly, in `docker logs`. Listing all six converts
+# keep_only's silent typo into a loud one.
+engines:
+  - name: google
+    disabled: false
+  - name: startpage
+    disabled: false
+  - name: brave
+    disabled: false
+  - name: qwant
+    disabled: false
+  - name: mojeek
+    disabled: false
+  - name: bing
+    disabled: false

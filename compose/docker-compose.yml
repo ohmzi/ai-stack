@@ -9,7 +9,7 @@
 # python service. OWUI's own defaults collide with both:
 #   rag.mineru_api_url        defaults to http://localhost:8000  -> tunarr
 #   rag.paddleocr_vl_base_url defaults to http://localhost:8080  -> occupied
-# Verified free when this file was written: 9998, 5001, 8081, 8888.
+# Verified free when this file was written: 9998, 5001, 8081, 8888, 8889.
 #
 #   docker compose -f compose/docker-compose.yml up -d
 
@@ -49,6 +49,58 @@ services:
       - SEARXNG_SECRET=${SEARXNG_SECRET}
       - UWSGI_WORKERS=4
       - UWSGI_THREADS=4
+    cap_drop:
+      - ALL
+    cap_add:
+      - CHOWN
+      - SETGID
+      - SETUID
+    logging:
+      driver: json-file
+      options:
+        max-size: "1m"
+        max-file: "1"
+
+  # Web search for BACKGROUND MONITORS only (scripts/web_search.py). 0 VRAM.
+  #
+  # Separate from `searxng` above on purpose. That instance serves OpenWebUI chat and its roster is
+  # tuned for constant interactive load; this one serves discovery (~1 query per monitor lifetime)
+  # and can afford engines that CAPTCHA under sustained use. Adding google to the CHAT roster would
+  # spend chat's engine budget on monitors — and a degraded chat search fails SILENTLY, with the
+  # model answering from training data. Engine limits are per source IP, so the two rosters are kept
+  # almost disjoint: google/startpage/brave/qwant are hermes-only. See
+  # compose/searxng-hermes/settings.yml for the per-engine reasoning and the measured arithmetic.
+  #
+  # SAME pinned digest as `searxng`, deliberately: the JSON shape is this layer's API
+  # (unresponsive_engines as [name, reason] ARRAYS, results[].score, results[].engines[],
+  # infoboxes[] with url=None) and so are the engine NAME strings. One image means one shape to
+  # test, one bump to review, and zero extra disk (identical layers). Bump both together and re-run
+  # tests/test_websearch.py AND tests/test_web_search.py.
+  #
+  # FIRST-RUN NOTE: create ./searxng-hermes/settings.yml BEFORE the first `up`. The entrypoint
+  # chowns /etc/searxng to nobody:nogroup, after which ohmz can edit files in place but cannot
+  # create or rename them in that directory (vim's write-backup-rename dance will fail).
+  #
+  #   docker compose -f compose/docker-compose.yml up -d searxng-hermes
+  #
+  # Name the service on the command line. A bare `up -d` would recreate the chat container too,
+  # and "chat search was not touched" is the property this whole split exists to guarantee.
+  searxng-hermes:
+    image: searxng/searxng@sha256:3bc6ae0e872ecd4b003e97e9cb58ec0fb56b02d46ad97ea67e2fa4ff2e8ff759
+    container_name: searxng-hermes
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:8889:8080"
+    volumes:
+      - ./searxng-hermes:/etc/searxng:rw
+    environment:
+      - SEARXNG_BASE_URL=http://localhost:8889/
+      # The same secret as the chat instance: it signs this instance's own cookies and nothing
+      # else, both are loopback-bound, and a second .env variable is a second thing to forget.
+      - SEARXNG_SECRET=${SEARXNG_SECRET}
+      # 1 worker, not 4: this instance handles roughly one request per ten minutes. ~130 MB RSS.
+      - UWSGI_WORKERS=1
+      - UWSGI_THREADS=2
     cap_drop:
       - ALL
     cap_add:
