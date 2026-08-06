@@ -103,8 +103,8 @@ def _noun(p):
     return {"fare": "fare", "inventory": "stock level", "availability": "availability",
             "back_in_stock": "item", "out_of_stock": "item", "price_drop": "listing",
             "price_rise": "listing", "unreachable": "page", "blocked": "page",
-            "no_value": "page", "recovered": "page"}.get(p.get("kind"),
-                                                         "task you assigned me")
+            "no_value": "page", "not_found": "item",
+            "recovered": "page"}.get(p.get("kind"), "task you assigned me")
 
 
 def _phrase(noun):
@@ -161,11 +161,22 @@ def _price_rise(p):
 
 
 def _back_in_stock(p):
-    return "Back in stock", "is available again"
+    v = p.get("value")
+    s = "is available again"
+    # "Only 3 left" is the whole reason someone set a restock watch on a hard-to-get item, so when
+    # the page said a number, the text says it too.
+    if p.get("state") == "limited" and v is not None:
+        s += f" - only {v} left"
+    return "Back in stock", s
 
 
 def _out_of_stock(p):
-    return "Out of stock", "has just gone out of stock"
+    # "has just gone out of stock" claims a TRANSITION, and firing is a predicate on the current
+    # reading: a first-ever reading of a page that was already sold out would be asserting something
+    # about timing that nobody observed. Say it only when a previous reading was available.
+    if p.get("prev_state") in ("in_stock", "limited"):
+        return "Out of stock", "has just gone out of stock"
+    return "Out of stock", "is out of stock"
 
 
 def _fare(p):
@@ -179,15 +190,29 @@ def _fare(p):
 
 
 def _inventory(p):
-    v, prev = p.get("value"), p.get("prev")
-    s = f"is down to {v} left" if v is not None else "changed"
+    # money() with an empty unit, not the raw value: a count arrives as a number and "3.0 left" is
+    # what a bare float looks like once it has been through JSON.
+    v, prev, t = p.get("value"), p.get("prev"), p.get("target")
+    n = money(v, "")
+    if v is None:
+        s = "changed"
+    elif prev is None:
+        s = f"has {n} left"
+    elif v < prev:
+        s = f"is down to {n} left"
+    else:
+        s = f"is back up to {n} left"
     if prev is not None and v is not None:
-        s += f" (was {prev})"
+        s += f" (was {money(prev, '')})"
+    if t is not None:
+        s += f", at or below your {money(t, '')} target" if v is not None and v <= t \
+            else f", against your {money(t, '')} target"
     return "Stock level", s
 
 
 def _availability(p):
-    return "Now available", "has availability"
+    v = p.get("value")
+    return "Now available", ("has availability" if v is None else f"has {money(v, '')} available")
 
 
 def _threshold(p):
@@ -217,6 +242,10 @@ def _no_value(p):
     return "Can't read it any more", "still loads, but no longer shows a readable value"
 
 
+def _not_found(p):
+    return "Can't find it", "couldn't be found by an online search yet"
+
+
 def _recovered(p):
     v = money(p.get("value"), p.get("unit"))
     return "Back to normal", (f"is readable again, now {v}" if v else "is reachable again")
@@ -228,12 +257,12 @@ KINDS = {
     "fare": _fare, "inventory": _inventory, "availability": _availability,
     "threshold": _threshold, "change": _change,
     "unreachable": _unreachable, "blocked": _blocked, "no_value": _no_value,
-    "recovered": _recovered,
+    "not_found": _not_found, "recovered": _recovered,
 }
 # Kinds that report a PROBLEM with the monitor rather than a result from it. They read differently
 # (something needs your attention, rather than something you asked for happened) and they carry an
 # instruction, because an error the user cannot act on is just noise.
-PROBLEM_KINDS = {"unreachable", "blocked", "no_value"}
+PROBLEM_KINDS = {"unreachable", "blocked", "no_value", "not_found"}
 
 ADVICE = {
     "unreachable": "Double-check the link still opens in a browser. If the page moved, ask me to "
@@ -242,6 +271,9 @@ ADVICE = {
                "to watch a different page for it.",
     "no_value": "The page layout has probably changed. Ask me to set this monitor up again and "
                 "I'll re-read it.",
+    "not_found": "I searched the web but couldn't find a page for this item. Ask me to set the "
+                 "monitor up again with a direct link, or a better description of what to "
+                 "look for.",
 }
 
 
@@ -358,6 +390,11 @@ def render_plain(payload):
     v = money(payload.get("value"), payload.get("unit"))
     if v:
         lines.append(f"  {v}")
+    # The page's own words, when it was an availability that was read rather than a number. This is
+    # the "never report a state you didn't read" evidence: a doubtful reading can be checked against
+    # the page without anyone having to trust the wording above it.
+    if payload.get("state_text"):
+        lines.append(f"  the page says: {payload['state_text']}")
     cl = _conf_long(payload)
     if cl:
         lines.append(f"  {cl}")
@@ -413,9 +450,15 @@ def render_html(payload):
                                                   ("price_drop", "fare")) else ""
         if target and payload.get("kind") == "price_rise":
             sub = f"over your {e(target)} threshold"
+        if target and payload.get("kind") == "inventory":
+            sub = f"at or below your {e(target)} left"
         big = (f'<div style="margin:18px 0 4px;font-size:34px;line-height:1.1;font-weight:700;'
                f'color:{accent};">{e(v)}{delta}</div>'
                + (f'<div style="font-size:14px;color:#6b7280;">{sub}</div>' if sub else ""))
+
+    # e() because a phrase lifted off a page is untrusted input, exactly like a page title.
+    said = (f'<div style="margin:6px 0 0;font-size:14px;color:#6b7280;">the page says: '
+            f'{e(payload["state_text"])}</div>' if payload.get("state_text") else "")
 
     cl = _conf_long(payload)
     conf_html = (f'<div style="margin-top:10px;font-size:13px;color:#92400e;background:#fffbeb;'
@@ -445,7 +488,7 @@ def render_html(payload):
 <div style="font-size:12px;letter-spacing:.08em;text-transform:uppercase;color:{accent};font-weight:700;">{e(headline)}</div>
 <div style="margin-top:14px;font-size:15px;color:#374151;">Hi {e(who) or 'there'}{f", {e(assistant)} here!" if assistant else ""} {lead}</div>
 {f'<div style="margin-top:14px;font-size:17px;font-weight:600;line-height:1.35;">{e(thing)}</div>' if thing else ''}
-{big}{conf_html}{btn}{advice_html}
+{big}{said}{conf_html}{btn}{advice_html}
 <div style="margin-top:26px;padding-top:16px;border-top:1px solid #e5e7eb;font-size:12px;color:#9ca3af;line-height:1.6;">{e(footer)}</div>
 </td></tr></table>
 </td></tr></table></div>"""
