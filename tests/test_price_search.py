@@ -62,6 +62,7 @@ class Args:
         self.schedule = "every 6h"
         self.require_confidence = False
         self.prefer_domain = None
+        self.mode = "price"
         self.engine_scores = False
         self.__dict__.update(kw)
 

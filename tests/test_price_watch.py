@@ -63,6 +63,7 @@ class Args:
         self.require_confidence = False
         self.kind = None
         self.label = None
+        self.mode = "price"
         self.unit = "$"
         self.monitor = "test monitor"
         self.schedule = "every 6h"
@@ -246,7 +247,7 @@ def main():
     pw.STATE_DIR = tempfile.mkdtemp()
 
     def fail_with(exc):
-        def f(url, attempts=3):
+        def f(url, attempts=3, **kw):
             raise exc
         pw.best_candidates = f
 
@@ -283,7 +284,7 @@ def main():
         check(f"{type(exc).__name__} {getattr(exc, 'code', '')} -> {want}", got == want, got)
 
     print("--- a page that loads but yields nothing is the quiet failure ---")
-    pw.best_candidates = lambda url, attempts=3: ([], 3, "Some Product Page")
+    pw.best_candidates = lambda url, attempts=3, **kw: ([], 3, "Some Product Page")
     outs = [run(state="e1") for _ in range(4)]
     check("silent for two runs", not any("ALERT" in o for o in outs[:2]))
     check("names itself on the third", '"kind": "no_value"' in outs[2], outs[2])
@@ -294,7 +295,7 @@ def main():
     for _ in range(3):
         run(state="r1")
     pw.fetch = lambda url: FIX_JSONLD
-    pw.best_candidates = lambda url, attempts=3: (pw.candidates(FIX_JSONLD), 1,
+    pw.best_candidates = lambda url, attempts=3, **kw: (pw.candidates(FIX_JSONLD), 1,
                                                   pw.page_title(FIX_JSONLD))
     out = run(state="r1", below=10)      # value is 39.99, so the condition does NOT fire
     check("says it is working again", '"kind": "recovered"' in out, out)
@@ -304,7 +305,7 @@ def main():
     fail_with(_ue.URLError("timed out"))
     for _ in range(3):
         run(state="r2")
-    pw.best_candidates = lambda url, attempts=3: (pw.candidates(FIX_JSONLD), 1,
+    pw.best_candidates = lambda url, attempts=3, **kw: (pw.candidates(FIX_JSONLD), 1,
                                                   pw.page_title(FIX_JSONLD))
     out = run(state="r2", below=50)
     check("a firing recovery sends ONE alert", out.count("ALERT_DATA:") == 1, out)
@@ -319,13 +320,13 @@ def main():
     out = run(state="n1")
     check("a later failure still knows what it was watching",
           '"item": "Widget Deluxe"' in out, out)
-    pw.best_candidates = lambda url, attempts=3: (pw.candidates(FIX_JSONLD), 1,
+    pw.best_candidates = lambda url, attempts=3, **kw: (pw.candidates(FIX_JSONLD), 1,
                                                   pw.page_title(FIX_JSONLD))
     check("an explicit --label wins over the title",
           '"item": "My Thing"' in run(state="n2", label="My Thing", below=50))
 
     print("--- both alert forms are emitted, so an old watcher still delivers ---")
-    pw.best_candidates = lambda url, attempts=3: (pw.candidates(FIX_JSONLD), 1,
+    pw.best_candidates = lambda url, attempts=3, **kw: (pw.candidates(FIX_JSONLD), 1,
                                                   pw.page_title(FIX_JSONLD))
     out = run(state="b1", below=50)
     check("a plain ALERT( line is present", "ALERT(ohmz):" in out, out)

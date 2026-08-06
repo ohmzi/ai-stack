@@ -328,7 +328,8 @@ def pw_namespace(a, url):
     return types.SimpleNamespace(
         url=url, state=a.state, below=a.below, above=a.above, alert_to=a.alert_to,
         selector=None, kind=a.kind, label=a.label, unit=a.unit, monitor=a.monitor,
-        schedule=a.schedule, require_confidence=a.require_confidence)
+        schedule=a.schedule, require_confidence=a.require_confidence,
+        mode=getattr(a, "mode", None) or "price")
 
 
 def run(a):
@@ -475,7 +476,10 @@ def main():
     ap.add_argument("--kind", help="price_drop | price_rise | back_in_stock | fare | inventory | "
                                    "availability | threshold | change (picks the message wording)")
     ap.add_argument("--label", help="what to call the item; omit to read the chosen page <title>")
-    ap.add_argument("--unit", default="$", help="currency symbol or code for display")
+    ap.add_argument("--mode", choices=("price", "stock"), default="price",
+                    help="forwarded to price_watch: read a price, or an availability state")
+    # None, not "$": price_watch resolves it per mode. See its own --unit.
+    ap.add_argument("--unit", default=None, help="currency symbol or code for display")
     ap.add_argument("--monitor", help="the monitor's name, used when no item label is available")
     ap.add_argument("--schedule", help="how often this runs, e.g. 'every 6h' (shown in the email)")
     ap.add_argument("--require-confidence", action="store_true",
