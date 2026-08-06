@@ -77,6 +77,7 @@ def main():
         "unreachable":   dict(error="HTTP 404"),
         "blocked":       {},
         "no_value":      {},
+        "not_found":     dict(item="Google Fitbit Air", url=None),
         "recovered":     dict(value=46.99),
     }
     for kind, extra in kinds.items():
@@ -121,7 +122,7 @@ def main():
     check("...still ending with the pointer", sms2.rstrip().endswith("in email."), sms2)
 
     print("--- problems read as problems, and say what to do ---")
-    for kind in ("unreachable", "blocked", "no_value"):
+    for kind in ("unreachable", "blocked", "no_value", "not_found"):
         p = dict(BASE, kind=kind, error="HTTP 500")
         sms, plain = t.render_sms(p), t.render_plain(p)
         check(f"{kind}: sms flags it as needing attention", "heads up" in sms.lower(), sms)
