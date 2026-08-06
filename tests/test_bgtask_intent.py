@@ -48,6 +48,16 @@ YES = [
     "what are my scheduled tasks?",    # was dead code: _BG_QUESTION won before _BG_MANAGE ran
     "what are my background tasks",
     "stop tracking the gpu price",     # bare 'tracking' with a THING as object stays manageable
+    # The live 2026-08-05 phrasing that fell through to chat: "create alert" matched no verb,
+    # and neither "is under 150" nor "every 5 mins" / "for next 20 mins" counted as recurrence.
+    "create alert to search online for Google Fitbit Air when the price is under 150, "
+    "send me the link and notify me on text, check every 5 mins for next 20 mins",
+    "notify me when the price is under $150, check every 5 mins",
+    "create an alert for the fitbit air when the price is below 150, check hourly",
+    "track the flight price to karachi and alert me when the fare is under 900, check daily",
+    "set up a price alert for the fitbit air, every 6 hours for a week",
+    "create alert for fitbit air when price is under 150, check hourly",   # bare, article-free
+    "set up alerts for the fitbit air when the price is under 150, check every 5 mins",
 ]
 
 # Must NOT delegate (ordinary conversation, questions, coder work, media).
@@ -78,6 +88,25 @@ NO = [
     "what are the best jobs for new grads",
     "what are the night watches in game of thrones?",
     "what are some good monitors for gaming?",
+    # The create-alert verb arm requires the alert noun, and the widened recurrence arms stay
+    # inside the guarded when/if window — these probe the borders that widening opened.
+    "how do I create an alert in grafana?",
+    "create an alert dialog in react",
+    "make a tracker app with react",
+    "when the price is right you should buy it",
+    # The alert-noun must end its phrase or take a complement — artifact nouns must not count.
+    "create an alert rule in prometheus for when the value goes above 90",
+    "make a tracker component that polls the api every 5 min",
+    "set up a stock alert widget in my react app, poll every 5 min",
+    "add a price alert column to the spreadsheet, one for every day of the week",
+    "set up a watch party for friday, every week",
+    # Short human durations are talk, not schedules.
+    "keep an eye on the oven for 20 mins",
+    "watch the kids for 30 mins",
+    # Comparatives without a number are prose, not thresholds.
+    "ping me when it's under review",
+    "notify me if the price is under warranty",
+    "remind me when the cost is more than I can afford",
 ]
 
 # Media must win first: these mention monitoring but ask for a render.
@@ -153,6 +182,44 @@ def main():
           "scripts/price_watch.py" in brief and "do NOT write your own scraper" in brief)
     check("...and prints its output verbatim rather than summarising it",
           "print its output verbatim" in brief)
+    # 5d-ii: the no-URL case that produced the live "Verification failed" — the agent had no
+    # vetted recipe for "search online for X", improvised, and narrated a job it never created.
+    check("brief routes NO-URL watches to the search-first extractor",
+          "scripts/price_search.py" in brief and "--query" in brief)
+    check("...and forbids asking for a link or improvising a search job",
+          "do NOT ask for one" in brief and "never a URL" in brief)
+    check("...and keeps URL-bearing requests on price_watch",
+          "rule 5d applies instead" in brief)
+    # 5d-iii: stock was advertised in the kinds list and in the docs for months while --kind was
+    # applied AFTER a numeric comparison, so "tell me when it's back in stock" fired on a price
+    # threshold or never fired at all. The brief has to name the mode, or the bug comes back as
+    # prose: rule 5d used to say it handled "price, stock, fare, availability" itself.
+    check("brief routes stock and availability to --mode stock",
+          "5d-iii" in brief and "--mode stock" in brief)
+    check("...and says why the flag is not optional",
+          "--mode stock is REQUIRED" in brief and "never fires" in brief)
+    check("...and forbids a price threshold on a stock watch",
+          "price threshold in disguise" in brief)
+    check("...and promises an unreadable page is reported, not guessed",
+          "never guesses 'out of stock'" in brief)
+    check("...and that a pre-order is not a restock",
+          "pre-order is not a restock" in brief)
+    check("rule 5d no longer claims to handle stock itself",
+          "WATCHING A PAGE (price, stock, fare, availability)" not in brief
+          and "For stock or availability, rule 5d-iii applies instead" in brief)
+    check("rule 6b's vetted-extractor exception names 5d-iii too",
+          "rules 5d, 5d-ii and 5d-iii" in brief)
+    check("...as does the self-contained-prompt rule",
+          "rule 5d, 5d-ii or 5d-iii applies" in brief)
+    check("a no-URL stock request is told to ask for a link, not sent to price_search",
+          "finds pages by their PRICE" in brief)
+    check("out_of_stock is classified BEFORE back_in_stock (both match 'in stock')",
+          mod.Pipe._guess_kind("tell me when it is no longer in stock") == "out_of_stock")
+    check("...while a real restock request still classifies as back_in_stock",
+          mod.Pipe._guess_kind("tell me when the fitbit is back in stock")
+          == "back_in_stock")
+    check("...and 'sold out' still wins",
+          mod.Pipe._guess_kind("text me if it sells out") == "out_of_stock")
     check("brief no longer contradicts itself about alerts being configured",
           "none is configured right now" not in brief)
     check("brief states alerts are configured (agent claimed otherwise)",

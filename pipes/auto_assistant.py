@@ -1031,16 +1031,32 @@ class Pipe:
 
     _BG_VERB = re.compile(
         r"^\s*(?:please\s+|can you\s+|could you\s+)?"
-        r"(?:monitor|track|watch|keep an eye on|keep track of|alert me|notify me|remind me|ping me)\b", re.I)
+        r"(?:monitor|track|watch|keep an eye on|keep track of|alert me|notify me|remind me|ping me"
+        # "create alert to search online for X" — the verb alone would swallow media requests
+        # ("make a picture"), so the arm requires the alert/monitor noun to follow it.
+        # The noun must END the phrase or take a complement (for/to/on/about/when/if) — "create
+        # an alert" schedules, "create an alert dialog in react" builds an artifact and must not.
+        r"|(?:create|set up|add|make)\s+(?:an?\s+)?(?:new\s+)?(?:price\s+|fare\s+|stock\s+)?"
+        r"(?:(?:alert|monitor|tracker)s?|watch(?:es)?)"
+        r"(?=\s*(?:$|[,.!:;]|(?:for|to|on|about|when|if)\b)))\b", re.I)
     _BG_RECURRENCE = re.compile(
-        r"\b(?:every\s+(?:\d+\s+)?(?:minute|hour|day|week|morning|evening|night)s?"
+        # "minute|min" in that order so "minutes" is taken whole; the trailing s? then also
+        # covers the live phrasing "every 5 mins", which used to fall through to the chat model.
+        r"\b(?:every\s+(?:\d+\s+)?(?:minute|min|hour|hr|day|week|morning|evening|night)s?"
         r"|hourly|daily|weekly|nightly"
-        r"|for\s+(?:the\s+next\s+)?\d+\s+(?:hour|day|week|month)s?"
+        # No minutes here on purpose: "keep an eye on the oven for 20 mins" is talk, not a task.
+        # A bounded fast check reaches us via its interval ("check every 5 mins") instead.
+        r"|for\s+(?:the\s+)?(?:next\s+)?\d+\s+(?:hour|hr|day|week|month)s?"
         r"|for\s+(?:a|two|three|the next few)\s+(?:hour|day|week|month)s?"
         r"|until\s+(?:it|the|price)"
-        r"|(?:when|if|once)\s+(?:it|the price|the value|it's|stock)\b.{0,30}\b(?:drops?|falls?|changes?|"
-        r"rises?|goes\s+(?:below|above|down|up)|hits|reaches|back in stock|available)"
-        r"|in\s+\d+\s+(?:minute|hour|day|week)s?\b)", re.I)
+        r"|(?:when|if|once)\s+(?:it|(?:the\s+)?(?:price|value|fare|cost)|it's|stock)\b.{0,30}"
+        r"\b(?:drops?|falls?|changes?|"
+        r"rises?|goes\s+(?:below|above|down|up)|hits|reaches|back in stock|available"
+        # "is under $150" states a threshold as readily as "drops below" — but only with a
+        # NUMBER attached; "under review", "more than I can afford" are prose, not thresholds.
+        r"|is\s+(?:under|below|above|over|less\s+than|more\s+than)\s+\$?\d"
+        r"|(?:under|below)\s+\$?\d)"
+        r"|in\s+\d+\s+(?:minute|min|hour|hr|day|week)s?\b)", re.I)
     _BG_QUESTION = re.compile(
         r"^\s*(?:how|what|which|why|is there|are there|do you know|can i|should i)\b", re.I)
 
@@ -1081,8 +1097,13 @@ class Pipe:
     # not recognise is left to the agent, which picks from the same list at creation time. The
     # model never supplies a NUMBER — only a category — so the hallucination surface stays closed.
     _KIND_RULES = [
+        # out_of_stock FIRST, and it is the added phrasings that make the order load-bearing:
+        # "no longer in stock" and "not in stock" both contain "in stock", so back_in_stock's
+        # \bin stock\b used to claim them and a sell-out watch was classified as a restock watch.
+        # "sells out" was matched by neither rule and fell through to price_drop.
+        ("out_of_stock",  r"\bout of stock\b|\bsold out\b|\bsells?\s+out\b|\bruns out\b|"
+                          r"\bno longer (?:in stock|available)\b|\bnot in stock\b"),
         ("back_in_stock", r"\bback in stock\b|\bin stock\b|\brestock|\bavailable again\b"),
-        ("out_of_stock",  r"\bout of stock\b|\bsold out\b|\bruns out\b"),
         ("fare",          r"\bfare\b|\bflight\b|\bairfare\b|\bticket price\b|\bround.?trip\b"),
         ("inventory",     r"\binventory\b|\bhow many\b|\bunits? left\b|\bstock level\b|\bquantity\b"),
         ("availability",  r"\bappointment\b|\breservation\b|\bslot\b|\bbooking\b|\bavailability\b"),
@@ -3145,6 +3166,10 @@ class Pipe:
     # What the hermes agent is told when a background task is delegated. This is the contract that
     # keeps unattended jobs deliverable and bounded; the agent writes the actual job prompt, but
     # every job it creates must satisfy these rules.
+    # 5d sub-rules, in ship order: i = no-false-confirmation, ii = price_search (no URL),
+    # iii = price_watch --mode stock, iv = the next one (a fare extractor is the expected claimant).
+    # This whole brief is ONE string literal deployed as one webui.db row, so two branches editing
+    # it will conflict; allocate the number here first. tests/test_deployed.py is the backstop.
     _HERMES_BRIEF = (
         "You are the background-task manager for a local OpenWebUI assistant. The user's request "
         "was routed to you because it asks for a standing job (monitoring, scheduled checks, "
@@ -3153,7 +3178,8 @@ class Pipe:
         "1. The job must be BOUNDED: honour the user's duration (e.g. 'for 2 weeks' => an end "
         "condition or repeat count). If no duration was given, default to 7 days and say so.\n"
         "2. Pick a sensible interval if the user gave none (price checks: every 6 hours).\n"
-        "3. The job's prompt must be self-contained: exact URLs or curl commands to fetch (the "
+        "3. The job's prompt must be self-contained. When rule 5d, 5d-ii or 5d-iii applies, its vetted "
+        "command IS the entire prompt; otherwise: exact URLs or curl commands to fetch (the "
         "local SearXNG at http://127.0.0.1:8888/search?q=...&format=json is available for "
         "searching), what to extract, and what counts as noteworthy. When fetching a retail page, "
         "use plain urllib WITHOUT a fake browser User-Agent — measured on this host, Amazon "
@@ -3182,7 +3208,8 @@ class Pipe:
         "    ALERT(<username>): <what happened, with the number>   (ONLY in a run where the user's alert condition holds)\n"
         "Alerts ARE configured on this host: an ALERT line is delivered to the user as a text message AND an email, automatically. Never tell the user alerts are unconfigured.\n"
         "The LOG line is posted to the background-tasks channel automatically. A run with no ALERT line raises no alert.\n"
-        "5d. WATCHING A PAGE (price, stock, fare, availability) — do NOT write your own scraper. "
+        "5d. WATCHING A PRICE OR FARE ON A PAGE YOU HAVE THE LINK FOR — do NOT write your own "
+        "scraper. For stock or availability, rule 5d-iii applies instead. "
         "This host ships a tested extractor; make the job's prompt exactly:\n"
         "    Run this terminal command and print its output verbatim as your entire response. Add nothing.\n"
         "    python3 /home/ohmz/ai-stack/scripts/price_watch.py --url '<URL>' --state '<short_name>' --below <N> --alert-to <username> --kind <kind> --monitor '<job name>' --schedule '<schedule>'\n"
@@ -3200,6 +3227,36 @@ class Pipe:
         "Pass --unit only when the USER named a currency; otherwise leave it. Do not mention "
         "skills, internal tools, or what you might do later — the reply is a confirmation of what "
         "was scheduled, nothing else.\n"
+        "5d-ii. WATCHING A PRICE OR FARE WITH NO URL — when the user names a product or a flight "
+        "but gives no link, do NOT ask for one and do NOT build your own search-and-scrape job. "
+        "A second vetted script finds the page itself via the local search engine; make the "
+        "job's prompt exactly:\n"
+        "    Run this terminal command and print its output verbatim as your entire response. Add nothing.\n"
+        "    python3 /home/ohmz/ai-stack/scripts/price_search.py --query '<item words>' --state '<short_name>' --below <N> --alert-to <username> --kind <kind> --monitor '<job name>' --schedule '<schedule>'\n"
+        "It searches once, picks the best product page, remembers it, and from then on behaves "
+        "exactly like price_watch.py — same flags: --above for a rise, --kind fare for flights, "
+        "--unit only when the user named a currency, --require-confidence to refuse "
+        "low-confidence alerts. Keep --query to the item's own words — no 'price of', no "
+        "quotation marks or apostrophes inside the value, never a URL. If the user DID give a "
+        "URL or a page address, rule 5d applies instead, never this one.\n"
+        "5d-iii. WATCHING STOCK OR AVAILABILITY — 'tell me when it is back in stock', 'text me if "
+        "it sells out', 'how many are left', appointment or ticket availability. The SAME vetted "
+        "script does this in a different mode; do NOT write your own scraper and do NOT reach for a "
+        "price threshold. Make the job's prompt exactly:\n"
+        "    Run this terminal command and print its output verbatim as your entire response. Add nothing.\n"
+        "    python3 /home/ohmz/ai-stack/scripts/price_watch.py --url '<URL>' --state '<short_name>' --mode stock --kind <kind> --alert-to <username> --monitor '<job name>' --schedule '<schedule>'\n"
+        "--mode stock is REQUIRED here. Without it the run compares a PRICE against a threshold and "
+        "a back-in-stock watch never fires. --kind is one of back_in_stock, out_of_stock, "
+        "inventory, availability. Pass NO --below and NO --above unless the user asked about a "
+        "COUNT ('fewer than 3 left') and --kind is inventory — a number on any other stock watch is "
+        "a price threshold in disguise and is ignored. No --unit either: a stock reading has no "
+        "currency. The script reads the page's OWN availability field, states on every run which "
+        "signal it read and how confident it is, waits for an unconfirmed reading to repeat before "
+        "it acts, and sends at most one stock alert every six hours so a page that flips in and out "
+        "of stock cannot text all day. If a page does not state its availability in a readable way "
+        "it reports that it could not read it — it never guesses 'out of stock'. A pre-order is not "
+        "a restock and fires nothing. If the user gave no link, ask for one: the no-URL recipe in "
+        "rule 5d-ii finds pages by their PRICE and would reject an out-of-stock page.\n"
         "5e. The extractor also reports its OWN failures: a dead URL, a site blocking automated "
         "checks, and a page that still loads but no longer shows a value. Never add your own "
         "error handling or retry logic around it — it already confirms a failure across runs "
@@ -3214,7 +3271,7 @@ class Pipe:
        "generate has no reasoning to recover when markup shifts, and its bugs fail silently — one "
        "such job computed its ALERT text into a variable it never printed, so the alert could "
        "never fire. Use normal agent mode. (The one exception is the pre-existing, tested "
-       "extractor named in rule 5d, which the user's operator maintains — never a script you "
+       "extractors named in rules 5d, 5d-ii and 5d-iii, which the user's operator maintains — never a script you "
        "compose at run time.)\n"
        "6c. SCHEDULE — map the user's words literally. 'every N minutes/hours/days' is RECURRING: "
        "pass 'every Nm' / 'every Nh' / 'every Nd', NOT a bare 'Nm' (which hermes reads as a "
@@ -4018,7 +4075,11 @@ class Pipe:
         "source each fact came from. If the tools cannot establish something, say that plainly "
         "instead of filling the gap.\n"
         "4. Never state a number, price or date you did not read from a source in this session.\n"
-        "5. Answer in prose for the user, not as a report to a machine. Be concise."
+        "5. For a price question, query the local SearXNG "
+        "(http://127.0.0.1:8888/search?q=...&format=json) with your web tool, prefer major "
+        "retailer pages (amazon.ca, bestbuy.ca, walmart.ca), and answer with the price AND the "
+        "link to the page you read it from. Rule 4 still holds: no page read, no number.\n"
+        "6. Answer in prose for the user, not as a report to a machine. Be concise."
     )
 
     def _release_chat_tenant(self):
@@ -4162,11 +4223,24 @@ class Pipe:
             ctx = (f"Request context: the requesting user is '{uname}'. If this job needs to "
                    f"alert them, the ALERT line's recipient is '{uname}'.")
             kind = self._guess_kind(text)
+            # Deterministic pipe-side steering beats hoping the agent notices a rule: a stock watch
+            # built as a price watch is the advertised-but-unimplemented bug all over again.
+            if kind in ("back_in_stock", "out_of_stock", "inventory", "availability"):
+                ctx += (" This is a stock/availability watch, not a price watch: rule 5d-iii "
+                        "applies — pass --mode stock and no price threshold.")
             ctx += (f" The request is a '{kind}' watch — pass --kind {kind}."
                     if kind else
                     " Choose --kind yourself from: price_drop, price_rise, back_in_stock, "
                     "out_of_stock, fare, inventory, availability, threshold, change — whichever "
                     "best describes what the user is watching for.")
+            # Creation turns only: a follow-up replays a transcript blob and a fallen-through
+            # manage turn is about an EXISTING job — telling either to "use the no-URL recipe"
+            # steers the agent toward creating something nobody asked for.
+            if (verify_creation and kind in ("price_drop", "price_rise", "fare")
+                    and not re.search(r"https?://|\bwww\.", text or "", re.I)):
+                ctx += (" The request names WHAT to watch but gives NO URL. Prefer the no-URL "
+                        "recipe (rule 5d-ii, scripts/price_search.py with --query) over asking "
+                        "the user for a link, and never write a search job of your own.")
         else:
             ctx = f"Request context: the requesting user is '{uname}'."
         if scoped:
