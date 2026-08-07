@@ -213,6 +213,13 @@ def main():
           "rule 5d, 5d-ii or 5d-iii applies" in brief)
     check("a no-URL stock request is told to ask for a link, not sent to price_search",
           "finds pages by their PRICE" in brief)
+    # Live miss, job 5b3041dcf6d2: "Toronto to Vancouver flights" got price_drop because the fare
+    # pattern only matched the singular, so --kind fare and every fare-specific branch stayed off.
+    for phrase in ("track Toronto to Vancouver flights and tell me when it is under $1000",
+                   "watch the flight price Toronto to Vancouver",
+                   "alert me when fares to karachi drop",
+                   "watch round trips to lisbon"):
+        check(f"fare wins on {phrase[:44]!r}", mod.Pipe._guess_kind(phrase) == "fare")
     check("out_of_stock is classified BEFORE back_in_stock (both match 'in stock')",
           mod.Pipe._guess_kind("tell me when it is no longer in stock") == "out_of_stock")
     check("...while a real restock request still classifies as back_in_stock",

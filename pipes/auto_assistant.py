@@ -1104,7 +1104,11 @@ class Pipe:
         ("out_of_stock",  r"\bout of stock\b|\bsold out\b|\bsells?\s+out\b|\bruns out\b|"
                           r"\bno longer (?:in stock|available)\b|\bnot in stock\b"),
         ("back_in_stock", r"\bback in stock\b|\bin stock\b|\brestock|\bavailable again\b"),
-        ("fare",          r"\bfare\b|\bflight\b|\bairfare\b|\bticket price\b|\bround.?trip\b"),
+        # Plurals matter here and the singular-only version was a live miss: a job created on
+        # 2026-08-07 for "Toronto to Vancouver flightS" classified as price_drop, because
+        # \bflight\b cannot match "flights". Everything fare-specific then stayed switched off.
+        ("fare",          r"\bfares?\b|\bflights?\b|\bairfares?\b|\bticket prices?\b|"
+                          r"\bround.?trips?\b"),
         ("inventory",     r"\binventory\b|\bhow many\b|\bunits? left\b|\bstock level\b|\bquantity\b"),
         ("availability",  r"\bappointment\b|\breservation\b|\bslot\b|\bbooking\b|\bavailability\b"),
         ("price_rise",    r"\b(?:goes?|rise|rises|climbs?|above|over|exceeds?)\s+(?:above|over|past)?\s*\$?\d"),
