@@ -357,15 +357,29 @@ def main():
     check("...and clears the fruitless bookkeeping",
           st["fruitless_streak"] == 0 and st["not_found_alerted"] is False, st)
 
-    print("--- fares ride the same path, worded as fares ---")
+    print("--- a fare watch is REFUSED, because a readable fare number is not a fare ---")
+    # Measured twice in production. Job 99cdcb68d1e1 found no page at all. Then job 52f821a8d3a2
+    # resolved cheapflights.ca and texted "$358.72, under your $1,000.00 target" at HIGH confidence,
+    # read from a JSON-LD offers ARRAY of 358.72/360.12/362.92/364.32 — a list of unrelated
+    # itineraries, on a page titled "C$ 146+". Every guard in this file was satisfied and the
+    # reading was still meaningless, which is why refusing beats auditioning.
     search.results = [R(FARE_URL)]
     fetch_map[FARE_URL] = FIX_FARE
+    calls = search.calls
     advance(700)
     rc, out = run(state="t4", query="toronto to karachi", kind="fare", below=900)
-    check("the query says flight price",
-          search.queries[-1] == "toronto to karachi flight price", search.queries[-1:])
-    check("a static fare page is readable and fires", '"kind": "fare"' in out, out)
-    check("...flagged unconfirmed (visible-text is not a fare field)", "unconfirmed" in out, out)
+    check("no search is spent at all", search.calls == calls, out)
+    check("it exits 0 — a config limit is not an infrastructure error", rc == 0, rc)
+    check("the LOG line says it cannot work, and why",
+          len(hd.LOG_RE.findall("## Response\n" + out)) == 1
+          and "cannot work" in out and "JavaScript" in out, out)
+    data = [json.loads(m) for m in hd.ALERT_DATA_RE.findall("## Response\n" + out)]
+    check("...and it alerts ONCE, as a problem kind",
+          len(data) == 1 and data[0]["kind"] == "fare_unsupported", out)
+    rc, out = run(state="t4", query="toronto to karachi", kind="fare", below=900)
+    check("a second run stays quiet but keeps telling the truth in the LOG",
+          "ALERT" not in out and "cannot work" in out, out)
+    check("no price is ever emitted for a fare", "358" not in out and "849" not in out, out)
 
     print("--- a reused --state name with a new query inherits nothing ---")
     search.results = []
@@ -566,16 +580,16 @@ def main():
     ps.pw.fetch = once
     search.results = [R(DEV15, engines=("mojeek",))]
     advance(2000)
-    rc, out = run(state="t15", below=150, kind="fare")
+    rc, out = run(state="t15", below=150, kind="price_rise")
     st = sstate("t15")
     check("the audition succeeded but the real read failed, so the win stays PENDING",
           st.get("pending_win", {}).get("engines") == ["mojeek"]
-          and board()["kinds"]["fare"]["mojeek"]["wins"] == 0, st)
+          and board()["kinds"]["price_rise"]["mojeek"]["wins"] == 0, st)
     ps.pw.fetch = fake_fetch
     fetch_map[DEV15] = FIX_DEVICE_CHEAP
-    rc, out = run(state="t15", below=150, kind="fare")
+    rc, out = run(state="t15", below=150, kind="price_rise")
     check("...and the next healthy run settles it",
-          board()["kinds"]["fare"]["mojeek"]["wins"] == 1
+          board()["kinds"]["price_rise"]["mojeek"]["wins"] == 1
           and "pending_win" not in sstate("t15"), sstate("t15"))
 
     print("--- the learned ordering decides who is AUDITIONED, never who wins ---")

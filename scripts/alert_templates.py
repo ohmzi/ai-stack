@@ -103,7 +103,7 @@ def _noun(p):
     return {"fare": "fare", "inventory": "stock level", "availability": "availability",
             "back_in_stock": "item", "out_of_stock": "item", "price_drop": "listing",
             "price_rise": "listing", "unreachable": "page", "blocked": "page",
-            "no_value": "page", "not_found": "item",
+            "no_value": "page", "not_found": "item", "fare_unsupported": "fare",
             "recovered": "page"}.get(p.get("kind"), "task you assigned me")
 
 
@@ -242,6 +242,12 @@ def _no_value(p):
     return "Can't read it any more", "still loads, but no longer shows a readable value"
 
 
+def _fare_unsupported(p):
+    # Short on purpose: the SMS has 140 ASCII characters and the reason does not fit in them. The
+    # full explanation is the ADVICE entry, which only the email carries.
+    return "Can't watch a fare", "cannot be watched - no page I can read carries a real fare"
+
+
 def _not_found(p):
     return "Can't find it", "couldn't be found by an online search yet"
 
@@ -257,12 +263,12 @@ KINDS = {
     "fare": _fare, "inventory": _inventory, "availability": _availability,
     "threshold": _threshold, "change": _change,
     "unreachable": _unreachable, "blocked": _blocked, "no_value": _no_value,
-    "not_found": _not_found, "recovered": _recovered,
+    "not_found": _not_found, "fare_unsupported": _fare_unsupported, "recovered": _recovered,
 }
 # Kinds that report a PROBLEM with the monitor rather than a result from it. They read differently
 # (something needs your attention, rather than something you asked for happened) and they carry an
 # instruction, because an error the user cannot act on is just noise.
-PROBLEM_KINDS = {"unreachable", "blocked", "no_value", "not_found"}
+PROBLEM_KINDS = {"unreachable", "blocked", "no_value", "not_found", "fare_unsupported"}
 
 ADVICE = {
     "unreachable": "Double-check the link still opens in a browser. If the page moved, ask me to "
@@ -271,6 +277,11 @@ ADVICE = {
                "to watch a different page for it.",
     "no_value": "The page layout has probably changed. Ask me to set this monitor up again and "
                 "I'll re-read it.",
+    "fare_unsupported": "I can't watch flight fares. A fare only exists behind an airline's "
+                        "search form, for one specific itinerary and date, so the numbers I can "
+                        "read on a search result are 'from' teasers or a list of unrelated trips "
+                        "- and a price you can't book is worse than no alert. Ask me to watch a "
+                        "product price instead, or set a price alert on Google Flights directly.",
     "not_found": "I searched the web but couldn't find a page for this item. Ask me to set the "
                  "monitor up again with a direct link, or a better description of what to "
                  "look for.",

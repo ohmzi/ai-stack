@@ -332,12 +332,47 @@ def pw_namespace(a, url):
         mode=getattr(a, "mode", None) or "price")
 
 
+# Why a fare watch is refused here rather than attempted.
+#
+# Measured twice, in production. Job 99cdcb68d1e1 found no page at all. Then on 2026-08-07, with
+# brave in the roster, job 52f821a8d3a2 resolved cheapflights.ca and reported "$358.72, under your
+# $1,000.00 target" at HIGH confidence — from a JSON-LD offers ARRAY holding 358.72, 360.12,
+# 362.92, 364.32 and more, i.e. a list of unrelated itineraries, on a page whose own title reads
+# "C$ 146+". No date, no itinerary, nothing bookable. It satisfied --require-confidence and it
+# texted. That is worse than finding nothing: the number was genuinely read off the page, so every
+# guard this file has was satisfied, and the reading was still meaningless.
+#
+# A fare only exists behind an airline's search form, for one itinerary, on one date. Nothing
+# static carries one. So this path refuses at the first run instead of alerting on a teaser — and
+# it refuses LOUDLY, once, rather than emitting not_found forever, because a monitor that cannot
+# work should say so rather than look busy.
+FARE_REFUSAL = ("a flight fare cannot be read from a search result — fare pages are built by "
+                "JavaScript, and the numbers that are readable are 'from' teasers or a list of "
+                "unrelated itineraries")
+
+
+def refuse_fare(a):
+    sname = a.state + ".search"
+    sstate = pw.read_state(sname)
+    print(f"LOG: this monitor cannot work — {FARE_REFUSAL}")
+    if not sstate.get("fare_refused"):
+        sstate["fare_refused"] = True
+        pw.emit({"to": a.alert_to, "item": a.label or a.query, "url": None, "unit": a.unit or "$",
+                 "monitor": a.monitor, "schedule": a.schedule, "kind": "fare_unsupported"})
+    pw.write_state(sname, sstate)
+    # Exit 0 deliberately: a non-zero exit would present a configuration limit as an
+    # infrastructure error, and a run that raises has no LOG line at all.
+    return 0
+
+
 def run(a):
     # The query reaches stdout inside LOG/SEARCH lines that the channel renders: fold whitespace
     # (an embedded newline would forge a protocol line of its own) and swap the markdown-link
     # brackets for parentheses, the same no-brackets contract the rest of the output keeps.
     a.query = (re.sub(r"\s+", " ", a.query or "").strip()
                .replace("[", "(").replace("]", ")"))
+    if a.kind == "fare":
+        return refuse_fare(a)
     sname = a.state + ".search"
     sstate = pw.read_state(sname)
     # Bind the search state to its query, exactly as price_watch binds watch state to its URL: a
