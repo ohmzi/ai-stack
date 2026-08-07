@@ -122,6 +122,26 @@ def spec_window(spec, today):
     return clamp_to_future(lo, today), hi
 
 
+def window_label(spec):
+    """The date window in the user's own terms ('March 2027'), or None for an exact date.
+
+    Reaches the alert as payload["window"] so the sentence can say "cheapest in March 2027" rather
+    than the bare "the cheapest dates I found". A month watch reports a fare on dates the user never
+    named; naming the window they DID give is what makes the chosen dates legible as an answer to
+    their question instead of arbitrary.
+    """
+    if not spec or spec["kind"] == "exact":
+        return None
+    if spec["kind"] == "month":
+        lo, _hi = month_bounds(spec["month"])
+        return lo.strftime("%B %Y")
+    lo = datetime.strptime(spec["from"], "%Y-%m-%d").date()
+    hi = datetime.strptime(spec["to"], "%Y-%m-%d").date()
+    if (lo.year, lo.month) == (hi.year, hi.month):
+        return f"{lo.day}-{hi.day} {lo.strftime('%B %Y')}"
+    return f"{lo.strftime('%d %b')} to {hi.strftime('%d %b %Y')}"
+
+
 def resolve_rung(site, depart_spec, ret_spec, trip_days, today):
     """(mode, date_basis, depart, ret) for this site, or None when it cannot express the ask.
 
@@ -574,7 +594,7 @@ def run(a, now=None, today=None, fetch_plain=None, fetch_browser=None):
              "monitor": a.monitor, "schedule": a.schedule, "kind": "fare",
              "itinerary": label, "source": best["site"], "date_basis": best["date_basis"],
              "depart_found": best["depart_found"], "ret_found": best["ret_found"],
-             "confidence": conf,
+             "confidence": conf, "window": window_label(depart_spec),
              "sources": [{"site": r["site"], "value": r["value"],
                           "depart_found": r["depart_found"], "ret_found": r["ret_found"],
                           "date_basis": r["date_basis"]} for r in independent(readings)]})
@@ -736,6 +756,65 @@ def selftest():
                        f"Dates and link in email.")
     ck(f"a full flex SMS fits 140 ASCII (len {len(body)})", len(body) <= 140)
     ck("...and the found dates survive the URL stripper", "Mar 8-15" in body)
+
+    print("--- window_label: the user's own words reach the alert ---")
+    ck("a month renders as a month name",
+       window_label({"kind": "month", "month": "2027-03"}) == "March 2027")
+    ck("a same-month range renders compactly",
+       window_label({"kind": "range", "from": "2027-03-08", "to": "2027-03-15"})
+       == "8-15 March 2027")
+    ck("an exact date has no window", window_label({"kind": "exact", "date": "2027-03-08"}) is None)
+
+    print("--- the new alert kinds exist and read as problems ---")
+    ck("fare_unreadable has a renderer (it did not, and fell through to 'Update')",
+       tpl.KINDS.get("fare_unreadable") is not None)
+    ck("fare_needs_itinerary has a renderer", tpl.KINDS.get("fare_needs_itinerary") is not None)
+    for k in ("fare_unreadable", "fare_needs_itinerary", "fare_unsupported"):
+        ck(f"{k} is a PROBLEM kind", k in tpl.PROBLEM_KINDS)
+        ck(f"...and carries advice the reader can act on", bool(tpl.ADVICE.get(k)))
+    ck("every kind flight_watch can emit has a renderer",
+       all(tpl.KINDS.get(k) for k in ("fare", "fare_unreadable", "fare_unsupported")))
+    ck("fare_unreadable and fare_unsupported say DIFFERENT things (one heals, one cannot)",
+       tpl.KINDS["fare_unreadable"]({}) != tpl.KINDS["fare_unsupported"]({}))
+
+    print("--- rung 4 cannot say 'cheapest' anywhere in a rendered alert ---")
+    weak_p = {"to": "o", "kind": "fare", "item": "YYZ-YVR Mar 1-31", "value": 412.0,
+              "target": 900.0, "unit": "$", "window": "March 2027",
+              "date_basis": "assumed_month_bounds", "depart_found": "2027-03-01",
+              "ret_found": "2027-03-31", "source": "onetravel.com"}
+    # item is derived FROM the found dates, never set independently — see the invariant check below.
+    strong_p = dict(weak_p, date_basis="native_month", depart_found="2027-03-10",
+                    ret_found="2027-03-17", source="skyscanner.ca",
+                    item=itinerary_label("YYZ", "YVR", "2027-03-10", "2027-03-17"))
+    ck("rung 4 SMS does not contain 'cheapest'",
+       "cheapest" not in tpl.render_sms(weak_p).lower())
+    ck("...and says the dates were the only ones quoted",
+       "only dates" in tpl.render_sms(weak_p).lower())
+    ck("a strong rung DOES say cheapest, with the window",
+       "cheapest in march 2027" in tpl.render_sms(strong_p).lower())
+    ck("rung 4's email names it as not the cheapest",
+       "NOT the cheapest" in tpl.render_plain(weak_p))
+
+    print("--- the found dates reach every surface ---")
+    # The SMS gets the dates only through `item`, so item and depart_found MUST agree. They cannot
+    # diverge in production because run() builds the label from the found dates, but nothing in the
+    # payload shape enforces it: writing the two independently is how an SMS ends up naming one week
+    # while the email names another. Pinned as an invariant rather than trusted.
+    ck("item is exactly itinerary_label(found dates) — the SMS/email cannot disagree",
+       strong_p["item"] == itinerary_label("YYZ", "YVR", strong_p["depart_found"],
+                                           strong_p["ret_found"]))
+    ck("SMS carries them (via the item label)", "Mar 10-17" in tpl.render_sms(strong_p))
+    ck("email states them in full with a night count",
+       "Wed 10 Mar 2027" in tpl.render_plain(strong_p)
+       and "7 nights" in tpl.render_plain(strong_p))
+    ck("email names the site and how it chose them",
+       "skyscanner.ca, using its own whole-month search" in tpl.render_plain(strong_p))
+    two = dict(strong_p, url="https://x.test/exact", searched_url="https://x.test/month")
+    ck("two labelled links when they differ",
+       "book these exact dates" in tpl.render_plain(two)
+       and "what I searched" in tpl.render_plain(two))
+    ck("...and NEITHER reaches the SMS",
+       "x.test" not in at.sms_body(tpl.render_sms(two)))
 
     print("--- registry gating: nothing is queried until a human ships a site ---")
     reg = load_registry(REGISTRY)

@@ -26,6 +26,7 @@ a value it was not given: `item` comes from the page's own <title>, never from a
 Kinds are open-ended — an unknown kind falls back to a generic renderer rather than raising, so a
 future job type reaches the user before anyone updates this file.
 """
+import datetime as _dt
 import html as _html
 import re
 
@@ -104,6 +105,7 @@ def _noun(p):
             "back_in_stock": "item", "out_of_stock": "item", "price_drop": "listing",
             "price_rise": "listing", "unreachable": "page", "blocked": "page",
             "no_value": "page", "not_found": "item", "fare_unsupported": "fare",
+            "fare_unreadable": "fare", "fare_needs_itinerary": "fare watch",
             "recovered": "page"}.get(p.get("kind"), "task you assigned me")
 
 
@@ -186,7 +188,26 @@ def _fare(p):
     s = f"is {v}"
     if t:
         s += f", under your {t} target"
-    return "Fare drop", s
+    return "Fare drop", s + _how_dates(p)
+
+
+def _how_dates(p):
+    """The clause that says how a flex-mode fare's dates were chosen, or "".
+
+    A month watch reports a fare on dates the user never named, so leaving this out would make a
+    chosen-by-fallback itinerary read exactly like one they picked. Rung 4 takes its own branch and
+    the word "cheapest" is not reachable from it: it priced 1st-of-month out and last-of-month back,
+    which is one arbitrary pair, and calling that the cheapest would make the reader book it
+    believing nothing better existed. (If Mar 1->Mar 31 is $412 while Mar 8->Mar 15 is $280, that
+    single word is the whole difference between a useful alert and an expensive one.)
+    """
+    basis = p.get("date_basis")
+    where = p.get("window")
+    if basis in ("native_month", "explicit_range", "calendar_cheapest"):
+        return f", cheapest in {where}" if where else ", the cheapest dates I found"
+    if basis == "assumed_month_bounds":
+        return ", on the only dates that site would quote"
+    return ""
 
 
 def _inventory(p):
@@ -248,6 +269,19 @@ def _fare_unsupported(p):
     return "Can't watch a fare", "cannot be watched - no page I can read carries a real fare"
 
 
+def _fare_unreadable(p):
+    # Distinct from _fare_unsupported, and the distinction is the user's next action. "Unsupported"
+    # means nothing on this host is cleared to read a fare, so there is nothing to wait for.
+    # "Unreadable" means the sites ARE cleared and did not answer this time -- a rotated bot
+    # challenge or a markup change -- so the monitor keeps running and may well heal itself.
+    return "Can't read the fare", "couldn't be read on any flight site I checked"
+
+
+def _fare_needs_itinerary(p):
+    return ("Needs dates",
+            "needs a departure and destination airport and travel dates before it can be watched")
+
+
 def _not_found(p):
     return "Can't find it", "couldn't be found by an online search yet"
 
@@ -264,11 +298,13 @@ KINDS = {
     "threshold": _threshold, "change": _change,
     "unreachable": _unreachable, "blocked": _blocked, "no_value": _no_value,
     "not_found": _not_found, "fare_unsupported": _fare_unsupported, "recovered": _recovered,
+    "fare_unreadable": _fare_unreadable, "fare_needs_itinerary": _fare_needs_itinerary,
 }
 # Kinds that report a PROBLEM with the monitor rather than a result from it. They read differently
 # (something needs your attention, rather than something you asked for happened) and they carry an
 # instruction, because an error the user cannot act on is just noise.
-PROBLEM_KINDS = {"unreachable", "blocked", "no_value", "not_found", "fare_unsupported"}
+PROBLEM_KINDS = {"unreachable", "blocked", "no_value", "not_found", "fare_unsupported",
+                 "fare_unreadable", "fare_needs_itinerary"}
 
 ADVICE = {
     "unreachable": "Double-check the link still opens in a browser. If the page moved, ask me to "
@@ -285,6 +321,15 @@ ADVICE = {
     "not_found": "I searched the web but couldn't find a page for this item. Ask me to set the "
                  "monitor up again with a direct link, or a better description of what to "
                  "look for.",
+    "fare_unreadable": "The flight sites I check didn't show me a readable fare for these dates "
+                       "this time - usually a site changing its layout or challenging automated "
+                       "visits. The monitor is still running and will pick the fare up again if it "
+                       "comes back, so there's nothing you need to do. If it stays quiet for a day "
+                       "or two, ask me and I'll look at which sites are failing.",
+    "fare_needs_itinerary": "A fare only exists for one route on one set of dates, so I can't "
+                            "watch 'flights to Vancouver' on its own. Tell me where you're leaving "
+                            "from, where you're going, and roughly when - a month is enough, I'll "
+                            "find the cheapest dates in it - and I'll set the watch up properly.",
 }
 
 
@@ -384,6 +429,87 @@ def render_subject(payload, limit=120):
     return subj[:limit - 1] + "…" if len(subj) > limit else subj
 
 
+def _pretty_day(iso):
+    """'2027-03-08' -> 'Mon 8 Mar 2027'. Unparseable input is returned as given rather than dropped."""
+    try:
+        d = _dt.datetime.strptime(iso, "%Y-%m-%d").date()
+    except Exception:
+        return iso
+    return f"{d.strftime('%a')} {d.day} {d.strftime('%b')} {d.year}"
+
+
+def _dates_lines(payload):
+    """The dates a flex-mode fare was actually found on. MANDATORY when they exist.
+
+    Without this the email says "March is $412" and the reader has to re-search the whole month to
+    find which week it was -- and if they guess a different week and see a higher number, they
+    conclude the alert was wrong. The dates are the deliverable, not a detail.
+    """
+    dep = payload.get("depart_found")
+    if not dep:
+        return []
+    ret = payload.get("ret_found")
+    line = f"  dates found: {_pretty_day(dep)}"
+    if ret:
+        line += f"  ->  {_pretty_day(ret)}"
+        try:
+            n = (_dt.datetime.strptime(ret, "%Y-%m-%d")
+                 - _dt.datetime.strptime(dep, "%Y-%m-%d")).days
+            if n > 0:
+                line += f"   ({n} night{'s' if n != 1 else ''})"
+        except Exception:
+            pass
+    out = [line]
+    src = payload.get("source")
+    if src:
+        how = {"native_month": "using its own whole-month search",
+               "explicit_range": "over the date range I asked for",
+               "calendar_cheapest": "read off its price calendar",
+               "assumed_month_bounds": "the only dates it would quote - NOT the cheapest in the "
+                                       "month",
+               "exact": "for the dates you gave me"}.get(payload.get("date_basis"), "")
+        out.append(f"  found on: {src}" + (f", {how}" if how else ""))
+    return out
+
+
+def _sources_lines(payload):
+    """What every other site said. This is what makes two sites finding different weeks legible
+    rather than looking like a contradiction, and it is where a weakest-rung reading is labelled
+    instead of being allowed to imply it found a cheapest."""
+    srcs = payload.get("sources") or []
+    if len(srcs) < 2:
+        return []
+    out = ["", "  also checked:"]
+    for s in srcs[1:]:
+        v = money(s.get("value"), payload.get("unit")) or "-"
+        when = ""
+        if s.get("depart_found"):
+            when = f"   {_pretty_day(s['depart_found'])}"
+            if s.get("ret_found"):
+                when += f" -> {_pretty_day(s['ret_found'])}"
+        tag = (" (only dates this site would quote)"
+               if s.get("date_basis") == "assumed_month_bounds" else "")
+        out.append(f"    {s.get('site', '?'):22s} {v}{when}{tag}")
+    return out
+
+
+def _link_lines(payload):
+    """Up to two links, labelled. Never reached by the SMS - render_sms strips URLs because carrier
+    gateways silently drop texts containing them.
+
+    Two because they answer different questions. "Book these exact dates" is built from the site's
+    ordinary exact-date template using the dates that were FOUND, so one click reproduces the deal
+    instead of dropping the reader back into a month search to hunt for it. "What I searched" is the
+    URL the watcher actually read, so the finding is auditable -- the reader can see what it saw.
+    """
+    url, searched = payload.get("url"), payload.get("searched_url")
+    if not url and not searched:
+        return []
+    if url and searched and url != searched:
+        return ["", f"  book these exact dates:  {url}", f"  what I searched:         {searched}"]
+    return ["", f"  {url or searched}"]
+
+
 def render_plain(payload):
     """Plain-text alternative. Same information, same order as the HTML."""
     who = (payload.get("to") or "").strip()
@@ -406,11 +532,12 @@ def render_plain(payload):
     # the page without anyone having to trust the wording above it.
     if payload.get("state_text"):
         lines.append(f"  the page says: {payload['state_text']}")
+    lines += _dates_lines(payload)
     cl = _conf_long(payload)
     if cl:
         lines.append(f"  {cl}")
-    if payload.get("url"):
-        lines += ["", f"  {payload['url']}"]
+    lines += _sources_lines(payload)
+    lines += _link_lines(payload)
     advice = ADVICE.get(payload.get("kind"))
     if advice:
         lines += ["", advice]
