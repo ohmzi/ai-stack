@@ -415,6 +415,43 @@ def robots_check(host, path):
     return True, status, False, None, delay
 
 
+def parse_keep_only(text):
+    """The engine names under use_default_settings.engines.keep_only, or None.
+
+    A hand parser rather than a regex or pyyaml, for two reasons. The entries carry trailing inline
+    comments AND multi-line comment continuations indented past the list item --
+
+        keep_only:
+          - google        # best long-tail recall for product and fare pages; also the highest
+                          # CAPTCHA risk here, and safe only because...
+          - brave         # genuinely independent crawl...
+
+    -- so a naive `(?:\\s*-\\s*\\S+\\s*\\n)+` matches nothing, which is how this silently returned
+    None on the first attempt. And pyyaml is not importable under both interpreters this repo has to
+    work with, while this file must load identically under /usr/bin/python3 and the hermes venv.
+    """
+    lines = (text or "").splitlines()
+    start = indent = None
+    for i, ln in enumerate(lines):
+        m = re.match(r"^(\s*)keep_only:\s*(?:#.*)?$", ln)
+        if m:
+            start, indent = i + 1, len(m.group(1))
+            break
+    if start is None:
+        return None
+    names = []
+    for ln in lines[start:]:
+        if not ln.strip() or re.match(r"^\s*#", ln):
+            continue                                    # blank, or a comment continuation
+        m = re.match(r"^(\s*)-\s*([^\s#]+)", ln)
+        if m and len(m.group(1)) > indent:
+            names.append(m.group(2))
+            continue
+        if len(ln) - len(ln.lstrip()) <= indent:
+            break                                       # dedented to a sibling key: block over
+    return names or None
+
+
 # ---------------------------------------------------------------- Phase 0: the stack
 
 def probe_stack():
@@ -427,15 +464,41 @@ def probe_stack():
 
     # 1. Is google actually on the monitors-only roster? docs/TRACKING_ENHANCEMENT.md:55 records
     #    that it went missing with nothing in the logs saying so, and that the fix is UNVERIFIED.
+    # Three-way drift, not just "is google there". The repo has TWO declarations of this roster --
+    # web_search.ENGINE_ORDER and settings.yml's keep_only -- and a test pins them to each other.
+    # That test passes while BOTH disagree with the running container, which is precisely the hole
+    # TRACKING_ENHANCEMENT.md:59 names: "Nothing in that file fails loudly. Verify every roster
+    # change against /config." A missing engine and an UNEXPECTED one are different bugs: missing
+    # means a fix did not land, unexpected means a removal did not land -- and startpage/qwant were
+    # removed for CAPTCHA-ing on sight, so their presence is spending an engine budget on nothing.
+    declared_code = declared_yaml = None
+    try:
+        declared_code = list(_load("web_search").ENGINE_ORDER)
+    except Exception:
+        pass
+    try:
+        y = open(os.path.join(HERE, "..", "compose", "searxng-hermes", "settings.yml")).read()
+        declared_yaml = parse_keep_only(y)
+    except Exception:
+        pass
     try:
         with urllib.request.urlopen("http://127.0.0.1:8889/config", timeout=8) as r:
             cfg = json.loads(r.read())
-        names = sorted({e.get("name") for e in cfg.get("engines", []) if e.get("name")})
-        out["searxng_8889"] = {"reachable": True, "engines": names,
-                              "google_present": "google" in names,
-                              "expected": ["bing", "brave", "google", "mojeek"]}
+        live = sorted({e.get("name") for e in cfg.get("engines", []) if e.get("name")})
+        want = set(declared_code or declared_yaml or [])
+        out["searxng_8889"] = {
+            "reachable": True,
+            "live": live,
+            "declared_in_web_search_py": declared_code,
+            "declared_in_settings_yml": declared_yaml,
+            "missing_from_live": sorted(want - set(live)),
+            "unexpected_in_live": sorted(set(live) - want),
+            "in_sync": bool(want) and want == set(live),
+        }
     except Exception as e:
-        out["searxng_8889"] = {"reachable": False, "error": f"{type(e).__name__}: {str(e)[:100]}"}
+        out["searxng_8889"] = {"reachable": False, "error": f"{type(e).__name__}: {str(e)[:100]}",
+                               "declared_in_web_search_py": declared_code,
+                               "declared_in_settings_yml": declared_yaml}
 
     # 2. What hermes will grant a job. api_server must NOT have terminal or browser.
     key = None
@@ -602,12 +665,30 @@ def print_stack(s):
     print("\n=== Phase 0: the running stack ===")
     sx = s.get("searxng_8889", {})
     if sx.get("reachable"):
-        print(f"{mark(sx.get('google_present'))} searxng :8889 engines = {sx['engines']}")
-        if not sx.get("google_present"):
-            print("      google ABSENT — TRACKING_ENHANCEMENT.md:55 predicted this and said the fix")
-            print("      is unverified. 'Nothing in that file fails loudly.'")
+        print(f"{mark(sx.get('in_sync'))} searxng :8889 live    = {sx['live']}")
+        print(f"     declared (web_search.py) = {sx.get('declared_in_web_search_py')}")
+        print(f"     declared (settings.yml)  = {sx.get('declared_in_settings_yml')}")
+        miss, extra = sx.get("missing_from_live") or [], sx.get("unexpected_in_live") or []
+        if miss:
+            print(f"     MISSING from the live container: {miss}")
+            print("       -> a roster ADDITION never landed. For google this is the exact failure")
+            print("          TRACKING_ENHANCEMENT.md:55 predicted and left unverified.")
+        if extra:
+            print(f"     UNEXPECTED in the live container: {extra}")
+            print("       -> a roster REMOVAL never landed. startpage and qwant were dropped in")
+            print("          a1b4558 for CAPTCHA-ing on the very first query from this IP, so every")
+            print("          fan-out is still paying for two engines that cannot answer.")
+        if miss or extra:
+            print("     Both point the same way: the container is running a config the repo no")
+            print("     longer contains. a1b4558 also changed the MOUNT (a rw directory -> a ro")
+            print("     single file), and a changed mount needs the container RECREATED, not")
+            print("     restarted: `docker compose up -d --force-recreate searxng-hermes`.")
+            print("     Note this does NOT affect flight fares — flight_watch.py issues no search")
+            print("     queries at all, by construction. It affects price_search.py.")
     else:
         print(f"??  searxng :8889 unreachable: {sx.get('error')}")
+        print(f"     declared (web_search.py) = {sx.get('declared_in_web_search_py')}")
+        print(f"     declared (settings.yml)  = {sx.get('declared_in_settings_yml')}")
 
     gw = s.get("gateway_8642", {})
     if gw.get("reachable"):
@@ -897,6 +978,34 @@ def selftest():
     ck("NOTHING is shippable yet — every site is untested",
        not [s for s in reg["sites"] if s["verdict"] in SHIPPABLE])
 
+    print("--- parse_keep_only: the inline-comment trap that made it silently return None ---")
+    real = open(os.path.join(HERE, "..", "compose", "searxng-hermes", "settings.yml")).read()
+    ko = parse_keep_only(real)
+    ck(f"the real settings.yml parses (got {ko})", ko == ["google", "brave", "mojeek", "bing"])
+    ck("trailing inline comments do not break an entry",
+       parse_keep_only("  engines:\n    keep_only:\n      - google   # a comment\n"
+                       "      - brave    # another\n") == ["google", "brave"])
+    ck("an indented multi-line comment continuation is skipped, not treated as an entry",
+       parse_keep_only("    keep_only:\n      - google   # first line\n"
+                       "                   # continuation that must not become an entry\n"
+                       "      - brave\n") == ["google", "brave"])
+    ck("a dedent to a sibling key ends the block",
+       parse_keep_only("    keep_only:\n      - google\n    other_key:\n      - notanengine\n")
+       == ["google"])
+    ck("absent keep_only returns None, not []", parse_keep_only("engines:\n  foo: 1\n") is None)
+
+    print("--- the roster drift check compares against the code, both directions ---")
+    ws = _load("web_search")
+    ck("web_search.ENGINE_ORDER agrees with settings.yml keep_only (the existing drift test)",
+       set(ws.ENGINE_ORDER) == set(ko))
+    live_observed = ["bing", "brave", "mojeek", "qwant", "startpage"]   # measured on this host
+    ck("...and BOTH disagree with the roster measured live on 2026-08-07",
+       set(ws.ENGINE_ORDER) != set(live_observed))
+    ck("google is what is missing from the live container",
+       sorted(set(ws.ENGINE_ORDER) - set(live_observed)) == ["google"])
+    ck("startpage and qwant are what is unexpectedly still in it",
+       sorted(set(live_observed) - set(ws.ENGINE_ORDER)) == ["qwant", "startpage"])
+
     print("--- the renderer is invoked with an explicit interpreter ---")
     ck("BROWSER_PY is an absolute path, not 'python3'", BROWSER_PY.startswith("/"))
     ck("BROWSER_PY is /usr/bin/python3 by default",
@@ -933,6 +1042,8 @@ def main():
     ap.add_argument("--registry", default=REGISTRY)
     ap.add_argument("--report", choices=("md", "json", "both"), default="both")
     a = ap.parse_args()
+    # Normalised so the printed artifact path is copy-pasteable rather than 'scripts/../docs/...'.
+    a.out = os.path.normpath(os.path.abspath(a.out))
 
     if a.selftest:
         return selftest()
