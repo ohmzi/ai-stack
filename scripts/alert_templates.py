@@ -266,7 +266,13 @@ def _no_value(p):
 def _fare_unsupported(p):
     # Short on purpose: the SMS has 140 ASCII characters and the reason does not fit in them. The
     # full explanation is the ADVICE entry, which only the email carries.
-    return "Can't watch a fare", "cannot be watched - no page I can read carries a real fare"
+    #
+    # NARROWED when flight_watch.py shipped. It used to mean "a fare cannot be watched", which is no
+    # longer true -- one can be read from a URL built out of an itinerary. It now means the narrower
+    # and still-real thing: no flight site has been MEASURED and cleared to read one yet. Hence
+    # "yet": the difference between a capability that does not exist and one that is not switched on
+    # is the difference between the user giving up and the user asking again next week.
+    return "Can't watch a fare yet", "can't be watched yet - no flight site is cleared to read one"
 
 
 def _fare_unreadable(p):
@@ -313,11 +319,13 @@ ADVICE = {
                "to watch a different page for it.",
     "no_value": "The page layout has probably changed. Ask me to set this monitor up again and "
                 "I'll re-read it.",
-    "fare_unsupported": "I can't watch flight fares. A fare only exists behind an airline's "
-                        "search form, for one specific itinerary and date, so the numbers I can "
-                        "read on a search result are 'from' teasers or a list of unrelated trips "
-                        "- and a price you can't book is worse than no alert. Ask me to watch a "
-                        "product price instead, or set a price alert on Google Flights directly.",
+    "fare_unsupported": "I can watch a flight fare, but only from a flight site that has been "
+                        "tested and cleared to read one, and right now none has been. A fare only "
+                        "exists for one route on one set of dates, so a price read off a general "
+                        "search result is a 'from' teaser or an unrelated trip - and a price you "
+                        "can't book is worse than no alert at all. Nothing is wrong with your "
+                        "monitor; the reading side just isn't switched on yet. In the meantime you "
+                        "can set a price alert on Google Flights directly.",
     "not_found": "I searched the web but couldn't find a page for this item. Ask me to set the "
                  "monitor up again with a direct link, or a better description of what to "
                  "look for.",

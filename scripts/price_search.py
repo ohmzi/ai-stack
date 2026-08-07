@@ -346,19 +346,26 @@ def pw_namespace(a, url):
 # static carries one. So this path refuses at the first run instead of alerting on a teaser — and
 # it refuses LOUDLY, once, rather than emitting not_found forever, because a monitor that cannot
 # work should say so rather than look busy.
-FARE_REFUSAL = ("a flight fare cannot be read from a search result — fare pages are built by "
-                "JavaScript, and the numbers that are readable are 'from' teasers or a list of "
-                "unrelated itineraries")
+# STILL REFUSED HERE, but no longer a dead end. scripts/flight_watch.py can read a fare, because it
+# BUILDS the URL from an itinerary instead of finding one — origin, destination and dates go into the
+# request, so a fare on the response is about that itinerary by construction. What this file cannot
+# do is supply the itinerary: "Toronto to Vancouver" has no dates in it, and inventing a pair would
+# be the same class of fabrication as the invented currency rule 5d-i exists to stop. So it names
+# what is missing and points at the tool that needs it.
+FARE_REFUSAL = ("a fare exists only for one origin, one destination and one set of dates, so it "
+                "cannot be found from a search query — the numbers a search result exposes are "
+                "'from' teasers or a list of unrelated itineraries")
 
 
 def refuse_fare(a):
     sname = a.state + ".search"
     sstate = pw.read_state(sname)
-    print(f"LOG: this monitor cannot work — {FARE_REFUSAL}")
+    print(f"LOG: this monitor needs an itinerary — {FARE_REFUSAL}. Use flight_watch.py with "
+          f"--origin, --dest and --depart (a month is enough).")
     if not sstate.get("fare_refused"):
         sstate["fare_refused"] = True
         pw.emit({"to": a.alert_to, "item": a.label or a.query, "url": None, "unit": a.unit or "$",
-                 "monitor": a.monitor, "schedule": a.schedule, "kind": "fare_unsupported"})
+                 "monitor": a.monitor, "schedule": a.schedule, "kind": "fare_needs_itinerary"})
     pw.write_state(sname, sstate)
     # Exit 0 deliberately: a non-zero exit would present a configuration limit as an
     # infrastructure error, and a run that raises has no LOG line at all.

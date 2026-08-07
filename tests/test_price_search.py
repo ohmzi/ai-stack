@@ -136,6 +136,10 @@ class SearchStub:
 def main():
     ps = load("/home/ohmz/ai-stack/scripts/price_search.py", "ps")
     hd = load("/home/ohmz/ai-stack/scripts/hermes_delivery.py", "hd")
+    # Loaded to assert the kind this file EMITS is a kind the renderer understands. Emitting a kind
+    # with no renderer is silent: describe() falls back to "Update / met the condition you set", so
+    # the alert still sends and still says nothing. That happened with fare_unreadable.
+    at = load("/home/ohmz/ai-stack/scripts/alert_templates.py", "at_ps")
     ps.pw.STATE_DIR = tempfile.mkdtemp()
 
     clock = [1000.0]
@@ -357,7 +361,7 @@ def main():
     check("...and clears the fruitless bookkeeping",
           st["fruitless_streak"] == 0 and st["not_found_alerted"] is False, st)
 
-    print("--- a fare watch is REFUSED, because a readable fare number is not a fare ---")
+    print("--- a fare watch is still refused HERE, but now it says what is missing ---")
     # Measured twice in production. Job 99cdcb68d1e1 found no page at all. Then job 52f821a8d3a2
     # resolved cheapflights.ca and texted "$358.72, under your $1,000.00 target" at HIGH confidence,
     # read from a JSON-LD offers ARRAY of 358.72/360.12/362.92/364.32 — a list of unrelated
@@ -370,15 +374,26 @@ def main():
     rc, out = run(state="t4", query="toronto to karachi", kind="fare", below=900)
     check("no search is spent at all", search.calls == calls, out)
     check("it exits 0 — a config limit is not an infrastructure error", rc == 0, rc)
-    check("the LOG line says it cannot work, and why",
+    # The message and the kind changed DELIBERATELY when scripts/flight_watch.py shipped: a fare CAN
+    # now be read, from a URL built out of an itinerary, so refusing with "this cannot work" became
+    # false. What this file still cannot do is invent the dates. The two STRUCTURAL assertions below
+    # are unchanged and are the ones that matter — no search is spent, and no number is ever emitted
+    # for a fare.
+    check("the LOG line says an itinerary is what is missing, and points at the tool",
           len(hd.LOG_RE.findall("## Response\n" + out)) == 1
-          and "cannot work" in out and "JavaScript" in out, out)
+          and "needs an itinerary" in out and "flight_watch.py" in out, out)
+    check("...and it no longer claims a fare cannot be watched at all",
+          "cannot work" not in out, out)
     data = [json.loads(m) for m in hd.ALERT_DATA_RE.findall("## Response\n" + out)]
     check("...and it alerts ONCE, as a problem kind",
-          len(data) == 1 and data[0]["kind"] == "fare_unsupported", out)
+          len(data) == 1 and data[0]["kind"] == "fare_needs_itinerary", out)
+    check("...a kind alert_templates can actually render",
+          at.KINDS.get("fare_needs_itinerary") is not None
+          and "fare_needs_itinerary" in at.PROBLEM_KINDS
+          and bool(at.ADVICE.get("fare_needs_itinerary")), out)
     rc, out = run(state="t4", query="toronto to karachi", kind="fare", below=900)
     check("a second run stays quiet but keeps telling the truth in the LOG",
-          "ALERT" not in out and "cannot work" in out, out)
+          "ALERT" not in out and "needs an itinerary" in out, out)
     check("no price is ever emitted for a fare", "358" not in out and "849" not in out, out)
 
     print("--- a reused --state name with a new query inherits nothing ---")
