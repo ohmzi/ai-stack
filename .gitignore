@@ -33,3 +33,9 @@ compose/ntfy/
 # Claude Code local state — settings.local.json is machine-specific, and worktrees/
 # holds full working copies of this repo (2+ MB of duplicate tree)
 .claude/
+
+# Flight recon: saved page bodies from scripts/flight_probe.py --save-html. Each is up to 512 KB of
+# a third party's HTML, and there are 19 hosts x 2 tiers x 2 modes of them. The probe.json and
+# findings.md ALONGSIDE them are the reviewable record and DO belong in git; the raw bodies are
+# working material, and the ones worth keeping get trimmed into tests/fixtures/flights/ by hand.
+docs/flight-recon/*/pages/

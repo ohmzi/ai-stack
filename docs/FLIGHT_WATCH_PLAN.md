@@ -204,7 +204,10 @@ Run under `/usr/bin/python3`. Per site, in registry order, one attempt each:
 - Tier 1: plain `urllib` with `price_watch.HEADERS` (free; a few sites may server-render enough).
 - Tier 2: Playwright headless via the Phase 2 browser subprocess, only if Tier 1 found no fare.
 
-Report schema (written to `~/.hermes/monitor-state/flight_probe/<ts>.json`, summary table to stdout):
+Report schema (written to `docs/flight-recon/<UTC>/probe.json` alongside a `findings.md`, summary
+table to stdout; `--save-html` additionally dumps the page bodies to `pages/`, which is gitignored
+because each is up to 512 KB of a third party's HTML — the ones worth keeping get trimmed into
+`tests/fixtures/flights/` by hand):
 
 ```json
 {"domain": "kayak.com", "tier": "browser", "http": 200, "bytes": 412881,
