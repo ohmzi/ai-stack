@@ -67,7 +67,23 @@
     "A month-mode fare is only valid if the fare AND its own departure and return dates come out of",
     "one itinerary element together. A whole-month results page legitimately lists dozens of",
     "itineraries -- the same page shape that produced the $358.72 incident -- so a bare minimum with",
-    "no dates attached is rejected, and the found dates are mandatory output on every alert surface."
+    "no dates attached is rejected, and the found dates are mandatory output on every alert surface.",
+    "",
+    "MEASURED 2026-08-07, plain tier, YYZ->YVR 2026-09-15/2026-09-22. Result: ZERO shippable.",
+    "  blocked        10   google, skiplagged, kayak, momondo, cheapflights, priceline, trip,",
+    "                      orbitz, travelocity, edreams",
+    "  no_deeplink     6   kiwi, cheapoair, onetravel, flighthub, airwander, flightsfinder",
+    "                      (never fetched — nothing learned about whether they block)",
+    "  js_only         1   skyscanner (708-byte React shell: not a block, just not rendered)",
+    "  unusable_role   2   secretflying, travelpricedrops (deal feeds, no O/D form)",
+    "",
+    "Read the counts by OWNER, not by host, or 19 sites look like 19 chances. kayak + momondo +",
+    "cheapflights are ONE Booking backend serving one identical 'What is a bot?' wall; priceline is",
+    "a fourth Booking property refusing separately; orbitz + travelocity are ONE Expedia backend",
+    "both answering 429 on the first request ever made to them. Ten blocks are about six operators.",
+    "",
+    "js_only is NOT a failure verdict. It means the page never rendered, so nothing has been learned",
+    "about whether a fare is readable — the browser tier is the test that decides."
   ],
   "version": 1,
   "canonical_probe": {
@@ -95,9 +111,9 @@
       "extract": null,
       "code_map": null,
       "caveat": null,
-      "verdict": "untested",
-      "measured_at": null,
-      "notes": "The ?q= natural-language form is used rather than the tfs= protobuf: tfs is a base64 protobuf whose field numbering is undocumented and has changed, while q= is a documented user-facing surface. Expected to be the single most authoritative source if it can be read at all. Priced first in registry order for that reason."
+      "verdict": "blocked",
+      "measured_at": "2026-08-07",
+      "notes": "PLAIN TIER 2026-08-07: HTTP 200, 512 KB, body contains 'captcha'. Served a challenge to plain urllib. It DID echo the requested dates, so the deep link is right and the itinerary reached it — only the client was rejected. Still the single best browser-tier candidate: if any site can answer, it is this one.  ||  The ?q= natural-language form is used rather than the tfs= protobuf: tfs is a base64 protobuf whose field numbering is undocumented and has changed, while q= is a documented user-facing surface. Expected to be the single most authoritative source if it can be read at all. Priced first in registry order for that reason."
     },
     {
       "domain": "kiwi.com",
@@ -115,9 +131,9 @@
       "extract": null,
       "code_map": "REQUIRED — kiwi routes by city slug ('toronto-canada'), not IATA. Recon must record the slug derivation or this site stays untested.",
       "caveat": null,
-      "verdict": "untested",
+      "verdict": "no_deeplink",
       "measured_at": null,
-      "notes": "Worth probing early despite the slug problem: kiwi's own frontend calls a documented-shaped GraphQL/umbrella endpoint, and a JSON endpoint beats DOM scraping on every axis — stability, size, and not needing a browser at all. Recon target #1 for the network tab."
+      "notes": "Not fetched: no url_template could be authored, because kiwi routes by city slug ('toronto-canada') rather than IATA and the derivation is unverified. Nothing was learned about whether it blocks. Chrome recon should capture the slug form and its JSON endpoint before this is retried.  ||  Worth probing early despite the slug problem: kiwi's own frontend calls a documented-shaped GraphQL/umbrella endpoint, and a JSON endpoint beats DOM scraping on every axis — stability, size, and not needing a browser at all. Recon target #1 for the network tab."
     },
     {
       "domain": "skiplagged.com",
@@ -135,9 +151,9 @@
       "extract": null,
       "code_map": null,
       "caveat": "hidden_city",
-      "verdict": "untested",
-      "measured_at": null,
-      "notes": "Its frontend calls an internal JSON search endpoint — recon should capture it. HIDDEN-CITY CAVEAT IS LOAD-BEARING: skiplagged's cheapest results are throwaway-ticket itineraries that forbid checked bags and breach airline terms. If this site ever supplies a winning fare, the alert must say so, because a fare the user cannot actually use as booked is the same class of wrong as a teaser."
+      "verdict": "blocked",
+      "measured_at": "2026-08-07",
+      "notes": "PLAIN TIER 2026-08-07: HTTP 403, 5.6 KB, 'enable javascript and cookies'. Hidden-city caveat stands regardless, so even a successful read would ship with a warning.  ||  Its frontend calls an internal JSON search endpoint — recon should capture it. HIDDEN-CITY CAVEAT IS LOAD-BEARING: skiplagged's cheapest results are throwaway-ticket itineraries that forbid checked bags and breach airline terms. If this site ever supplies a winning fare, the alert must say so, because a fare the user cannot actually use as booked is the same class of wrong as a teaser."
     },
     {
       "domain": "kayak.com",
@@ -155,9 +171,9 @@
       "extract": null,
       "code_map": null,
       "caveat": null,
-      "verdict": "untested",
-      "measured_at": null,
-      "notes": "URL grammar is stable and well known. Expectation before measuring: among the most headless-hostile sites on the web, and its results stream in progressively so a fare read too early is a partial-result fare. Note currency is USD on the .com — the user named kayak.com specifically."
+      "verdict": "blocked",
+      "measured_at": "2026-08-07",
+      "notes": "PLAIN TIER 2026-08-07: HTTP 200 but 305 KB titled 'What is a bot?'. An anti-bot wall dressed as a page — no fare-shaped number and neither date echoed. IDENTICAL wall to momondo.ca and cheapflights.ca: one Booking Holdings backend, three hosts, one measurement.  ||  URL grammar is stable and well known. Expectation before measuring: among the most headless-hostile sites on the web, and its results stream in progressively so a fare read too early is a partial-result fare. Note currency is USD on the .com — the user named kayak.com specifically."
     },
     {
       "domain": "momondo.ca",
@@ -175,9 +191,9 @@
       "extract": null,
       "code_map": null,
       "caveat": null,
-      "verdict": "untested",
-      "measured_at": null,
-      "notes": "Kayak's sibling on the same engine. If kayak.com blocks, expect this to block identically — and if BOTH return a fare, the owner field means they count once, not twice."
+      "verdict": "blocked",
+      "measured_at": "2026-08-07",
+      "notes": "PLAIN TIER 2026-08-07: HTTP 200, 267 KB, titled 'What is a bot?'. Same wall as kayak.com and cheapflights.ca — the owner field predicted this exactly.  ||  Kayak's sibling on the same engine. If kayak.com blocks, expect this to block identically — and if BOTH return a fare, the owner field means they count once, not twice."
     },
     {
       "domain": "cheapflights.ca",
@@ -195,9 +211,9 @@
       "extract": null,
       "code_map": null,
       "caveat": null,
-      "verdict": "untested",
-      "measured_at": null,
-      "notes": "THIS IS THE SITE THAT CAUSED THE REFUSAL. On 2026-08-07 its route page served a JSON-LD offers array holding 358.72, 360.12, 362.92, 364.32 and more — 97 distinct prices, a list of unrelated itineraries — and price_search reported the first one as a $358.72 fare at high confidence. price_watch.py:129 LISTING_MIN_PRICES was measured on this exact page. Any fare read here must survive itinerary binding, not just be a number on the page."
+      "verdict": "blocked",
+      "measured_at": "2026-08-07",
+      "notes": "PLAIN TIER 2026-08-07: HTTP 200, 252 KB, titled 'What is a bot?'. Worth recording precisely because this is the site that produced the $358.72 incident: the 97-price route page that fabricated a fare is now behind a bot wall, so the old failure is no longer even reachable by this path.  ||  THIS IS THE SITE THAT CAUSED THE REFUSAL. On 2026-08-07 its route page served a JSON-LD offers array holding 358.72, 360.12, 362.92, 364.32 and more — 97 distinct prices, a list of unrelated itineraries — and price_search reported the first one as a $358.72 fare at high confidence. price_watch.py:129 LISTING_MIN_PRICES was measured on this exact page. Any fare read here must survive itinerary binding, not just be a number on the page."
     },
     {
       "domain": "priceline.com",
@@ -215,9 +231,9 @@
       "extract": null,
       "code_map": null,
       "caveat": null,
-      "verdict": "untested",
-      "measured_at": null,
-      "notes": "The dated-leg URL grammar takes YYYYMMDD without separators in some versions and ISO in others; recon must pin which. Fourth Booking-Holdings property in this roster — the owner field is doing real work here."
+      "verdict": "blocked",
+      "measured_at": "2026-08-07",
+      "notes": "PLAIN TIER 2026-08-07: HTTP 403, 5.4 KB, 'access to this page has been denied'. Fourth Booking Holdings property, fourth refusal.  ||  The dated-leg URL grammar takes YYYYMMDD without separators in some versions and ISO in others; recon must pin which. Fourth Booking-Holdings property in this roster — the owner field is doing real work here."
     },
     {
       "domain": "skyscanner.ca",
@@ -236,9 +252,9 @@
       "extract": null,
       "code_map": null,
       "caveat": null,
-      "verdict": "untested",
-      "measured_at": null,
-      "notes": "Lowercase IATA and YYMMDD dates — the only site in the roster using the short date form, which is why {origin_lc}/{depart_ymd} placeholders exist at all. Expectation before measuring: aggressive bot detection, on a par with kayak."
+      "verdict": "js_only",
+      "measured_at": "2026-08-07",
+      "notes": "PLAIN TIER 2026-08-07: HTTP 200 and only 708 BYTES — a bare React shell ('<div id=\"root\">' plus 'You need to enable JavaScript to run this app'). NOT a block and NOT an empty site: the page simply has not rendered. THE ONE GENUINE BROWSER-TIER CANDIDATE in the roster, and the only site whose month_url_template is already authored.  ||  Lowercase IATA and YYMMDD dates — the only site in the roster using the short date form, which is why {origin_lc}/{depart_ymd} placeholders exist at all. Expectation before measuring: aggressive bot detection, on a par with kayak."
     },
     {
       "domain": "trip.com",
@@ -256,9 +272,9 @@
       "extract": null,
       "code_map": null,
       "caveat": null,
-      "verdict": "untested",
-      "measured_at": null,
-      "notes": "Takes currency and locale as explicit query parameters, which is unusually cooperative and makes the currency field verifiable rather than assumed. Its frontend calls a JSON search endpoint worth capturing."
+      "verdict": "blocked",
+      "measured_at": "2026-08-07",
+      "notes": "PLAIN TIER 2026-08-07: HTTP 432 with a 17-byte body reading 'whaleguard block' — Trip.com's WAF, refusing before any page exists. 432 is non-standard, which is why a hand-listed status check missed it.  ||  Takes currency and locale as explicit query parameters, which is unusually cooperative and makes the currency field verifiable rather than assumed. Its frontend calls a JSON search endpoint worth capturing."
     },
     {
       "domain": "orbitz.com",
@@ -276,9 +292,9 @@
       "extract": null,
       "code_map": null,
       "caveat": null,
-      "verdict": "untested",
-      "measured_at": null,
-      "notes": "Expedia Group's shared Flights-Search grammar; the TANYT suffix means 'any time of day'. Sibling of travelocity.ca below — same engine, same expected blocking behaviour, counts once in a quorum."
+      "verdict": "blocked",
+      "measured_at": "2026-08-07",
+      "notes": "PLAIN TIER 2026-08-07: HTTP 429, 244 KB. Rate-limited on the FIRST request this host ever made to it, so it is fingerprinting rather than throttling. Same Expedia backend as travelocity.ca, same result.  ||  Expedia Group's shared Flights-Search grammar; the TANYT suffix means 'any time of day'. Sibling of travelocity.ca below — same engine, same expected blocking behaviour, counts once in a quorum."
     },
     {
       "domain": "travelocity.ca",
@@ -296,9 +312,9 @@
       "extract": null,
       "code_map": null,
       "caveat": null,
-      "verdict": "untested",
-      "measured_at": null,
-      "notes": "Same grammar as orbitz.com but a Canadian storefront, so CAD. If exactly one Expedia property survives recon, prefer this one: a CAD fare needs no conversion to compare against a CAD target."
+      "verdict": "blocked",
+      "measured_at": "2026-08-07",
+      "notes": "PLAIN TIER 2026-08-07: HTTP 429, 243 KB. Identical to orbitz.com — one Expedia backend, two hosts.  ||  Same grammar as orbitz.com but a Canadian storefront, so CAD. If exactly one Expedia property survives recon, prefer this one: a CAD fare needs no conversion to compare against a CAD target."
     },
     {
       "domain": "edreams.com",
@@ -316,9 +332,9 @@
       "extract": null,
       "code_map": null,
       "caveat": null,
-      "verdict": "untested",
-      "measured_at": null,
-      "notes": "The itinerary lives in a HASH FRAGMENT, which is never sent to the server — so this URL cannot work without a browser under any circumstances, and a plain-urllib tier-1 probe of it is guaranteed to be meaningless. Skip tier 1 for this site."
+      "verdict": "blocked",
+      "measured_at": "2026-08-07",
+      "notes": "PLAIN TIER 2026-08-07: HTTP 403, 8.4 KB. Note its itinerary lives in a URL hash fragment, which is never sent to the server, so the plain tier could never have worked here even without the 403.  ||  The itinerary lives in a HASH FRAGMENT, which is never sent to the server — so this URL cannot work without a browser under any circumstances, and a plain-urllib tier-1 probe of it is guaranteed to be meaningless. Skip tier 1 for this site."
     },
     {
       "domain": "cheapoair.ca",
@@ -336,9 +352,9 @@
       "extract": null,
       "code_map": null,
       "caveat": null,
-      "verdict": "untested",
+      "verdict": "no_deeplink",
       "measured_at": null,
-      "notes": "No deep-link grammar authored: Fareportal's listing URL carries an encoded search token rather than plain slots, so a template written from recall would be a fabrication. Recon must either capture a slot-bearing URL or set verdict=no_deeplink. Sibling of onetravel.com."
+      "notes": "Not fetched: no slot-bearing URL could be authored (Fareportal's listing URL carries an encoded search token). Nothing learned about blocking.  ||  No deep-link grammar authored: Fareportal's listing URL carries an encoded search token rather than plain slots, so a template written from recall would be a fabrication. Recon must either capture a slot-bearing URL or set verdict=no_deeplink. Sibling of onetravel.com."
     },
     {
       "domain": "onetravel.com",
@@ -356,9 +372,9 @@
       "extract": null,
       "code_map": null,
       "caveat": null,
-      "verdict": "untested",
+      "verdict": "no_deeplink",
       "measured_at": null,
-      "notes": "Fareportal's other storefront, same engine as cheapoair.ca. If one gets a deep link the other almost certainly takes the same grammar with a different host — but they still count as ONE source in a quorum."
+      "notes": "Not fetched: same Fareportal engine as cheapoair.ca, same missing deep link.  ||  Fareportal's other storefront, same engine as cheapoair.ca. If one gets a deep link the other almost certainly takes the same grammar with a different host — but they still count as ONE source in a quorum."
     },
     {
       "domain": "flighthub.com",
@@ -376,9 +392,9 @@
       "extract": null,
       "code_map": null,
       "caveat": null,
-      "verdict": "untested",
+      "verdict": "no_deeplink",
       "measured_at": null,
-      "notes": "Canadian OTA. Results are believed to live behind a POSTed search that returns a session-scoped URL, i.e. no_deeplink — but that is an expectation, not a measurement, so it is recorded here rather than acted on. Recon decides."
+      "notes": "Not fetched: results believed to sit behind a POSTed search returning a session-scoped URL. Unmeasured, so recorded as unknown rather than blocked.  ||  Canadian OTA. Results are believed to live behind a POSTed search that returns a session-scoped URL, i.e. no_deeplink — but that is an expectation, not a measurement, so it is recorded here rather than acted on. Recon decides."
     },
     {
       "domain": "airwander.com",
@@ -396,9 +412,9 @@
       "extract": null,
       "code_map": null,
       "caveat": "stopover_specialist",
-      "verdict": "untested",
+      "verdict": "no_deeplink",
       "measured_at": null,
-      "notes": "A multi-stop / stopover specialist, not a plain A-to-B engine: its whole product is inserting a stopover city. For a simple round trip it may return nothing useful even when it works perfectly. Small site, so likely the least defended in the roster — worth probing precisely because the well-known ones are expected to block."
+      "notes": "Not fetched: no URL grammar authored. Multi-stop specialist, so a plain round trip may not be its question even if it can be reached.  ||  A multi-stop / stopover specialist, not a plain A-to-B engine: its whole product is inserting a stopover city. For a simple round trip it may return nothing useful even when it works perfectly. Small site, so likely the least defended in the roster — worth probing precisely because the well-known ones are expected to block."
     },
     {
       "domain": "flightsfinder.com",
@@ -416,9 +432,9 @@
       "extract": null,
       "code_map": null,
       "caveat": null,
-      "verdict": "untested",
+      "verdict": "no_deeplink",
       "measured_at": null,
-      "notes": "Small UK metasearch. Same reasoning as airwander: low traffic often means low defences. May prove to be redirect_only — a referral shell that shows a teaser and hands off to an OTA for the real price."
+      "notes": "Not fetched: no URL grammar authored. Small metasearch, plausibly the least defended host in the roster — worth Chrome recon before writing it off.  ||  Small UK metasearch. Same reasoning as airwander: low traffic often means low defences. May prove to be redirect_only — a referral shell that shows a teaser and hands off to an OTA for the real price."
     },
     {
       "domain": "secretflying.com",
@@ -437,9 +453,9 @@
       "extract": null,
       "code_map": null,
       "caveat": "not_an_itinerary_source",
-      "verdict": "untested",
+      "verdict": "unusable_role",
       "measured_at": null,
-      "notes": "AN ERROR-FARE AND DEAL FEED, NOT A SEARCH ENGINE. It cannot answer 'YYZ to YVR on Sep 15' — there is no form to ask. Included because the user named it and because it is genuinely useful in a different way: a cheap RSS poll can spot a published deal that MATCHES a watched route, with no browser and no bot risk. It supplies a SECONDARY signal ('a deal was posted for your route'), never the fare a threshold is compared against, because the posted price is a third party's claim about a fare at an unknown time — the same reason web_search.snippet_prior refuses to let a snippet number become a price."
+      "notes": "Not applicable by role: a deal feed with no origin/destination form. It cannot express 'YYZ-YVR on Sep 15' at any tier. Its RSS remains useful as a SECONDARY route-match signal, never as a fare source.  ||  AN ERROR-FARE AND DEAL FEED, NOT A SEARCH ENGINE. It cannot answer 'YYZ to YVR on Sep 15' — there is no form to ask. Included because the user named it and because it is genuinely useful in a different way: a cheap RSS poll can spot a published deal that MATCHES a watched route, with no browser and no bot risk. It supplies a SECONDARY signal ('a deal was posted for your route'), never the fare a threshold is compared against, because the posted price is a third party's claim about a fare at an unknown time — the same reason web_search.snippet_prior refuses to let a snippet number become a price."
     },
     {
       "domain": "travelpricedrops.com",
@@ -458,9 +474,9 @@
       "extract": null,
       "code_map": null,
       "caveat": "not_an_itinerary_source",
-      "verdict": "untested",
+      "verdict": "unusable_role",
       "measured_at": null,
-      "notes": "Same class as secretflying.com: a deal feed with no origin/destination query. feed_url is null because whether it publishes RSS at all is unverified — recon confirms or sets unusable_role. Secondary signal only, on the same reasoning."
+      "notes": "Not applicable by role, as secretflying.com. Whether it publishes RSS at all is still unverified.  ||  Same class as secretflying.com: a deal feed with no origin/destination query. feed_url is null because whether it publishes RSS at all is unverified — recon confirms or sets unusable_role. Secondary signal only, on the same reasoning."
     }
   ],
   "vocab_date_flex": [
@@ -470,5 +486,15 @@
     "none",
     "unknown",
     "n/a"
+  ],
+  "vocab_verdict": [
+    "untested",
+    "usable",
+    "usable_with_browser",
+    "js_only",
+    "no_fare",
+    "blocked",
+    "no_deeplink",
+    "unusable_role"
   ]
 }

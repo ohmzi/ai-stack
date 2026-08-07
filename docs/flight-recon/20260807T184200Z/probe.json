@@ -1,0 +1,1177 @@
+{
+  "probe_schema": 1,
+  "started_at": "20260807T184200Z",
+  "interpreter": "/usr/bin/python3 3.12.3",
+  "argv": "/home/ohmz/ai-stack/scripts/flight_probe.py --tier plain --save-html",
+  "mode": "exact",
+  "itinerary": {
+    "origin": "YYZ",
+    "dest": "YVR",
+    "depart": "2026-09-15",
+    "ret": "2026-09-22",
+    "adults": 1
+  },
+  "control_itinerary": {
+    "depart": "2026-09-29",
+    "ret": "2026-10-06"
+  },
+  "stack": {
+    "checked_at": "2026-08-07T18:42:00+00:00",
+    "searxng_8889": {
+      "reachable": true,
+      "live": [
+        "bing",
+        "brave",
+        "mojeek"
+      ],
+      "declared_in_web_search_py": [
+        "google",
+        "brave",
+        "mojeek",
+        "bing"
+      ],
+      "declared_in_settings_yml": [
+        "google",
+        "brave",
+        "mojeek",
+        "bing"
+      ],
+      "missing_from_live": [
+        "google"
+      ],
+      "unexpected_in_live": [],
+      "in_sync": false
+    },
+    "gateway_8642": {
+      "reachable": true,
+      "toolsets": {
+        "object": "list",
+        "platform": "api_server",
+        "data": [
+          {
+            "name": "web",
+            "label": "\ud83d\udd0d Web Search & Scraping",
+            "description": "web_search, web_extract",
+            "enabled": true,
+            "configured": true,
+            "tools": [
+              "web_extract",
+              "web_search"
+            ]
+          },
+          {
+            "name": "browser",
+            "label": "\ud83c\udf10 Browser Automation",
+            "description": "navigate, click, type, scroll",
+            "enabled": false,
+            "configured": true,
+            "tools": [
+              "browser_back",
+              "browser_cdp",
+              "browser_click",
+              "browser_console",
+              "browser_dialog",
+              "browser_get_images",
+              "browser_navigate",
+              "browser_press",
+              "browser_scroll",
+              "browser_snapshot",
+              "browser_type",
+              "browser_vision",
+              "web_search"
+            ]
+          },
+          {
+            "name": "terminal",
+            "label": "\ud83d\udcbb Terminal & Processes",
+            "description": "terminal, process",
+            "enabled": false,
+            "configured": true,
+            "tools": [
+              "close_terminal",
+              "focus_pane",
+              "open_preview",
+              "process",
+              "read_terminal",
+              "terminal"
+            ]
+          },
+          {
+            "name": "file",
+            "label": "\ud83d\udcc1 File Operations",
+            "description": "read, write, patch, search",
+            "enabled": true,
+            "configured": true,
+            "tools": [
+              "patch",
+              "read_file",
+              "search_files",
+              "write_file"
+            ]
+          },
+          {
+            "name": "code_execution",
+            "label": "\u26a1 Code Execution",
+            "description": "execute_code",
+            "enabled": false,
+            "configured": true,
+            "tools": [
+              "execute_code"
+            ]
+          },
+          {
+            "name": "vision",
+            "label": "\ud83d\udc41\ufe0f  Vision / Image Analysis",
+            "description": "vision_analyze",
+            "enabled": false,
+            "configured": false,
+            "tools": [
+              "vision_analyze"
+            ]
+          },
+          {
+            "name": "video",
+            "label": "\ud83c\udfac Video Analysis",
+            "description": "video_analyze (requires video-capable model)",
+            "enabled": false,
+            "configured": true,
+            "tools": [
+              "video_analyze"
+            ]
+          },
+          {
+            "name": "image_gen",
+            "label": "\ud83c\udfa8 Image Generation",
+            "description": "image_generate",
+            "enabled": false,
+            "configured": true,
+            "tools": [
+              "image_generate"
+            ]
+          },
+          {
+            "name": "video_gen",
+            "label": "\ud83c\udfac Video Generation",
+            "description": "video_generate (text/image/reference)",
+            "enabled": false,
+            "configured": true,
+            "tools": [
+              "video_generate",
+              "xai_video_edit",
+              "xai_video_extend"
+            ]
+          },
+          {
+            "name": "x_search",
+            "label": "\ud83d\udc26 X (Twitter) Search",
+            "description": "x_search (requires xAI OAuth or XAI_API_KEY)",
+            "enabled": false,
+            "configured": true,
+            "tools": [
+              "x_search"
+            ]
+          },
+          {
+            "name": "tts",
+            "label": "\ud83d\udd0a Text-to-Speech",
+            "description": "text_to_speech",
+            "enabled": false,
+            "configured": true,
+            "tools": [
+              "text_to_speech"
+            ]
+          },
+          {
+            "name": "stt",
+            "label": "\ud83c\udf99\ufe0f Speech-to-Text",
+            "description": "voice transcription (gateway voice messages + voice mode)",
+            "enabled": false,
+            "configured": true,
+            "tools": []
+          },
+          {
+            "name": "skills",
+            "label": "\ud83d\udcda Skills",
+            "description": "list, view, manage",
+            "enabled": true,
+            "configured": true,
+            "tools": [
+              "skill_manage",
+              "skill_view",
+              "skills_list"
+            ]
+          },
+          {
+            "name": "todo",
+            "label": "\ud83d\udccb Task Planning",
+            "description": "todo",
+            "enabled": true,
+            "configured": true,
+            "tools": [
+              "todo"
+            ]
+          },
+          {
+            "name": "memory",
+            "label": "\ud83d\udcbe Memory",
+            "description": "persistent memory across sessions",
+            "enabled": true,
+            "configured": true,
+            "tools": [
+              "memory"
+            ]
+          },
+          {
+            "name": "context_engine",
+            "label": "\ud83e\udde9 Context Engine",
+            "description": "runtime tools from the active context engine",
+            "enabled": false,
+            "configured": true,
+            "tools": []
+          },
+          {
+            "name": "session_search",
+            "label": "\ud83d\udd0e Session Search",
+            "description": "search past conversations",
+            "enabled": true,
+            "configured": true,
+            "tools": [
+              "session_search"
+            ]
+          },
+          {
+            "name": "clarify",
+            "label": "\u2753 Clarifying Questions",
+            "description": "clarify",
+            "enabled": false,
+            "configured": true,
+            "tools": [
+              "clarify"
+            ]
+          },
+          {
+            "name": "delegation",
+            "label": "\ud83d\udc65 Task Delegation",
+            "description": "delegate_task",
+            "enabled": false,
+            "configured": true,
+            "tools": [
+              "delegate_task"
+            ]
+          },
+          {
+            "name": "cronjob",
+            "label": "\u23f0 Cron Jobs",
+            "description": "create/list/update/pause/resume/run, with optional attached skills",
+            "enabled": true,
+            "configured": true,
+            "tools": [
+              "cronjob"
+            ]
+          },
+          {
+            "name": "homeassistant",
+            "label": "\ud83c\udfe0 Home Assistant",
+            "description": "smart home device control",
+            "enabled": false,
+            "configured": false,
+            "tools": [
+              "ha_call_service",
+              "ha_get_state",
+              "ha_list_entities",
+              "ha_list_services"
+            ]
+          },
+          {
+            "name": "spotify",
+            "label": "\ud83c\udfb5 Spotify",
+            "description": "playback, search, playlists, library",
+            "enabled": false,
+            "configured": true,
+            "tools": [
+              "spotify_albums",
+              "spotify_devices",
+              "spotify_library",
+              "spotify_playback",
+              "spotify_playlists",
+              "spotify_queue",
+              "spotify_search"
+            ]
+          },
+          {
+            "name": "discord",
+            "label": "\ud83d\udcac Discord (read/participate)",
+            "description": "fetch messages, search members, create thread",
+            "enabled": false,
+            "configured": true,
+            "tools": [
+              "discord"
+            ]
+          },
+          {
+            "name": "discord_admin",
+            "label": "\ud83d\udee1\ufe0f  Discord Server Admin",
+            "description": "list channels/roles, pin, assign roles",
+            "enabled": false,
+            "configured": true,
+            "tools": [
+              "discord_admin"
+            ]
+          },
+          {
+            "name": "yuanbao",
+            "label": "\ud83e\udd16 Yuanbao",
+            "description": "group info, member queries, DM",
+            "enabled": false,
+            "configured": true,
+            "tools": [
+              "yb_query_group_info",
+              "yb_query_group_members",
+              "yb_search_sticker",
+              "yb_send_dm",
+              "yb_send_sticker"
+            ]
+          },
+          {
+            "name": "computer_use",
+            "label": "\ud83d\uddb1\ufe0f  Computer Use (macOS/Windows/Linux)",
+            "description": "background desktop control via cua-driver",
+            "enabled": false,
+            "configured": true,
+            "tools": [
+              "computer_use"
+            ]
+          }
+        ]
+      }
+    },
+    "playwright": {
+      "usr_bin_python3": {
+        "interpreter": "/usr/bin/python3",
+        "import_ok": true,
+        "detail": [
+          "ok",
+          "3.12.3"
+        ],
+        "stderr": ""
+      },
+      "venv_python": {
+        "interpreter": "/home/ohmz/.hermes/hermes-agent/venv/bin/python",
+        "import_ok": false,
+        "detail": [],
+        "stderr": "Traceback (most recent call last):\n  File \"<string>\", line 1, in <module>\nModuleNotFoundError: No module named 'playwright'"
+      },
+      "explicit_path_beats_venv_PATH": true,
+      "browsers": [
+        ".links",
+        "chromium-1148",
+        "chromium_headless_shell-1148",
+        "ffmpeg-1010"
+      ]
+    },
+    "fare_jobs": [],
+    "recipients": {},
+    "orphaned_state": [
+      {
+        "state": "YYZ-YVR-flight.search",
+        "fare_refused": null,
+        "alerted_price": null,
+        "item": null,
+        "url": null,
+        "has_itinerary_in_url": false
+      },
+      {
+        "state": "yto-yvr",
+        "fare_refused": null,
+        "alerted_price": 358.72,
+        "item": "C$ 146+ Cheap Flights from Toronto to Vancouver",
+        "url": "https://www.cheapflights.ca/flights-to-Vancouver/Toronto/",
+        "has_itinerary_in_url": false
+      },
+      {
+        "state": "yto-yvr.search",
+        "fare_refused": true,
+        "alerted_price": null,
+        "item": null,
+        "url": "https://www.cheapflights.ca/flights-to-Vancouver/Toronto/",
+        "has_itinerary_in_url": false
+      },
+      {
+        "state": "yxx-yyz-flight.search",
+        "fare_refused": null,
+        "alerted_price": null,
+        "item": null,
+        "url": null,
+        "has_itinerary_in_url": false
+      },
+      {
+        "state": "yyz-yvr-flights.search",
+        "fare_refused": null,
+        "alerted_price": null,
+        "item": null,
+        "url": null,
+        "has_itinerary_in_url": false
+      }
+    ]
+  },
+  "results": [
+    {
+      "domain": "google.com",
+      "owner": "google",
+      "role": "itinerary_search",
+      "date_flex": "unknown",
+      "tier": "plain",
+      "mode": "exact",
+      "requested": {
+        "origin": "YYZ",
+        "dest": "YVR",
+        "depart": "2026-09-15",
+        "ret": "2026-09-22"
+      },
+      "error": null,
+      "url": "https://www.google.com/travel/flights?q=Flights%20from%20YYZ%20to%20YVR%20on%202026-09-15%20through%202026-09-22&curr=CAD&hl=en-CA",
+      "robots": {
+        "fetched": true,
+        "status": 200,
+        "disallows_path": false,
+        "rule": null,
+        "crawl_delay": null
+      },
+      "elapsed_ms": 596,
+      "http_status": 200,
+      "bytes": 1203013,
+      "robot_wall": true,
+      "wall_signals": [
+        "captcha"
+      ],
+      "robot_wall_pw_fetch_would_see": false,
+      "consent_wall": false,
+      "title": "Google Flights",
+      "itinerary_echoed": {
+        "origin": true,
+        "dest": true,
+        "depart": true,
+        "ret": true
+      },
+      "prices": {
+        "count": 0,
+        "distinct": 0,
+        "min": null,
+        "max": null,
+        "teaser_flagged": 0,
+        "bound_to_dates": 0,
+        "sample_bound": []
+      },
+      "control": {
+        "distinct": 0,
+        "min": null,
+        "identical_to_primary": false
+      },
+      "saved_html": "pages/google.com.plain.exact.html",
+      "verdict": "blocked",
+      "reason": "served an interstitial instead of the page (captcha)"
+    },
+    {
+      "domain": "kiwi.com",
+      "owner": "kiwi",
+      "role": "itinerary_search",
+      "date_flex": "unknown",
+      "tier": "plain",
+      "mode": "exact",
+      "requested": {
+        "origin": "YYZ",
+        "dest": "YVR",
+        "depart": "2026-09-15",
+        "ret": "2026-09-22"
+      },
+      "error": null,
+      "url": null,
+      "verdict": "no_deeplink",
+      "reason": "no URL template carries the itinerary; the fare is behind a form"
+    },
+    {
+      "domain": "skiplagged.com",
+      "owner": "skiplagged",
+      "role": "itinerary_search",
+      "date_flex": "unknown",
+      "tier": "plain",
+      "mode": "exact",
+      "requested": {
+        "origin": "YYZ",
+        "dest": "YVR",
+        "depart": "2026-09-15",
+        "ret": "2026-09-22"
+      },
+      "error": "HTTP 403",
+      "url": "https://skiplagged.com/flights/YYZ/YVR/2026-09-15/2026-09-22",
+      "robots": {
+        "fetched": true,
+        "status": 200,
+        "disallows_path": false,
+        "rule": null,
+        "crawl_delay": 1.0
+      },
+      "elapsed_ms": 83,
+      "http_status": 403,
+      "bytes": 5580,
+      "robot_wall": true,
+      "wall_signals": [
+        "enable javascript and cookies"
+      ],
+      "robot_wall_pw_fetch_would_see": false,
+      "consent_wall": true,
+      "title": "Just a moment...",
+      "itinerary_echoed": {
+        "origin": true,
+        "dest": true,
+        "depart": true,
+        "ret": true
+      },
+      "prices": {
+        "count": 0,
+        "distinct": 0,
+        "min": null,
+        "max": null,
+        "teaser_flagged": 0,
+        "bound_to_dates": 0,
+        "sample_bound": []
+      },
+      "control": {
+        "distinct": 0,
+        "min": null,
+        "identical_to_primary": false
+      },
+      "saved_html": "pages/skiplagged.com.plain.exact.html",
+      "verdict": "blocked",
+      "reason": "served an interstitial instead of the page (enable javascript and cookies)"
+    },
+    {
+      "domain": "kayak.com",
+      "owner": "booking_holdings",
+      "role": "itinerary_search",
+      "date_flex": "unknown",
+      "tier": "plain",
+      "mode": "exact",
+      "requested": {
+        "origin": "YYZ",
+        "dest": "YVR",
+        "depart": "2026-09-15",
+        "ret": "2026-09-22"
+      },
+      "error": null,
+      "url": "https://www.kayak.com/flights/YYZ-YVR/2026-09-15/2026-09-22?sort=price_a",
+      "robots": {
+        "fetched": true,
+        "status": 200,
+        "disallows_path": true,
+        "rule": "Disallow: /flights/",
+        "crawl_delay": null
+      },
+      "elapsed_ms": 514,
+      "http_status": 200,
+      "bytes": 303567,
+      "robot_wall": false,
+      "wall_signals": [],
+      "robot_wall_pw_fetch_would_see": false,
+      "consent_wall": true,
+      "title": "What is a bot?",
+      "itinerary_echoed": {
+        "origin": false,
+        "dest": false,
+        "depart": false,
+        "ret": false
+      },
+      "prices": {
+        "count": 0,
+        "distinct": 0,
+        "min": null,
+        "max": null,
+        "teaser_flagged": 0,
+        "bound_to_dates": 0,
+        "sample_bound": []
+      },
+      "control": {
+        "distinct": 0,
+        "min": null,
+        "identical_to_primary": false
+      },
+      "saved_html": "pages/kayak.com.plain.exact.html",
+      "verdict": "no_fare",
+      "reason": "neither requested date appears on the page \u2014 it is about no itinerary"
+    },
+    {
+      "domain": "momondo.ca",
+      "owner": "booking_holdings",
+      "role": "itinerary_search",
+      "date_flex": "unknown",
+      "tier": "plain",
+      "mode": "exact",
+      "requested": {
+        "origin": "YYZ",
+        "dest": "YVR",
+        "depart": "2026-09-15",
+        "ret": "2026-09-22"
+      },
+      "error": null,
+      "url": "https://www.momondo.ca/flight-search/YYZ-YVR/2026-09-15/2026-09-22?sort=price_a",
+      "robots": {
+        "fetched": true,
+        "status": 200,
+        "disallows_path": true,
+        "rule": "Disallow: /flight-search/",
+        "crawl_delay": null
+      },
+      "elapsed_ms": 534,
+      "http_status": 200,
+      "bytes": 266385,
+      "robot_wall": false,
+      "wall_signals": [],
+      "robot_wall_pw_fetch_would_see": false,
+      "consent_wall": true,
+      "title": "What is a bot?",
+      "itinerary_echoed": {
+        "origin": false,
+        "dest": false,
+        "depart": false,
+        "ret": false
+      },
+      "prices": {
+        "count": 0,
+        "distinct": 0,
+        "min": null,
+        "max": null,
+        "teaser_flagged": 0,
+        "bound_to_dates": 0,
+        "sample_bound": []
+      },
+      "control": {
+        "distinct": 0,
+        "min": null,
+        "identical_to_primary": false
+      },
+      "saved_html": "pages/momondo.ca.plain.exact.html",
+      "verdict": "no_fare",
+      "reason": "neither requested date appears on the page \u2014 it is about no itinerary"
+    },
+    {
+      "domain": "cheapflights.ca",
+      "owner": "booking_holdings",
+      "role": "itinerary_search",
+      "date_flex": "unknown",
+      "tier": "plain",
+      "mode": "exact",
+      "requested": {
+        "origin": "YYZ",
+        "dest": "YVR",
+        "depart": "2026-09-15",
+        "ret": "2026-09-22"
+      },
+      "error": null,
+      "url": "https://www.cheapflights.ca/flight-search/YYZ-YVR/2026-09-15/2026-09-22?sort=price_a",
+      "robots": {
+        "fetched": true,
+        "status": 200,
+        "disallows_path": true,
+        "rule": "Disallow: /flight-search/",
+        "crawl_delay": null
+      },
+      "elapsed_ms": 601,
+      "http_status": 200,
+      "bytes": 252319,
+      "robot_wall": false,
+      "wall_signals": [],
+      "robot_wall_pw_fetch_would_see": false,
+      "consent_wall": true,
+      "title": "What is a bot?",
+      "itinerary_echoed": {
+        "origin": false,
+        "dest": false,
+        "depart": false,
+        "ret": false
+      },
+      "prices": {
+        "count": 0,
+        "distinct": 0,
+        "min": null,
+        "max": null,
+        "teaser_flagged": 0,
+        "bound_to_dates": 0,
+        "sample_bound": []
+      },
+      "control": {
+        "distinct": 0,
+        "min": null,
+        "identical_to_primary": false
+      },
+      "saved_html": "pages/cheapflights.ca.plain.exact.html",
+      "verdict": "no_fare",
+      "reason": "neither requested date appears on the page \u2014 it is about no itinerary"
+    },
+    {
+      "domain": "priceline.com",
+      "owner": "booking_holdings",
+      "role": "itinerary_search",
+      "date_flex": "unknown",
+      "tier": "plain",
+      "mode": "exact",
+      "requested": {
+        "origin": "YYZ",
+        "dest": "YVR",
+        "depart": "2026-09-15",
+        "ret": "2026-09-22"
+      },
+      "error": "HTTP 403",
+      "url": "https://www.priceline.com/m/fly/search/YYZ-YVR-2026-09-15/YVR-YYZ-2026-09-22/?cabin-class=ECO&num-adults=1",
+      "robots": {
+        "fetched": true,
+        "status": 200,
+        "disallows_path": false,
+        "rule": null,
+        "crawl_delay": null
+      },
+      "elapsed_ms": 177,
+      "http_status": 403,
+      "bytes": 5373,
+      "robot_wall": true,
+      "wall_signals": [
+        "access to this page has been denied",
+        "captcha",
+        "px-captcha"
+      ],
+      "robot_wall_pw_fetch_would_see": true,
+      "consent_wall": false,
+      "title": "Access to this page has been denied",
+      "itinerary_echoed": {
+        "origin": false,
+        "dest": false,
+        "depart": false,
+        "ret": false
+      },
+      "prices": {
+        "count": 0,
+        "distinct": 0,
+        "min": null,
+        "max": null,
+        "teaser_flagged": 0,
+        "bound_to_dates": 0,
+        "sample_bound": []
+      },
+      "control": {
+        "distinct": 0,
+        "min": null,
+        "identical_to_primary": false
+      },
+      "saved_html": "pages/priceline.com.plain.exact.html",
+      "verdict": "blocked",
+      "reason": "served an interstitial instead of the page (access to this page has been denied, captcha, px-captcha)"
+    },
+    {
+      "domain": "skyscanner.ca",
+      "owner": "skyscanner",
+      "role": "itinerary_search",
+      "date_flex": "whole_month",
+      "tier": "plain",
+      "mode": "exact",
+      "requested": {
+        "origin": "YYZ",
+        "dest": "YVR",
+        "depart": "2026-09-15",
+        "ret": "2026-09-22"
+      },
+      "error": null,
+      "url": "https://www.skyscanner.ca/transport/flights/yyz/yvr/260915/260922/?adults=1&currency=CAD",
+      "robots": {
+        "fetched": true,
+        "status": 200,
+        "disallows_path": false,
+        "rule": null,
+        "crawl_delay": null
+      },
+      "elapsed_ms": 283,
+      "http_status": 200,
+      "bytes": 708,
+      "robot_wall": false,
+      "wall_signals": [],
+      "robot_wall_pw_fetch_would_see": false,
+      "consent_wall": false,
+      "title": "Skyscanner",
+      "itinerary_echoed": {
+        "origin": false,
+        "dest": false,
+        "depart": false,
+        "ret": false
+      },
+      "prices": {
+        "count": 0,
+        "distinct": 0,
+        "min": null,
+        "max": null,
+        "teaser_flagged": 0,
+        "bound_to_dates": 0,
+        "sample_bound": []
+      },
+      "control": {
+        "distinct": 0,
+        "min": null,
+        "identical_to_primary": false
+      },
+      "saved_html": "pages/skyscanner.ca.plain.exact.html",
+      "verdict": "no_fare",
+      "reason": "neither requested date appears on the page \u2014 it is about no itinerary"
+    },
+    {
+      "domain": "trip.com",
+      "owner": "trip_com_group",
+      "role": "itinerary_search",
+      "date_flex": "unknown",
+      "tier": "plain",
+      "mode": "exact",
+      "requested": {
+        "origin": "YYZ",
+        "dest": "YVR",
+        "depart": "2026-09-15",
+        "ret": "2026-09-22"
+      },
+      "error": "HTTP 432",
+      "url": "https://www.trip.com/flights/showfarefirst?dcity=yyz&acity=yvr&ddate=2026-09-15&rdate=2026-09-22&triptype=rt&class=y&quantity=1&locale=en-CA&curr=CAD",
+      "robots": {
+        "fetched": true,
+        "status": 200,
+        "disallows_path": false,
+        "rule": null,
+        "crawl_delay": null
+      },
+      "elapsed_ms": 278,
+      "http_status": 432,
+      "bytes": 17,
+      "robot_wall": false,
+      "wall_signals": [],
+      "robot_wall_pw_fetch_would_see": false,
+      "consent_wall": false,
+      "title": null,
+      "itinerary_echoed": {
+        "origin": false,
+        "dest": false,
+        "depart": false,
+        "ret": false
+      },
+      "prices": {
+        "count": 0,
+        "distinct": 0,
+        "min": null,
+        "max": null,
+        "teaser_flagged": 0,
+        "bound_to_dates": 0,
+        "sample_bound": []
+      },
+      "control": {
+        "distinct": 0,
+        "min": null,
+        "identical_to_primary": false
+      },
+      "saved_html": "pages/trip.com.plain.exact.html",
+      "verdict": "no_fare",
+      "reason": "neither requested date appears on the page \u2014 it is about no itinerary"
+    },
+    {
+      "domain": "orbitz.com",
+      "owner": "expedia_group",
+      "role": "itinerary_search",
+      "date_flex": "unknown",
+      "tier": "plain",
+      "mode": "exact",
+      "requested": {
+        "origin": "YYZ",
+        "dest": "YVR",
+        "depart": "2026-09-15",
+        "ret": "2026-09-22"
+      },
+      "error": "HTTP 429",
+      "url": "https://www.orbitz.com/Flights-Search?trip=roundtrip&leg1=from:YYZ,to:YVR,departure:2026-09-15TANYT&leg2=from:YVR,to:YYZ,departure:2026-09-22TANYT&passengers=adults:1&mode=search",
+      "robots": {
+        "fetched": true,
+        "status": 200,
+        "disallows_path": true,
+        "rule": "Disallow: /Flights-Search",
+        "crawl_delay": null
+      },
+      "elapsed_ms": 201,
+      "http_status": 429,
+      "bytes": 127235,
+      "robot_wall": false,
+      "wall_signals": [],
+      "robot_wall_pw_fetch_would_see": false,
+      "consent_wall": false,
+      "title": null,
+      "itinerary_echoed": {
+        "origin": true,
+        "dest": false,
+        "depart": false,
+        "ret": false
+      },
+      "prices": {
+        "count": 0,
+        "distinct": 0,
+        "min": null,
+        "max": null,
+        "teaser_flagged": 0,
+        "bound_to_dates": 0,
+        "sample_bound": []
+      },
+      "control": {
+        "distinct": 0,
+        "min": null,
+        "identical_to_primary": false
+      },
+      "saved_html": "pages/orbitz.com.plain.exact.html",
+      "verdict": "blocked",
+      "reason": "HTTP 429"
+    },
+    {
+      "domain": "travelocity.ca",
+      "owner": "expedia_group",
+      "role": "itinerary_search",
+      "date_flex": "unknown",
+      "tier": "plain",
+      "mode": "exact",
+      "requested": {
+        "origin": "YYZ",
+        "dest": "YVR",
+        "depart": "2026-09-15",
+        "ret": "2026-09-22"
+      },
+      "error": "HTTP 429",
+      "url": "https://www.travelocity.ca/Flights-Search?trip=roundtrip&leg1=from:YYZ,to:YVR,departure:2026-09-15TANYT&leg2=from:YVR,to:YYZ,departure:2026-09-22TANYT&passengers=adults:1&mode=search",
+      "robots": {
+        "fetched": true,
+        "status": 200,
+        "disallows_path": true,
+        "rule": "Disallow: /Flights-Search",
+        "crawl_delay": null
+      },
+      "elapsed_ms": 184,
+      "http_status": 429,
+      "bytes": 127083,
+      "robot_wall": false,
+      "wall_signals": [],
+      "robot_wall_pw_fetch_would_see": false,
+      "consent_wall": false,
+      "title": null,
+      "itinerary_echoed": {
+        "origin": true,
+        "dest": false,
+        "depart": false,
+        "ret": false
+      },
+      "prices": {
+        "count": 0,
+        "distinct": 0,
+        "min": null,
+        "max": null,
+        "teaser_flagged": 0,
+        "bound_to_dates": 0,
+        "sample_bound": []
+      },
+      "control": {
+        "distinct": 0,
+        "min": null,
+        "identical_to_primary": false
+      },
+      "saved_html": "pages/travelocity.ca.plain.exact.html",
+      "verdict": "blocked",
+      "reason": "HTTP 429"
+    },
+    {
+      "domain": "edreams.com",
+      "owner": "edreams_odigeo",
+      "role": "itinerary_search",
+      "date_flex": "unknown",
+      "tier": "plain",
+      "mode": "exact",
+      "requested": {
+        "origin": "YYZ",
+        "dest": "YVR",
+        "depart": "2026-09-15",
+        "ret": "2026-09-22"
+      },
+      "error": "HTTP 403",
+      "url": "https://www.edreams.com/travel/#/results/type=R;from=YYZ;to=YVR;dep=2026-09-15;ret=2026-09-22;adults=1",
+      "robots": {
+        "fetched": true,
+        "status": 403,
+        "disallows_path": false,
+        "rule": null,
+        "crawl_delay": null
+      },
+      "elapsed_ms": 93,
+      "http_status": 403,
+      "bytes": 8438,
+      "robot_wall": false,
+      "wall_signals": [],
+      "robot_wall_pw_fetch_would_see": false,
+      "consent_wall": true,
+      "title": "Access denied | www.edreams.com used Cloudflare to restrict access | www.edreams.com | Cloudflare",
+      "itinerary_echoed": {
+        "origin": false,
+        "dest": false,
+        "depart": false,
+        "ret": false
+      },
+      "prices": {
+        "count": 0,
+        "distinct": 0,
+        "min": null,
+        "max": null,
+        "teaser_flagged": 0,
+        "bound_to_dates": 0,
+        "sample_bound": []
+      },
+      "control": {
+        "distinct": 0,
+        "min": null,
+        "identical_to_primary": false
+      },
+      "saved_html": "pages/edreams.com.plain.exact.html",
+      "verdict": "blocked",
+      "reason": "HTTP 403"
+    },
+    {
+      "domain": "cheapoair.ca",
+      "owner": "fareportal",
+      "role": "itinerary_search",
+      "date_flex": "unknown",
+      "tier": "plain",
+      "mode": "exact",
+      "requested": {
+        "origin": "YYZ",
+        "dest": "YVR",
+        "depart": "2026-09-15",
+        "ret": "2026-09-22"
+      },
+      "error": null,
+      "url": null,
+      "verdict": "no_deeplink",
+      "reason": "no URL template carries the itinerary; the fare is behind a form"
+    },
+    {
+      "domain": "onetravel.com",
+      "owner": "fareportal",
+      "role": "itinerary_search",
+      "date_flex": "unknown",
+      "tier": "plain",
+      "mode": "exact",
+      "requested": {
+        "origin": "YYZ",
+        "dest": "YVR",
+        "depart": "2026-09-15",
+        "ret": "2026-09-22"
+      },
+      "error": null,
+      "url": null,
+      "verdict": "no_deeplink",
+      "reason": "no URL template carries the itinerary; the fare is behind a form"
+    },
+    {
+      "domain": "flighthub.com",
+      "owner": "flighthub_group",
+      "role": "itinerary_search",
+      "date_flex": "unknown",
+      "tier": "plain",
+      "mode": "exact",
+      "requested": {
+        "origin": "YYZ",
+        "dest": "YVR",
+        "depart": "2026-09-15",
+        "ret": "2026-09-22"
+      },
+      "error": null,
+      "url": null,
+      "verdict": "no_deeplink",
+      "reason": "no URL template carries the itinerary; the fare is behind a form"
+    },
+    {
+      "domain": "airwander.com",
+      "owner": "airwander",
+      "role": "itinerary_search",
+      "date_flex": "unknown",
+      "tier": "plain",
+      "mode": "exact",
+      "requested": {
+        "origin": "YYZ",
+        "dest": "YVR",
+        "depart": "2026-09-15",
+        "ret": "2026-09-22"
+      },
+      "error": null,
+      "url": null,
+      "verdict": "no_deeplink",
+      "reason": "no URL template carries the itinerary; the fare is behind a form"
+    },
+    {
+      "domain": "flightsfinder.com",
+      "owner": "flightsfinder",
+      "role": "itinerary_search",
+      "date_flex": "unknown",
+      "tier": "plain",
+      "mode": "exact",
+      "requested": {
+        "origin": "YYZ",
+        "dest": "YVR",
+        "depart": "2026-09-15",
+        "ret": "2026-09-22"
+      },
+      "error": null,
+      "url": null,
+      "verdict": "no_deeplink",
+      "reason": "no URL template carries the itinerary; the fare is behind a form"
+    },
+    {
+      "domain": "secretflying.com",
+      "owner": "secretflying",
+      "role": "deal_feed",
+      "date_flex": "n/a",
+      "tier": "plain",
+      "mode": "exact",
+      "requested": {
+        "origin": "YYZ",
+        "dest": "YVR",
+        "depart": "2026-09-15",
+        "ret": "2026-09-22"
+      },
+      "error": null,
+      "verdict": "unusable_role",
+      "reason": "role is deal_feed: it has no per-itinerary fare to read"
+    },
+    {
+      "domain": "travelpricedrops.com",
+      "owner": "travelpricedrops",
+      "role": "deal_feed",
+      "date_flex": "n/a",
+      "tier": "plain",
+      "mode": "exact",
+      "requested": {
+        "origin": "YYZ",
+        "dest": "YVR",
+        "depart": "2026-09-15",
+        "ret": "2026-09-22"
+      },
+      "error": null,
+      "verdict": "unusable_role",
+      "reason": "role is deal_feed: it has no per-itinerary fare to read"
+    }
+  ],
+  "summary": {
+    "probed": 19,
+    "by_verdict": {
+      "blocked": 6,
+      "no_deeplink": 6,
+      "no_fare": 5,
+      "unusable_role": 2
+    },
+    "ship_candidates": [],
+    "independent_owners_shipping": 0,
+    "requests_made": 33,
+    "wall_clock_s": 403,
+    "aborted": null
+  }
+}

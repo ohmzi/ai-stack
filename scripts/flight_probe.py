@@ -118,7 +118,20 @@ WALL_SIGNALS = (
     "/sorry/index", "unusual traffic from your computer", "are you a robot",
     "captcha", "not a robot", "automated access", "bot detection", "px-captcha",
     "verify you are a human", "ddos protection by",
+    # Measured 2026-08-07. kayak.com, momondo.ca and cheapflights.ca each served a 250-300 KB page
+    # titled "What is a bot?" to plain urllib — one wall, three Booking Holdings hosts, which is the
+    # owner field earning its place. trip.com answered HTTP 432 with the 17-byte body
+    # "whaleguard block". None of these matched the vocabulary above, so all four were scored as
+    # ordinary pages that merely had no fare on them.
+    "what is a bot", "whaleguard", "press & hold", "press and hold",
+    "prove you are human", "human verification", "unusual activity",
 )
+# A title is a strong wall signal on its own and survives into the saved measurement, which means a
+# past run can be re-judged from probe.json without refetching anything.
+WALL_TITLES = ("what is a bot", "access denied", "attention required", "just a moment",
+               "are you a robot", "captcha", "blocked", "security check", "verify")
+# A 2xx response this small is not a page. It is a redirect stub, a WAF body, or a bare SPA shell.
+TINY_PAGE_BYTES = 2500
 CONSENT_SIGNALS = ("cookie", "consent", "gdpr", "privacy preference", "accept all")
 
 VERDICTS = ("untested", "usable", "usable_with_browser", "blocked", "no_deeplink",
@@ -248,10 +261,29 @@ def verdict(rec, role="itinerary_search", list_is_itinerary=False):
     if rec.get("robot_wall"):
         sig = ", ".join(rec.get("wall_signals", [])[:3]) or "robot wall"
         return "blocked", f"served an interstitial instead of the page ({sig})"
-    if rec.get("http_status") in (401, 403, 429, 503):
+    title = (rec.get("title") or "").lower()
+    if title and any(t in title for t in WALL_TITLES):
+        return "blocked", f"the page's own title is a challenge: {rec['title']!r}"
+    # ANY 4xx/5xx, not a hand-listed few. trip.com answered 432 — a non-standard code — and fell
+    # straight through a `status in (401, 403, 429, 503)` check to be judged as a page.
+    if isinstance(rec.get("http_status"), int) and rec["http_status"] >= 400:
         return "blocked", f"HTTP {rec['http_status']}"
     if not rec.get("url"):
         return "no_deeplink", "no URL template carries the itinerary; the fare is behind a form"
+
+    cands0 = rec.get("prices", {})
+    # A tiny 2xx body, and a served-shell-with-no-fares, are both "we have not seen the page yet" —
+    # NOT "this site has no fare". Ordering matters here and got it wrong: the date-echo gate below
+    # ran first and returned no_fare for skyscanner.ca, whose 708-byte response is a bare React
+    # shell ('<div id="root">' plus 'You need to enable JavaScript to run this app'). A shell
+    # legitimately echoes nothing, so judging it on echo is judging it on the wrong evidence, and it
+    # turned "needs the browser tier" into a verdict that reads like a dead end.
+    if rec.get("bytes", 0) and rec["bytes"] < TINY_PAGE_BYTES and not cands0.get("distinct"):
+        return (("js_only", f"{rec['bytes']} bytes — an app shell, not a rendered page")
+                if rec.get("tier") == "plain"
+                else ("no_fare", f"only {rec['bytes']} bytes even after rendering"))
+    if rec.get("tier") == "plain" and not cands0.get("distinct"):
+        return "js_only", "no fare-shaped number in the served HTML; needs a browser to confirm"
 
     echo = rec.get("itinerary_echoed") or {}
     cands = rec.get("prices", {})
@@ -935,6 +967,40 @@ def selftest():
          "prices": {"distinct": 2, "bound_to_dates": 1},
          "control": {"identical_to_primary": True}}
     ck("identical minimum for an unrelated date pair -> teaser", verdict(t)[0] == "teaser")
+
+    print("--- verdict(): the five misclassifications from the 2026-08-07 live run ---")
+    # All five scored no_fare, which reads as "this site has nothing" when the truth was "we never
+    # saw the page". Each is pinned by the mechanism that fixes it.
+    botwall = {"url": "u", "http_status": 200, "tier": "plain", "mode": "exact", "bytes": 304556,
+               "title": "What is a bot?",
+               "itinerary_echoed": {"origin": True, "dest": True, "depart": False, "ret": False},
+               "prices": {"distinct": 0, "bound_to_dates": 0}}
+    v, why = verdict(botwall)
+    ck("a 300KB page titled 'What is a bot?' is BLOCKED, not no_fare", v == "blocked")
+    ck("...and the reason quotes the title back", "What is a bot?" in why)
+    ck("HTTP 432 (non-standard) is blocked — a hand-listed status set missed it",
+       verdict({"url": "u", "http_status": 432, "tier": "plain", "bytes": 17})[0] == "blocked")
+    shell = {"url": "u", "http_status": 200, "tier": "plain", "mode": "exact", "bytes": 708,
+             "title": "Skyscanner",
+             "itinerary_echoed": {"origin": False, "dest": False, "depart": False, "ret": False},
+             "prices": {"distinct": 0, "bound_to_dates": 0}}
+    v, why = verdict(shell)
+    ck("a 708-byte SPA shell is js_only, not no_fare", v == "js_only")
+    ck("...and the reason says it is a shell", "shell" in why)
+    ck("a shell that is still tiny AFTER rendering is genuinely no_fare",
+       verdict(dict(shell, tier="browser"))[0] == "no_fare")
+    # The ordering bug itself: a served shell echoes nothing, so echo is the wrong evidence to judge
+    # it on. On the plain tier, "no fares yet" must outrank "no dates echoed".
+    ck("on the plain tier a zero-fare page is js_only even with neither date echoed",
+       verdict({"url": "u", "http_status": 200, "tier": "plain", "mode": "exact", "bytes": 250000,
+                "title": "Flights",
+                "itinerary_echoed": {"origin": True, "dest": True, "depart": False, "ret": False},
+                "prices": {"distinct": 0}})[0] == "js_only")
+    ck("...but once RENDERED, neither date echoed is still no_fare",
+       verdict({"url": "u", "http_status": 200, "tier": "browser", "mode": "exact", "bytes": 250000,
+                "title": "Flights",
+                "itinerary_echoed": {"origin": True, "dest": True, "depart": False, "ret": False},
+                "prices": {"distinct": 8}})[0] == "no_fare")
 
     print("--- verdict(): roles and walls ---")
     ck("a deal feed is unusable_role regardless of content",
