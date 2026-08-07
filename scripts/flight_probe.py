@@ -1095,15 +1095,19 @@ def selftest():
     ck("blocked and no_deeplink sort last", {order[2]["domain"], order[3]["domain"]} == {"b", "d"})
     ck("a blocked site outranks nothing — re-confirming it teaches zero",
        _learning_order({"verdict": "blocked"}) > _learning_order({"verdict": "js_only"}))
-    # The concrete regression: with the measured registry, a browser run must reach skyscanner.
-    _reg = load_registry(REGISTRY) if False else json.load(open(REGISTRY))
-    _ord = sorted(_reg["sites"], key=_learning_order)
-    ck("against the real registry, skyscanner.ca is first in a browser run",
-       _ord[0]["domain"] == "skyscanner.ca")
-    ck("...and it is the ONLY site a browser run would fetch by default",
-       [s["domain"] for s in _ord
-        if s.get("verdict") not in ("blocked", "no_deeplink", "unusable_role")]
-       == ["skyscanner.ca"])
+    # Against the real registry, as of the 2026-08-07 browser tier: NOTHING is left to fetch.
+    # skyscanner.ca was the last open question and rendering it produced a PerimeterX challenge, so
+    # every site with a usable URL is now measured blocked. This assertion is the gate in test form —
+    # it will start failing the moment a verdict changes, which is exactly when someone should look.
+    _reg = json.load(open(REGISTRY))
+    _fetchable = [s["domain"] for s in sorted(_reg["sites"], key=_learning_order)
+                  if s.get("verdict") not in ("blocked", "no_deeplink", "unusable_role")]
+    ck(f"a browser run would now fetch NOTHING — every reachable site is blocked (got {_fetchable})",
+       _fetchable == [])
+    ck("...and no site is shippable, so flight_watch queries nothing",
+       [s["domain"] for s in _reg["sites"] if s["verdict"] in SHIPPABLE] == [])
+    ck("six sites are still genuinely UNMEASURED (no_deeplink = never fetched, not 'blocked')",
+       len([s for s in _reg["sites"] if s["verdict"] == "no_deeplink"]) == 6)
 
     print("--- the renderer is invoked with an explicit interpreter ---")
     ck("BROWSER_PY is an absolute path, not 'python3'", BROWSER_PY.startswith("/"))

@@ -15,10 +15,13 @@ cost of re-deriving them is 57 requests to 19 hostile commercial hosts from a re
 
 | verdict | n | sites |
 |---|---|---|
-| `blocked` | **10** | google.com, skiplagged.com, kayak.com, momondo.ca, cheapflights.ca, priceline.com, trip.com, orbitz.com, travelocity.ca, edreams.com |
+| `blocked` | **11** | google.com, skiplagged.com, kayak.com, momondo.ca, cheapflights.ca, priceline.com, trip.com, orbitz.com, travelocity.ca, edreams.com, **skyscanner.ca** |
 | `no_deeplink` | **6** | kiwi.com, cheapoair.ca, onetravel.com, flighthub.com, airwander.com, flightsfinder.com |
-| `js_only` | **1** | skyscanner.ca |
 | `unusable_role` | **2** | secretflying.com, travelpricedrops.com |
+
+**Every site with a usable URL is blocked. Not one of nineteen is readable.** The six
+`no_deeplink` sites were never fetched at all, so they are unmeasured rather than refused — that is
+the only remaining honest uncertainty in this table.
 
 ### Read it by operator, not by host
 
@@ -36,11 +39,13 @@ Ten blocks are about six operators.
 
 ### The distinctions that matter more than the counts
 
-**`js_only` is not a failure.** skyscanner.ca returned HTTP 200 and **708 bytes**: a bare React shell
-(`<div id="root">` plus *"You need to enable JavaScript to run this app"*). Nothing was blocked and
-nothing is missing — the page simply has not rendered. **Whether a fare is readable there is still
-unknown, and the browser tier is the test that decides.** It is also the only site whose whole-month
-URL form is already authored, which makes it the single most valuable thing left to measure.
+**skyscanner.ca was the last open question, and it is now closed.** On the plain tier it returned
+HTTP 200 and **708 bytes** — a bare React shell (`<div id="root">` plus *"You need to enable
+JavaScript to run this app"*), which is not a block and warranted a browser attempt. Rendering it
+produced **8240 bytes carrying `captcha`, `px-captcha` and `human verification`**: a PerimeterX
+challenge. The shell was not a page waiting to render; it was the wrapper around a challenge. That
+retires the roster's only `js_only` verdict and, with it, the last reason to expect a different
+answer from more browser work.
 
 **`no_deeplink` means never fetched, so nothing was learned.** Six sites were not probed at all
 because no slot-bearing URL could be honestly authored — Fareportal encodes its search into a token,
@@ -103,19 +108,57 @@ an automated client at all.**
 human has marked shippable, and today that set is empty, so it emits one `fare_unsupported` and exits
 0 without spending a fetch. That is the honest state: the reading side is built and not switched on.
 
-## Still open, in the order worth doing
+## The gate: STOP
 
-1. **The browser tier.** One command, and it is the only thing that can change the gate:
-   `/usr/bin/python3 scripts/flight_probe.py --tier browser --save-html`. skyscanner.ca is the real
-   candidate; google.com is the high-value long shot. Expect the ten blocked hosts to keep blocking —
-   a bot wall served to `urllib` is often served to headless Chromium too — but that is a prediction,
-   not a measurement, and this file exists because those differ.
-2. **Chrome recon for the six `no_deeplink` sites**, which is the only way to learn their URL grammar
-   and whether their frontends call a JSON endpoint. A JSON endpoint would beat DOM scraping on every
-   axis and needs no browser at all.
-3. **`date_flex` for all 18 non-Skyscanner sites is still `unknown`**, so a month-shaped ask currently
-   resolves against exactly one site. Month capability is a per-site measurement and none has been
-   taken.
+`docs/FLIGHT_WATCH_PLAN.md` Phase 1d specified the decision in advance, before any of this was
+measured, precisely so the answer could not be argued backwards from a sunk cost:
+
+> **0 → stop and report.** Do not ship a flight watcher with nothing behind it. Keep the refusal,
+> update its wording to name what was tried, and hand the user the finding.
+
+Zero owner-independent shippable sites. So: **stop.** `flight_watch.py` stays inert — it queries only
+sites a human has marked shippable, that set is empty, and it says so once and exits 0 without
+spending a fetch. Nothing was shipped on a guess.
+
+What is genuinely NOT concluded here: whether a fare could be read *at all*, by anyone, by any means.
+What is concluded is narrower and firmer — **free scraping of these nineteen sites from a residential
+IP does not work, and eleven of them refuse an automated client outright.**
+
+## What is actually left, honestly ranked
+
+1. **The six `no_deeplink` sites are unmeasured, not refused.** No slot-bearing URL could be authored
+   for them, so no request was made. Chrome recon (a real browser session, reading the address bar
+   and the network tab) is the only way to learn their URL grammar and whether their frontends call
+   a JSON endpoint. A JSON endpoint would beat DOM scraping on every axis and need no browser at
+   all. `flightsfinder.com` and `airwander.com` are small and plausibly the least defended hosts in
+   the roster. **This is the only remaining free path, and it is a real one** — but note that four of
+   the six are Fareportal/FlightHub OTAs, so the independent-source count it could yield is closer to
+   three than six.
+2. **A keyed fare API.** Amadeus, Duffel and Kiwi's partner API all expose real bookable fares under
+   terms that permit automation, several with free tiers. This is the answer that actually works, and
+   it is a *different design* rather than a fix to this one: `flight_watch.py`'s registry, ladder,
+   quorum, confidence and alerting all survive; only the fetch layer changes. Worth costing before
+   dismissing.
+3. **Google Flights' own price alerts.** No automation, no maintenance, and already what
+   `alert_templates.ADVICE["fare_unsupported"]` tells the user. For a single itinerary this is
+   strictly better than anything built here.
+
+**Not on this list, deliberately:** residential proxies, CAPTCHA-solving services, and
+fingerprint-spoofing browser plugins. Those are what would be required to get past PerimeterX,
+Akamai and whaleguard, they are what the sites' terms forbid, and defeating a bot defence is not the
+same kind of problem as reading a page. If free scraping is the constraint, the answer is (1); if a
+working fare watch is the goal, the answer is (2).
+
+## What was built, and what it is worth
+
+The refusal is stronger than when this started, and three artifacts outlive the negative result:
+
+- `scripts/flight_probe.py` — a reusable measuring instrument with a pure `verdict()`, so any future
+  claim about these sites costs one command instead of an argument.
+- `scripts/flight_watch.py` + `flight_render.py` — a tested, inert fare watcher (73 checks). It turns
+  on by editing one field per site, whenever a readable source appears — a keyed API included.
+- This file — 19 named sites with statuses, byte counts and reasons, replacing a one-paragraph
+  refusal-by-assertion.
 
 ## What was measured about the instrument itself
 

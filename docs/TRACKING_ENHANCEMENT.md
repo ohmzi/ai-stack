@@ -115,9 +115,25 @@ one-candidate-per-host, which is what a spammy single-engine result set collapse
 
    None of this touches flight fares: `scripts/flight_watch.py` issues no search queries at all,
    because it builds its URL from an itinerary instead of finding one.
-2. **A fare capability, if wanted at all.** Would need a headless browser reading one specific
-   itinerary, with an interpreter spelled out explicitly, and an honest verdict that it is a
-   maintenance subscription rather than a feature. The refusal is a complete outcome without it.
+2. **A fare capability — ANSWERED, and the answer is no on the free path.** Measured 2026-08-07
+   across all 19 sites the user named, both tiers: **11 blocked, 6 never fetched (no authorable deep
+   link), 2 wrong-role, 0 readable.** Full record in `docs/FLIGHT_RECON.md`.
+
+   The prediction in this line was half right. A headless browser with the interpreter spelled out
+   was indeed necessary — and it was not sufficient. kayak, momondo and cheapflights served headless
+   Chromium the *same* "What is a bot?" wall they served urllib; skyscanner's 708-byte React shell
+   rendered into a PerimeterX challenge. Getting past those needs proxies and CAPTCHA solving, which
+   is a different kind of problem from reading a page and not one worth solving here.
+
+   So the refusal stands, and it is now a refusal *by measurement* rather than by assertion. What
+   changed is that it is no longer a dead end: `price_search.py` emits `fare_needs_itinerary` naming
+   what is missing, and `scripts/flight_watch.py` exists, tested and inert, reading only sites a
+   human has marked shippable. It turns on by editing one field the day a readable source appears —
+   including a keyed API, whose fetch layer is the only part that would differ.
+
+   Two things genuinely still open, in order: Chrome recon on the six unmeasured `no_deeplink` sites
+   (the only remaining free path, worth ~3 independent sources not 6), and costing a keyed fare API
+   (Amadeus / Duffel / Kiwi partner), which is the option that actually works.
 3. **Price mode has no flap cooldown.** A price oscillating either side of a target still texts every
    run. The cooldown is implemented mode-agnostically and gated to stock mode with a comment.
 4. **`--label` is not sanitised.** Page phrases and `--query` are both folded; a user-supplied label

@@ -1,5 +1,25 @@
 # A flight path of its own: deterministic flight routing, and a fare capability that is measured before it ships
 
+> ## ⛔ THE PHASE 1D GATE RETURNED ZERO. PHASES 2 AND 3 ARE ON HOLD.
+>
+> Measured 2026-08-07 across all 19 sites, plain tier and browser tier: **11 blocked, 6 never
+> fetched, 2 wrong-role, 0 readable.** skyscanner.ca was the last candidate and rendering it produced
+> a PerimeterX challenge. See **`docs/FLIGHT_RECON.md`** for the evidence and the remaining options.
+>
+> Per this plan's own Phase 1d, written before anything was measured: *"0 → stop and report. Do not
+> ship a flight watcher with nothing behind it."* So Phase 2 shipped as **inert** code and **Phase 3
+> (the pipeline flight path) was deliberately not started** — wiring the assistant to a watcher with
+> nothing behind it would be building on a guess.
+>
+> What IS built and tested: `flight_probe.py` (62 checks), `flight_watch.py` (73), `flight_render.py`,
+> the registry, and the alert kinds. What is NOT built: every part of Phase 3, and the tests/ files
+> for Phase 4 (coverage currently lives in each script's `--selftest`).
+>
+> Phase 1e (date flexibility) is fully designed below and **implemented in `flight_watch.py`**, but no
+> site's `date_flex` could be measured, so the ladder resolves against nothing today.
+>
+> ---
+>
 > **STATUS: PLAN, NOT BEHAVIOUR. Nothing here has shipped.** Unlike `HERMES_AGENT.md` or
 > `TRACKING_ENHANCEMENT.md`, which record what the stack *does*, this file records what it is
 > *going to* do and why. Today a flight watch is still refused by `scripts/price_search.py:354`.

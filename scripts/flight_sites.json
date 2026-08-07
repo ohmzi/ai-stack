@@ -252,9 +252,9 @@
       "extract": null,
       "code_map": null,
       "caveat": null,
-      "verdict": "js_only",
+      "verdict": "blocked",
       "measured_at": "2026-08-07",
-      "notes": "PLAIN TIER 2026-08-07: HTTP 200 and only 708 BYTES — a bare React shell ('<div id=\"root\">' plus 'You need to enable JavaScript to run this app'). NOT a block and NOT an empty site: the page simply has not rendered. THE ONE GENUINE BROWSER-TIER CANDIDATE in the roster, and the only site whose month_url_template is already authored.  ||  Lowercase IATA and YYMMDD dates — the only site in the roster using the short date form, which is why {origin_lc}/{depart_ymd} placeholders exist at all. Expectation before measuring: aggressive bot detection, on a par with kayak."
+      "notes": "BROWSER TIER 2026-08-07: HTTP 200, 8240 bytes, body carries 'captcha', 'px-captcha' and 'human verification' — PerimeterX. This CLOSES the roster's last open question. The plain tier's 708-byte React shell was not a site that merely needed rendering: rendering it produces a PerimeterX challenge instead of a page. js_only -> blocked.  ||  PLAIN TIER 2026-08-07: HTTP 200 and only 708 BYTES — a bare React shell ('<div id=\"root\">' plus 'You need to enable JavaScript to run this app'). NOT a block and NOT an empty site: the page simply has not rendered. THE ONE GENUINE BROWSER-TIER CANDIDATE in the roster, and the only site whose month_url_template is already authored.  ||  Lowercase IATA and YYMMDD dates — the only site in the roster using the short date form, which is why {origin_lc}/{depart_ymd} placeholders exist at all. Expectation before measuring: aggressive bot detection, on a par with kayak."
     },
     {
       "domain": "trip.com",
