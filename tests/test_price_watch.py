@@ -374,6 +374,53 @@ def main():
     check("--selftest runs without unpacking errors", not crashed, crashed)
     check("...and reports a price rather than FAIL", "FAIL" not in out, out.strip()[:160])
 
+    print("--- a page offering MANY prices is a listing, and has no price of its own ---")
+    # Live incident 2026-08-07, job 52f821a8d3a2: cheapflights.ca's Toronto-Vancouver route page
+    # carries a JSON-LD offers ARRAY of 97 distinct prices (measured), and candidates() took the
+    # first in document order. The monitor texted "$358.72, under your $1,000.00 target" at HIGH
+    # confidence. Nothing was misread: the number simply was not the price of anything the user
+    # asked about, and no confidence tier or score can notice that.
+    listing = "<title>Cheap Flights Toronto to Vancouver</title>" + "".join(
+        '<script type="application/ld+json">{"offers":[{"price":%d.72}]}</script>' % n
+        for n in range(300, 300 + 8))
+    check("a page with 8 different prices yields NOTHING", pw.candidates(listing) == [],
+          repr(pw.candidates(listing)[:2]))
+    check("...and says why, so the run can explain itself",
+          "8 different prices" in (pw.LAST_EMPTY_REASON[0] or ""), pw.LAST_EMPTY_REASON[0])
+    # The boundary, so the threshold is a decision rather than an accident.
+    under = "<title>Widget</title>" + "".join(
+        '<script type="application/ld+json">{"offers":[{"price":%d.00}]}</script>' % n
+        for n in range(10, 10 + pw.LISTING_MIN_PRICES - 1))
+    check(f"...while {pw.LISTING_MIN_PRICES - 1} distinct prices still reads normally",
+          bool(pw.candidates(under)) and pw.candidates(under)[0][2] == "high",
+          repr(pw.candidates(under)[:2]))
+    check("a real product page is untouched — measured at 2 distinct prices",
+          pw.candidates(FIX_BOOKS)[0] == (51.77, "price_color", "high"),
+          repr(pw.candidates(FIX_BOOKS)[:2]))
+    check("the reason is cleared on entry and cannot describe a previous page",
+          pw.LAST_EMPTY_REASON[0] is None)
+    # A FRESH module, because best_candidates is stubbed out further up this suite and the point
+    # here is the whole path from fetch to alert. Same idiom the best_candidates contract check uses.
+    lp = load()
+    lp.STATE_DIR = tmp
+    lp.fetch = lambda url: listing
+
+    def run_listing(**kw):
+        buf = io.StringIO()
+        with redirect_stdout(buf):
+            lp.run(Args(**kw))
+        return buf.getvalue()
+
+    out = run_listing(state="listing1", below=1000)
+    check("a listing page fires NOTHING, however far under target its numbers are",
+          "ALERT(" not in out, out)
+    check("...and the ONE delivered LOG line carries the reason",
+          len(hd.LOG_RE.findall("## Response\n" + out)) == 1
+          and "no value found" in out and "different prices" in out, out)
+    out = [run_listing(state="listing1", below=1000) for _ in range(2)][-1]
+    check("...escalating to one no_value alert after three runs, like any unreadable page",
+          '"kind": "no_value"' in out, out)
+
     fails = results.count(False)
     print(f"\n{len(results)} checks — {'ALL PASS' if not fails else str(fails) + ' FAILURE(S)'}")
     return 1 if fails else 0

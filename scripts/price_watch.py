@@ -104,9 +104,47 @@ def fetch(url):
     return html
 
 
+# The machine-readable price fields, in priority order. A tuple rather than five inline calls so
+# the listing guard below can count them without a second copy of the patterns.
+HIGH_PRICE_PATTERNS = (
+    (r'"price"\s*:\s*"?' + MONEY + r'"?', "json-ld/price"),
+    (r'"priceAmount"\s*:\s*' + MONEY, "priceAmount"),
+    (r'property="(?:og:|product:)price:amount"\s+content="' + MONEY + r'"', "og:price"),
+    (r'itemprop="price"[^>]*content="' + MONEY + r'"', "itemprop"),
+    # Site-specific: books.toscrape puts the price in a known class.
+    (r'class="price_color">\s*[£$€]\s*' + MONEY, "price_color"),
+)
+
+# A page offering this many DIFFERENT machine-readable prices is a listing, not one product.
+#
+# Measured 2026-08-07, which is the only reason this number is defensible:
+#   cheapflights.ca route page   97 distinct, 103.98 through 358.72+
+#   books.toscrape product page   2 distinct (price with and without tax)
+#   amazon.ca product page        0 distinct high (only the low offer-listing reading)
+# Five leaves generous room for a was/current pair or a handful of variants while catching anything
+# that is genuinely a list. The failure this prevents: job 52f821a8d3a2 texted "$358.72, under your
+# $1,000.00 target" at HIGH confidence, having taken the first element of that 97-value array in
+# document order. Nothing was misread — the number simply was not the price of anything the user
+# asked about, and no amount of confidence scoring can notice that.
+LISTING_MIN_PRICES = 5
+# Why the last candidates() call found nothing, when there is a reason worth telling the user.
+# Cleared on entry so it can never describe a previous page; read by run() on the empty path.
+# A note rather than a return value because best_candidates()'s (candidates, tries, title) shape is
+# depended on by --selftest and pinned by its suite.
+LAST_EMPTY_REASON = [None]
+
+
 def candidates(html):
-    """[(price, source_label, confidence)] — every plausible price, best first."""
+    """[(price, source_label, confidence)] — every plausible price, best first.
+
+    Returns NOTHING for a page that offers many different prices. A category, route or search-result
+    page satisfies every check this module has — the number is genuinely read from the page, from a
+    machine-readable field, at high confidence — while being an arbitrary element of a list. The
+    honest answer there is that no unambiguous price was found, which routes to the same
+    "loaded but no value found" path an unreadable page takes. --selector is the way to pin one.
+    """
     out = []
+    LAST_EMPTY_REASON[0] = None
 
     def add(vals, label, conf):
         for v in vals:
@@ -115,13 +153,14 @@ def candidates(html):
             except ValueError:
                 pass
 
-    add(re.findall(r'"price"\s*:\s*"?' + MONEY + r'"?', html), "json-ld/price", "high")
-    add(re.findall(r'"priceAmount"\s*:\s*' + MONEY, html), "priceAmount", "high")
-    add(re.findall(r'property="(?:og:|product:)price:amount"\s+content="' + MONEY + r'"', html),
-        "og:price", "high")
-    add(re.findall(r'itemprop="price"[^>]*content="' + MONEY + r'"', html), "itemprop", "high")
-    # Site-specific: books.toscrape puts the price in a known class.
-    add(re.findall(r'class="price_color">\s*[£$€]\s*' + MONEY, html), "price_color", "high")
+    for pattern, label in HIGH_PRICE_PATTERNS:
+        add(re.findall(pattern, html), label, "high")
+
+    spread = len({c[0] for c in out})
+    if spread >= LISTING_MIN_PRICES:
+        LAST_EMPTY_REASON[0] = (f"the page offers {spread} different prices, so none of them is "
+                                f"the price of one thing")
+        return []
     # Amazon: on the variant that omits the JSON price, the marketplace offer is all that is
     # statically readable. It is a real price but NOT the buy box, so it can only ever be `low`.
     if "a-offscreen" in html:
@@ -557,7 +596,9 @@ def run(a):
         n = state.get("empty_streak", 0) + 1
         state["empty_streak"] = n
         state.pop("fail_streak", None)
-        print(f"LOG: page loaded but no value found (run {n} in a row) — {a.url.split('/')[2]}")
+        why = f" — {LAST_EMPTY_REASON[0]}" if LAST_EMPTY_REASON[0] else ""
+        print(f"LOG: page loaded but no value found (run {n} in a row){why} "
+              f"— {a.url.split('/')[2]}")
         if n == EMPTY_ALERT_AFTER and not state.get("empty_alerted"):
             state["empty_alerted"] = True
             emit(dict(base, kind="no_value"))
