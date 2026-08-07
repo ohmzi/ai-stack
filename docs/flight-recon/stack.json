@@ -1,0 +1,391 @@
+{
+  "checked_at": "2026-08-07T18:16:13+00:00",
+  "searxng_8889": {
+    "reachable": true,
+    "engines": [
+      "bing",
+      "brave",
+      "mojeek",
+      "qwant",
+      "startpage"
+    ],
+    "google_present": false,
+    "expected": [
+      "bing",
+      "brave",
+      "google",
+      "mojeek"
+    ]
+  },
+  "gateway_8642": {
+    "reachable": true,
+    "toolsets": {
+      "object": "list",
+      "platform": "api_server",
+      "data": [
+        {
+          "name": "web",
+          "label": "\ud83d\udd0d Web Search & Scraping",
+          "description": "web_search, web_extract",
+          "enabled": true,
+          "configured": true,
+          "tools": [
+            "web_extract",
+            "web_search"
+          ]
+        },
+        {
+          "name": "browser",
+          "label": "\ud83c\udf10 Browser Automation",
+          "description": "navigate, click, type, scroll",
+          "enabled": false,
+          "configured": true,
+          "tools": [
+            "browser_back",
+            "browser_cdp",
+            "browser_click",
+            "browser_console",
+            "browser_dialog",
+            "browser_get_images",
+            "browser_navigate",
+            "browser_press",
+            "browser_scroll",
+            "browser_snapshot",
+            "browser_type",
+            "browser_vision",
+            "web_search"
+          ]
+        },
+        {
+          "name": "terminal",
+          "label": "\ud83d\udcbb Terminal & Processes",
+          "description": "terminal, process",
+          "enabled": false,
+          "configured": true,
+          "tools": [
+            "close_terminal",
+            "focus_pane",
+            "open_preview",
+            "process",
+            "read_terminal",
+            "terminal"
+          ]
+        },
+        {
+          "name": "file",
+          "label": "\ud83d\udcc1 File Operations",
+          "description": "read, write, patch, search",
+          "enabled": true,
+          "configured": true,
+          "tools": [
+            "patch",
+            "read_file",
+            "search_files",
+            "write_file"
+          ]
+        },
+        {
+          "name": "code_execution",
+          "label": "\u26a1 Code Execution",
+          "description": "execute_code",
+          "enabled": false,
+          "configured": true,
+          "tools": [
+            "execute_code"
+          ]
+        },
+        {
+          "name": "vision",
+          "label": "\ud83d\udc41\ufe0f  Vision / Image Analysis",
+          "description": "vision_analyze",
+          "enabled": false,
+          "configured": false,
+          "tools": [
+            "vision_analyze"
+          ]
+        },
+        {
+          "name": "video",
+          "label": "\ud83c\udfac Video Analysis",
+          "description": "video_analyze (requires video-capable model)",
+          "enabled": false,
+          "configured": true,
+          "tools": [
+            "video_analyze"
+          ]
+        },
+        {
+          "name": "image_gen",
+          "label": "\ud83c\udfa8 Image Generation",
+          "description": "image_generate",
+          "enabled": false,
+          "configured": true,
+          "tools": [
+            "image_generate"
+          ]
+        },
+        {
+          "name": "video_gen",
+          "label": "\ud83c\udfac Video Generation",
+          "description": "video_generate (text/image/reference)",
+          "enabled": false,
+          "configured": true,
+          "tools": [
+            "video_generate",
+            "xai_video_edit",
+            "xai_video_extend"
+          ]
+        },
+        {
+          "name": "x_search",
+          "label": "\ud83d\udc26 X (Twitter) Search",
+          "description": "x_search (requires xAI OAuth or XAI_API_KEY)",
+          "enabled": false,
+          "configured": true,
+          "tools": [
+            "x_search"
+          ]
+        },
+        {
+          "name": "tts",
+          "label": "\ud83d\udd0a Text-to-Speech",
+          "description": "text_to_speech",
+          "enabled": false,
+          "configured": true,
+          "tools": [
+            "text_to_speech"
+          ]
+        },
+        {
+          "name": "stt",
+          "label": "\ud83c\udf99\ufe0f Speech-to-Text",
+          "description": "voice transcription (gateway voice messages + voice mode)",
+          "enabled": false,
+          "configured": true,
+          "tools": []
+        },
+        {
+          "name": "skills",
+          "label": "\ud83d\udcda Skills",
+          "description": "list, view, manage",
+          "enabled": true,
+          "configured": true,
+          "tools": [
+            "skill_manage",
+            "skill_view",
+            "skills_list"
+          ]
+        },
+        {
+          "name": "todo",
+          "label": "\ud83d\udccb Task Planning",
+          "description": "todo",
+          "enabled": true,
+          "configured": true,
+          "tools": [
+            "todo"
+          ]
+        },
+        {
+          "name": "memory",
+          "label": "\ud83d\udcbe Memory",
+          "description": "persistent memory across sessions",
+          "enabled": true,
+          "configured": true,
+          "tools": [
+            "memory"
+          ]
+        },
+        {
+          "name": "context_engine",
+          "label": "\ud83e\udde9 Context Engine",
+          "description": "runtime tools from the active context engine",
+          "enabled": false,
+          "configured": true,
+          "tools": []
+        },
+        {
+          "name": "session_search",
+          "label": "\ud83d\udd0e Session Search",
+          "description": "search past conversations",
+          "enabled": true,
+          "configured": true,
+          "tools": [
+            "session_search"
+          ]
+        },
+        {
+          "name": "clarify",
+          "label": "\u2753 Clarifying Questions",
+          "description": "clarify",
+          "enabled": false,
+          "configured": true,
+          "tools": [
+            "clarify"
+          ]
+        },
+        {
+          "name": "delegation",
+          "label": "\ud83d\udc65 Task Delegation",
+          "description": "delegate_task",
+          "enabled": false,
+          "configured": true,
+          "tools": [
+            "delegate_task"
+          ]
+        },
+        {
+          "name": "cronjob",
+          "label": "\u23f0 Cron Jobs",
+          "description": "create/list/update/pause/resume/run, with optional attached skills",
+          "enabled": true,
+          "configured": true,
+          "tools": [
+            "cronjob"
+          ]
+        },
+        {
+          "name": "homeassistant",
+          "label": "\ud83c\udfe0 Home Assistant",
+          "description": "smart home device control",
+          "enabled": false,
+          "configured": false,
+          "tools": [
+            "ha_call_service",
+            "ha_get_state",
+            "ha_list_entities",
+            "ha_list_services"
+          ]
+        },
+        {
+          "name": "spotify",
+          "label": "\ud83c\udfb5 Spotify",
+          "description": "playback, search, playlists, library",
+          "enabled": false,
+          "configured": true,
+          "tools": [
+            "spotify_albums",
+            "spotify_devices",
+            "spotify_library",
+            "spotify_playback",
+            "spotify_playlists",
+            "spotify_queue",
+            "spotify_search"
+          ]
+        },
+        {
+          "name": "discord",
+          "label": "\ud83d\udcac Discord (read/participate)",
+          "description": "fetch messages, search members, create thread",
+          "enabled": false,
+          "configured": true,
+          "tools": [
+            "discord"
+          ]
+        },
+        {
+          "name": "discord_admin",
+          "label": "\ud83d\udee1\ufe0f  Discord Server Admin",
+          "description": "list channels/roles, pin, assign roles",
+          "enabled": false,
+          "configured": true,
+          "tools": [
+            "discord_admin"
+          ]
+        },
+        {
+          "name": "yuanbao",
+          "label": "\ud83e\udd16 Yuanbao",
+          "description": "group info, member queries, DM",
+          "enabled": false,
+          "configured": true,
+          "tools": [
+            "yb_query_group_info",
+            "yb_query_group_members",
+            "yb_search_sticker",
+            "yb_send_dm",
+            "yb_send_sticker"
+          ]
+        },
+        {
+          "name": "computer_use",
+          "label": "\ud83d\uddb1\ufe0f  Computer Use (macOS/Windows/Linux)",
+          "description": "background desktop control via cua-driver",
+          "enabled": false,
+          "configured": true,
+          "tools": [
+            "computer_use"
+          ]
+        }
+      ]
+    }
+  },
+  "playwright": {
+    "usr_bin_python3": {
+      "interpreter": "/usr/bin/python3",
+      "import_ok": true,
+      "detail": [
+        "ok",
+        "3.12.3"
+      ],
+      "stderr": ""
+    },
+    "venv_python": {
+      "interpreter": "/home/ohmz/.hermes/hermes-agent/venv/bin/python",
+      "import_ok": false,
+      "detail": [],
+      "stderr": "Traceback (most recent call last):\n  File \"<string>\", line 1, in <module>\nModuleNotFoundError: No module named 'playwright'"
+    },
+    "explicit_path_beats_venv_PATH": true,
+    "browsers": [
+      ".links",
+      "chromium-1148",
+      "chromium_headless_shell-1148",
+      "ffmpeg-1010"
+    ]
+  },
+  "fare_jobs": [],
+  "recipients": {},
+  "orphaned_state": [
+    {
+      "state": "YYZ-YVR-flight.search",
+      "fare_refused": null,
+      "alerted_price": null,
+      "item": null,
+      "url": null,
+      "has_itinerary_in_url": false
+    },
+    {
+      "state": "yto-yvr",
+      "fare_refused": null,
+      "alerted_price": 358.72,
+      "item": "C$ 146+ Cheap Flights from Toronto to Vancouver",
+      "url": "https://www.cheapflights.ca/flights-to-Vancouver/Toronto/",
+      "has_itinerary_in_url": false
+    },
+    {
+      "state": "yto-yvr.search",
+      "fare_refused": true,
+      "alerted_price": null,
+      "item": null,
+      "url": "https://www.cheapflights.ca/flights-to-Vancouver/Toronto/",
+      "has_itinerary_in_url": false
+    },
+    {
+      "state": "yxx-yyz-flight.search",
+      "fare_refused": null,
+      "alerted_price": null,
+      "item": null,
+      "url": null,
+      "has_itinerary_in_url": false
+    },
+    {
+      "state": "yyz-yvr-flights.search",
+      "fare_refused": null,
+      "alerted_price": null,
+      "item": null,
+      "url": null,
+      "has_itinerary_in_url": false
+    }
+  ]
+}
