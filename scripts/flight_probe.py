@@ -873,6 +873,18 @@ def probe_site(site, origin, dest, depart, ret, adults, tier, mode, control=None
 
 # ---------------------------------------------------------------- report
 
+def _learning_order(site):
+    """Sort key: how much a browser-tier fetch of this site would TEACH us.
+
+    js_only is the live open question -- the page never rendered, so nothing is known about whether
+    a fare is readable. untested is next. blocked is last, because re-confirming it costs a request
+    to a hostile host and answers nothing.
+    """
+    return {"js_only": 0, "untested": 1, "no_fare": 2,
+            "usable": 3, "usable_with_browser": 3,
+            "blocked": 8, "no_deeplink": 9, "unusable_role": 9}.get(site.get("verdict"), 5)
+
+
 def report_md(run):
     L = ["# Flight site reconnaissance", "",
          f"Probed {run['itinerary']['origin']}→{run['itinerary']['dest']} "
@@ -1072,6 +1084,27 @@ def selftest():
     ck("startpage and qwant are what is unexpectedly still in it",
        sorted(set(live_observed) - set(ws.ENGINE_ORDER)) == ["qwant", "startpage"])
 
+    print("--- browser-tier ordering: probe what is UNKNOWN, not what is already measured ---")
+    order = sorted([{"domain": "b", "verdict": "blocked"},
+                    {"domain": "s", "verdict": "js_only"},
+                    {"domain": "u", "verdict": "untested"},
+                    {"domain": "d", "verdict": "no_deeplink"}], key=_learning_order)
+    ck("js_only is probed FIRST — it is the live open question",
+       [x["domain"] for x in order][0] == "s")
+    ck("untested comes before blocked", order[1]["domain"] == "u")
+    ck("blocked and no_deeplink sort last", {order[2]["domain"], order[3]["domain"]} == {"b", "d"})
+    ck("a blocked site outranks nothing — re-confirming it teaches zero",
+       _learning_order({"verdict": "blocked"}) > _learning_order({"verdict": "js_only"}))
+    # The concrete regression: with the measured registry, a browser run must reach skyscanner.
+    _reg = load_registry(REGISTRY) if False else json.load(open(REGISTRY))
+    _ord = sorted(_reg["sites"], key=_learning_order)
+    ck("against the real registry, skyscanner.ca is first in a browser run",
+       _ord[0]["domain"] == "skyscanner.ca")
+    ck("...and it is the ONLY site a browser run would fetch by default",
+       [s["domain"] for s in _ord
+        if s.get("verdict") not in ("blocked", "no_deeplink", "unusable_role")]
+       == ["skyscanner.ca"])
+
     print("--- the renderer is invoked with an explicit interpreter ---")
     ck("BROWSER_PY is an absolute path, not 'python3'", BROWSER_PY.startswith("/"))
     ck("BROWSER_PY is /usr/bin/python3 by default",
@@ -1101,6 +1134,11 @@ def main():
     ap.add_argument("--sites", default=None, help="comma-separated hosts")
     ap.add_argument("--skip-roles", default="", help="e.g. deal_feed,redirect_only")
     ap.add_argument("--delay", type=int, default=DELAY_S)
+    ap.add_argument("--retry-blocked", dest="retry_blocked", action="store_true",
+                    help="re-probe sites already measured blocked (they are skipped by default: "
+                         "re-confirming a block costs a request to a hostile host and teaches "
+                         "nothing, and on 2026-08-07 doing so aborted a run before it reached the "
+                         "one site it existed to test)")
     ap.add_argument("--no-control", action="store_true",
                     help="skip the cross-date control fetch (halves requests, loses the teaser test)")
     ap.add_argument("--out", default=os.path.join(HERE, "..", "docs", "flight-recon"))
@@ -1186,7 +1224,12 @@ def main():
     print(f"    control {origin}->{dest} {c_depart}..{c_ret or 'one-way'}"
           if not a.no_control else "    control: skipped")
     for tier in tiers:
-        for i, site in enumerate(sites):
+        # Probe in the order of what is still UNKNOWN, not the registry's authored order. js_only is
+        # the open question and goes first; a site already measured blocked teaches nothing and is
+        # last even when --retry-blocked forces it. Registry order stays meaningful for the plain
+        # tier, where nothing has been measured yet.
+        ordered = (sorted(sites, key=_learning_order) if tier == "browser" else sites)
+        for i, site in enumerate(ordered):
             if aborted:
                 break
             host = site["domain"]
@@ -1198,6 +1241,21 @@ def main():
                     print(f"  {host:24s} browser tier skipped — plain already {prior['verdict']}")
                     continue
                 if site.get("needs_browser") is False and prior:
+                    continue
+                # Do not re-probe what is already measured, and do not let it spend the abort budget.
+                #
+                # Learned the hard way on 2026-08-07: a browser-tier run walked the registry in its
+                # authored order, hit google/skiplagged/kayak/momondo/cheapflights -- all already
+                # measured blocked on the plain tier -- and tripped ABORT_AFTER_BLOCKED before ever
+                # reaching skyscanner.ca, the ONE site the run existed to test. The guard was right
+                # (four consecutive blocks IS a fingerprinted IP) and the run was still wasted,
+                # because it spent its whole budget re-confirming known answers on hostile hosts.
+                rv = site.get("verdict")
+                if rv in ("no_deeplink", "unusable_role"):
+                    continue                       # no URL to fetch, or no fare to fetch
+                if rv == "blocked" and not a.retry_blocked:
+                    print(f"  {host:24s} skipped — measured blocked {site.get('measured_at')} "
+                          f"(--retry-blocked to force)")
                     continue
 
             control_html = None

@@ -60,6 +60,38 @@ URL *hash fragment*, which is never sent to the server.
 incident — the 97-price route page that satisfied every guard and texted a meaningless number. It is
 now behind a bot wall, so that specific failure is no longer even reachable by this path.
 
+## The browser tier: a wall served to urllib is served to headless Chromium too
+
+Measured 2026-08-07, `--tier browser`, same itinerary. Six sites reached before the run aborted:
+
+| site | plain | browser | change |
+|---|---|---|---|
+| google.com | captcha, 512 KB | captcha, hit the 2 MB cap | none |
+| skiplagged.com | 403, 5.6 KB | 200, 27 KB, still "enable javascript and cookies" | none |
+| kayak.com | "What is a bot?", 305 KB | **same wall**, 379 KB | none |
+| momondo.ca | "What is a bot?", 267 KB | **same wall**, 337 KB | none |
+| cheapflights.ca | "What is a bot?", 252 KB | **same wall**, 323 KB | none |
+
+The bodies grew because JavaScript ran; the wall is what it rendered. **Headless Chromium with a
+truthful UA and a persistent profile did not get past a single one of them**, which was the
+prediction and is now the measurement.
+
+### The run aborted before reaching the site it existed to test
+
+`ABORT_AFTER_BLOCKED` fired on four consecutive blocks — correctly, that is a fingerprinted IP — but
+it fired at cheapflights.ca, and **skyscanner.ca sits eighth in the registry's authored order**. The
+guard was right and the run was still wasted, because it spent its entire budget re-confirming
+answers already on file.
+
+Fixed in the instrument rather than worked around: the browser tier now sorts by *what is still
+unknown* (`js_only` first, `blocked` last), skips anything already measured `blocked` unless
+`--retry-blocked` is passed, and skips `no_deeplink`/`unusable_role` outright since there is nothing
+to fetch. Against the current registry a browser run now touches **exactly one site**, which is
+asserted by a test so the next measured verdict cannot silently re-bury it.
+
+The general lesson, and it is the same one as the misclassifications below: **a probe's job is to
+reduce what is unknown, so its budget belongs to open questions, not to confirmed ones.**
+
 ## What this says about the capability
 
 The refusal in `scripts/price_search.py` was right, and it is right for a *second*, independent
