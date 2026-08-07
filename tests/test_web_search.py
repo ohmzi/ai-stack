@@ -278,10 +278,10 @@ def main():
     ws.credit_tries(b, "fare", dead=["google", "startpage"])
     k = b["kinds"]["fare"]
     check("a dead engine gets no try", "google" not in k and "startpage" not in k, k)
-    check("...and every live one does",
-          all(k[e]["tries"] == 1 for e in ("brave", "qwant", "mojeek", "bing")), k)
+    live = [e for e in ws.ENGINE_ORDER if e != "google"]
+    check("...and every live one does", all(k[e]["tries"] == 1 for e in live), (k, live))
     check("a silent engine still gets a denominator — no 1-for-1 leaderboard jumps",
-          k["qwant"]["tries"] == 1 and k["qwant"]["wins"] == 0, k)
+          k["mojeek"]["tries"] == 1 and k["mojeek"]["wins"] == 0, k)
     ws.credit_win(b, "fare", ("brave", "bing"))
     check("both finders of the winning row are credited",
           k["brave"]["wins"] == 1 and k["bing"]["wins"] == 1, k)
@@ -346,11 +346,16 @@ def main():
     cfg = open(HERMES_SETTINGS).read()
     keep = re.findall(r"^      - (\w+)", cfg, re.M)
     flip = re.findall(r"^  - name: (\w+)", cfg, re.M)
-    check("the drift check found both directives", len(keep) >= 5 and len(flip) >= 5, (keep, flip))
+    check("the drift check found both directives", len(keep) >= 3 and len(flip) >= 2, (keep, flip))
     check("ENGINE_ORDER equals keep_only — 'tries = roster minus dead' is only honest if it does",
           sorted(ws.ENGINE_ORDER) == sorted(keep), (ws.ENGINE_ORDER, keep))
-    check("...and every one is also in the engines: block, so a bad NAME fails loudly at start",
-          sorted(keep) == sorted(flip), (keep, flip))
+    # The flip block is a SUBSET on purpose: it exists only to switch on engines that ship
+    # disabled: true upstream. Measured 2026-08-07 — an entry here for an engine that does not need
+    # one silently removed google from the roster entirely, with a clean start and empty logs.
+    check("the engines: block only flips engines that are in the roster",
+          set(flip) <= set(keep), (flip, keep))
+    check("...and it does not list engines that need no flip",
+          set(flip) == {"bing", "mojeek"}, flip)
     check("google is on the hermes roster — the whole point of the second instance",
           "google" in keep)
 

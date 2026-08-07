@@ -40,13 +40,17 @@ use_default_settings:
     keep_only:
       - google        # best long-tail recall for product and fare pages; also the highest CAPTCHA
                       # risk here, and safe only because it is absent from the chat roster, so
-                      # chat can never spend its budget and it can never spend chat's
-      - startpage     # Google's index through a different front end: a second chance at
-                      # Google-quality results when google itself is blocked
-      - brave         # genuinely independent crawl (not a Bing/Google reseller), keyless,
-                      # its own limit bucket, good retail coverage
-      - qwant         # Bing-class coverage from a DIFFERENT bucket than bing, so it adds that
-                      # index without spending bing's budget; en-CA-leaning suits .ca retailers
+                      # chat can never spend its budget and it can never spend chat's.
+                      # It exists in the image's defaults (its settings.yml:1217, and note that is
+                      # a DIFFERENT engine from `google cse` at :1236, which is the keyed API the
+                      # chat roster's comment says was dropped). See the `engines:` block below for
+                      # why it is deliberately NOT repeated there.
+      - brave         # genuinely independent crawl (not a Bing/Google reseller), keyless, its own
+                      # limit bucket. Measured 2026-08-07: INTERMITTENT, not dead — "too many
+                      # requests (suspended_time=180)" on one query and healthy on the next, where
+                      # it supplied the only relevant rows for a fare query while bing returned
+                      # payday-loan sites. A 180 s suspension is weather; keeping it is what makes
+                      # the fan-out worth having at all on this IP.
       - mojeek        # independent crawler, measured on this host never to rate-limit
                       # (compose/searxng/settings.yml:33). This is the FLOOR: it is what stops a
                       # fan-out ever returning zero results, which is what keeps the
@@ -54,13 +58,21 @@ use_default_settings:
       - bing          # measured "the most tolerant of server-to-server use from this IP"
                       # (compose/searxng/settings.yml:32) and the one engine that survived the
                       # audit's 50-query burst. Second floor engine.
-      # NOT kept, deliberately:
+      # NOT kept, and the first two are a MEASURED reversal of this file's first version:
+      #   startpage — CAPTCHA on the very first query this instance ever issued, and on every one
+      #     since: "get_sc_code: got redirected to .../sp/captcha (suspended_time=3600)". An hour
+      #     per attempt, from this IP, on sight.
+      #   qwant — same, every query: "CAPTCHA (suspended_time=0)". suspended_time=0 means SearXNG
+      #     retries it immediately next time, so it never stops costing a request.
+      #     Both were on the first roster on the theory that a hermes-only instance queries too
+      #     rarely to trip a limit. That theory is dead: this IP is blocked before any load builds
+      #     up. A blocked engine is not free — it costs an upstream request and holds the whole
+      #     fan-out until it answers or times out.
       #   wikipedia / wikidata — they populate infoboxes[] with url=None and title="", never
       #     results[]. Excluding them removes that hazard from this instance structurally.
       #     (web_search._usable() still guards it, because SEARXNG_URL can be pointed at :8888.)
       #   duckduckgo — its budget is already spent by chat AND by scripts/search_canary.py, whose
-      #     comment records "DuckDuckGo CAPTCHAs constantly". It is Bing-backed, so qwant already
-      #     covers that index from a cheaper bucket.
+      #     comment records "DuckDuckGo CAPTCHAs constantly".
 
 general:
   debug: false
@@ -109,20 +121,21 @@ ui:
 #   this `engines:` list FLIPS THE disabled FLAG on the ones that ship disabled upstream
 #   (bing and mojeek do — measured on this host; keep_only alone left them switched off).
 #
-# All six are listed even though only two need flipping, and that is deliberate. A name in
-# keep_only that does not exist is dropped SILENTLY — you could end up with a one-engine instance
-# and never know. A name HERE that does not exist is a new engine definition with no engine
-# module, which fails at container start, loudly, in `docker logs`. Listing all six converts
-# keep_only's silent typo into a loud one.
+# ONLY the engines that measurably need the flag flipped. The first version of this file listed
+# every engine here on the theory that a name in keep_only which does not exist is dropped
+# SILENTLY, while a name HERE with no engine module would fail loudly at container start — so
+# listing all of them would convert a silent typo into a visible one.
+#
+# THAT WAS WRONG, measured 2026-08-07. With `google` in both lists the container started cleanly,
+# exit 0, nothing in `docker logs`, and /config returned FIVE engines with google simply absent.
+# So a bad or redundant entry here is silent too, and worse: it appears to be what removed google,
+# which unlike bing and mojeek is NOT disabled upstream and therefore needs no flip at all. An
+# entry here for an engine that does not need one seems to shadow the real definition with a
+# module-less stub.
+#
+# The rule that survives: flip ONLY what ships disabled, and verify the roster against /config
+# after every change, because nothing here fails loudly.
 engines:
-  - name: google
-    disabled: false
-  - name: startpage
-    disabled: false
-  - name: brave
-    disabled: false
-  - name: qwant
-    disabled: false
   - name: mojeek
     disabled: false
   - name: bing

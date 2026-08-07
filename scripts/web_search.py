@@ -61,7 +61,10 @@ MERGE_CAP = 40
 # The roster of compose/searxng-hermes/settings.yml, in the order to prefer on a cold board.
 # A drift test asserts this tuple equals that file's roster in both of its directives — the
 # "tries = roster minus dead" bookkeeping below is only honest if it does.
-ENGINE_ORDER = ("google", "startpage", "brave", "qwant", "mojeek", "bing")
+# startpage and qwant were dropped after measurement: both CAPTCHA from this IP on the first query
+# and every one after. brave stays despite intermittent 180 s suspensions — it produced the only
+# relevant rows in the first live tests, where bing returned payday-loan sites for a flight query.
+ENGINE_ORDER = ("google", "brave", "mojeek", "bing")
 
 # The scoreboard lives in the monitor-state directory so it inherits price_watch's atomic write and
 # its tests' tempdir isolation. The leading underscore keeps it out of the --state namespace the

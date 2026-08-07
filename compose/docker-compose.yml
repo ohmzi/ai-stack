@@ -77,14 +77,20 @@ services:
   # test, one bump to review, and zero extra disk (identical layers). Bump both together and re-run
   # tests/test_websearch.py AND tests/test_web_search.py.
   #
-  # FIRST-RUN NOTE: create ./searxng-hermes/settings.yml BEFORE the first `up`. The entrypoint
-  # chowns /etc/searxng to nobody:nogroup, after which ohmz can edit files in place but cannot
-  # create or rename them in that directory (vim's write-backup-rename dance will fail).
+  # The settings file is mounted READ-ONLY and on its own, not as a directory — unlike the chat
+  # instance above, deliberately. The entrypoint chowns everything in /etc/searxng to
+  # nobody:nogroup, and on 2026-08-07 that took ownership of both compose/searxng-hermes/ AND the
+  # settings.yml inside it, so editing the file needed sudo and every restart would take it again.
+  # (compose/searxng/ escaped only because its settings.yml predates its container.) Mounting the
+  # single file leaves /etc/searxng container-local and writable, so the entrypoint is satisfied
+  # and generates its own limiter.toml there, while our config stays ours.
   #
   #   docker compose -f compose/docker-compose.yml up -d searxng-hermes
   #
   # Name the service on the command line. A bare `up -d` would recreate the chat container too,
   # and "chat search was not touched" is the property this whole split exists to guarantee.
+  # A settings.yml edit needs `up -d` (or `restart`) to be re-read; a change to THIS file needs
+  # `up -d` so the container is recreated.
   searxng-hermes:
     image: searxng/searxng@sha256:3bc6ae0e872ecd4b003e97e9cb58ec0fb56b02d46ad97ea67e2fa4ff2e8ff759
     container_name: searxng-hermes
@@ -92,7 +98,7 @@ services:
     ports:
       - "127.0.0.1:8889:8080"
     volumes:
-      - ./searxng-hermes:/etc/searxng:rw
+      - ./searxng-hermes/settings.yml:/etc/searxng/settings.yml:ro
     environment:
       - SEARXNG_BASE_URL=http://localhost:8889/
       # The same secret as the chat instance: it signs this instance's own cookies and nothing
