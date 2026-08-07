@@ -1,21 +1,29 @@
 {
-  "checked_at": "2026-08-07T18:16:13+00:00",
+  "checked_at": "2026-08-07T18:38:35+00:00",
   "searxng_8889": {
     "reachable": true,
-    "engines": [
+    "live": [
       "bing",
+      "brave",
+      "mojeek"
+    ],
+    "declared_in_web_search_py": [
+      "google",
       "brave",
       "mojeek",
-      "qwant",
-      "startpage"
+      "bing"
     ],
-    "google_present": false,
-    "expected": [
-      "bing",
-      "brave",
+    "declared_in_settings_yml": [
       "google",
-      "mojeek"
-    ]
+      "brave",
+      "mojeek",
+      "bing"
+    ],
+    "missing_from_live": [
+      "google"
+    ],
+    "unexpected_in_live": [],
+    "in_sync": false
   },
   "gateway_8642": {
     "reachable": true,

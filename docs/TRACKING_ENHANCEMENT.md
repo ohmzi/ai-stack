@@ -82,9 +82,39 @@ one-candidate-per-host, which is what a spammy single-engine result set collapse
 
 ## Still open
 
-1. **Google.** The one variable left is whether removing it from the flip block restores it; if not,
-   `search.default_lang: "en-CA"` is the next single thing to change. Until then, prefer
-   `price_watch.py --url` with a real link over the no-URL path.
+1. **Google. The flip-block theory is REFUTED — measured 2026-08-07, later the same day.** The
+   container had never been recreated after `a1b4558`, so the roster it was running was the *old*
+   one: `/config` returned `startpage, brave, qwant, mojeek, bing` while both declarations said
+   `google, brave, mojeek, bing`. Two bugs at once, pointing opposite ways — an addition that never
+   landed and a removal that never landed — and `tests/test_web_search.py` passed throughout, because
+   it pins the two *declarations* to each other and neither to the live instance.
+
+   After `docker compose up -d --force-recreate searxng-hermes` (a changed **mount** needs a
+   recreate, not a restart):
+
+   ```
+   live = ['bing', 'brave', 'mojeek']
+   ```
+
+   **startpage and qwant are gone, and google is still absent.** That recreate is the control: it
+   proves the file WAS reloaded, so "the container never picked it up" is no longer available as an
+   explanation. And the flip block now contains only `mojeek` and `bing` — `google` appears nowhere
+   in this file except `keep_only` and prose. So the hypothesis at :55-59, that a redundant
+   flip-block entry shadows the real definition with a module-less stub, **does not hold**: google was
+   absent with the entry and is absent without it. Its presence there was never the variable.
+
+   What is still unexplained is why `keep_only: [google, ...]` drops google specifically, silently,
+   with the container exiting 0. Do NOT change `search.default_lang` next just because this file
+   used to say so — that was the follow-on guess to a hypothesis now known to be wrong. Diagnose
+   before editing: whether the image's own defaults declare an engine named exactly `google` and
+   whether it ships disabled, whether the container logged anything at load, and whether `/config`
+   reports `enabled` for the three that survive. Verify against `/config` after every change —
+   nothing in that file fails loudly.
+
+   Until then, prefer `price_watch.py --url` with a real link over the no-URL path.
+
+   None of this touches flight fares: `scripts/flight_watch.py` issues no search queries at all,
+   because it builds its URL from an itinerary instead of finding one.
 2. **A fare capability, if wanted at all.** Would need a headless browser reading one specific
    itinerary, with an interpreter spelled out explicitly, and an honest verdict that it is a
    maintenance subscription rather than a feature. The refusal is a complete outcome without it.
