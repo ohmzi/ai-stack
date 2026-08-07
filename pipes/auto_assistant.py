@@ -6,6 +6,7 @@ required_open_webui_version: 0.5.0
 description: One model that decides - chats (with vision), makes a RedCraft image (with follow-up edits that stay anchored to the previous picture), or a Wan video. Background-task calls never render; QA checks edits against the original ask and the original image. Non-blocking (async). Never uses the uncensored model.
 """
 import asyncio, aiohttp, requests, time, base64, hashlib, os, random, re, json, sqlite3, sys, threading
+import calendar, datetime, urllib.parse   # flight slots: month lengths, date arithmetic, deep links
 from pydantic import BaseModel, Field
 
 # Conversation continuity for the media paths (task guard, persistent last-image store,
@@ -288,6 +289,30 @@ TASK_ADMINS = {h for h in os.environ.get("TASK_ADMINS", "ohmz omariqbal97").lowe
 JOBS_MAX = 25           # rows rendered before "…and N more"; keeps a runaway list readable
 CONFIRM_TTL_S = 600     # an armed delete older than this is refused, not silently ignored
 PARK_TTL_S = 86400      # a rendered list older than this stops backing ordinals
+
+# ---------- flight fare requests -----------------------------------------------------------------
+# A flight ask is not a price ask, and until now it was not routed like one either — it was not
+# routed at all. Measured against this file on 2026-08-07, seven of eight realistic phrasings
+# ("find me a cheap flight to Tokyo in March", "watch flights YYZ to YVR in September") reach NO
+# background task: _is_bg_task_request needs an imperative verb AND independent evidence of
+# recurrence, and "in September" is not recurrence. They fall through to the chat model, which has
+# no fare data and answers with a number it invented. _guess_kind already returns "fare" for all
+# eight and nothing consumed it, because the branch that would was never reached.
+#
+# So this path exists to stop a fabricated fare, which it can do WITHOUT being able to read a real
+# one. Measured across all 19 sites the user named (docs/FLIGHT_RECON.md): 11 block automated
+# clients outright, 6 have no fetchable URL, 2 are deal feeds. Zero are readable. So the terminal
+# action here is deliberately NOT "create a watch" — creating one would leave a monitor that fires,
+# reports fare_unsupported and texts nobody, which is the exact failure the phone gate at :5147
+# exists to prevent. The terminal action is an honest answer plus a Google Flights link built from
+# the user's own slots, which is a thing they can actually click.
+#
+# When a readable source appears — Chrome recon on the six unmeasured sites, or a keyed fare API —
+# the slot collection below is unchanged and only that final step moves.
+FLIGHT_ROUTE = True
+FLIGHT_CLASSIFIER = True   # the gemma3:1b tier for the ambiguous band; independent of the coder's
+FLIGHT_DRAFT_TTL_S = 3600  # an abandoned itinerary stops owning the conversation after an hour
+FLIGHT_MAX_TURNS = 6       # asks before the flow gives up and says so rather than looping
 # Alert wiring the pipe can see from inside the container. Both live in the OpenWebUI config
 # directory because that is the only path shared with the host, where the transports run:
 #   contacts — read AND written here, so a phone number the user types in chat is usable at once
@@ -457,6 +482,12 @@ class Pipe:
         self._armed = {}         # chat_id -> the destructive op awaiting a yes
         self._bg_turn = {}       # chat_id -> ts of the last background-task reply
         self._phone_ask = {}     # chat_id -> the request parked behind "what number should I text?"
+        # The itinerary being assembled in this chat. Same lifetime and eviction policy as the
+        # stores above: lost on a pipe reload, which costs continuity and never correctness, because
+        # _flight_draft_from_reply re-reads the slot table out of the last assistant turn. The state
+        # the user can SEE is the state of record — which is also why it is a visible table and not
+        # an HTML comment (see _marks: OpenWebUI escapes those wherever they appear).
+        self._flight_draft = {}  # chat_id -> {"t", "turns", "slots"}
 
     # ONE entry. It chats, sees images, writes code on the big coder tenant, renders images and
     # video, searches the web, reads your documents and remembers things — choosing the model per
@@ -1124,6 +1155,647 @@ class Pipe:
             if re.search(pat, t):
                 return kind
         return None
+
+    # ================= flight requests =================
+    # Airports resolvable by name. Curated, not complete, ON PURPOSE: an unknown place ASKS, and
+    # asking costs one turn, whereas guessing puts someone on a plane to the wrong city. Metro codes
+    # are preferred where they exist (YTO, NYC, LON, PAR) because every fare site accepts them and
+    # somebody saying "Toronto" usually means any Toronto airport, not Pearson specifically.
+    #
+    # Inline rather than a pipes/shared/ sidecar: deploy_pipe.py's SIDECARS is an explicit dict, so a
+    # sidecar would mean a new registration, a new byte-check in test_deployed.py, and a new
+    # silent-staleness mode — which that file's own comment calls "the reason a stale copy would never
+    # surface on its own". This ships atomically with the pipe.
+    _IATA = {
+        # Canada
+        "toronto": ("YTO", "Toronto"), "pearson": ("YYZ", "Toronto Pearson"),
+        "billy bishop": ("YTZ", "Toronto Billy Bishop"), "vancouver": ("YVR", "Vancouver"),
+        "montreal": ("YUL", "Montreal"), "calgary": ("YYC", "Calgary"),
+        "edmonton": ("YEG", "Edmonton"), "ottawa": ("YOW", "Ottawa"),
+        "winnipeg": ("YWG", "Winnipeg"), "halifax": ("YHZ", "Halifax"),
+        "quebec city": ("YQB", "Quebec City"), "victoria": ("YYJ", "Victoria"),
+        "saskatoon": ("YXE", "Saskatoon"), "regina": ("YQR", "Regina"),
+        "st johns": ("YYT", "St John's"), "kelowna": ("YLW", "Kelowna"),
+        "abbotsford": ("YXX", "Abbotsford"), "hamilton": ("YHM", "Hamilton ON"),
+        # United States
+        "new york": ("NYC", "New York"), "jfk": ("JFK", "New York JFK"),
+        "newark": ("EWR", "Newark"), "laguardia": ("LGA", "New York LaGuardia"),
+        "los angeles": ("LAX", "Los Angeles"), "san francisco": ("SFO", "San Francisco"),
+        "chicago": ("CHI", "Chicago"), "boston": ("BOS", "Boston"),
+        "seattle": ("SEA", "Seattle"), "miami": ("MIA", "Miami"),
+        "orlando": ("MCO", "Orlando"), "las vegas": ("LAS", "Las Vegas"),
+        "denver": ("DEN", "Denver"), "atlanta": ("ATL", "Atlanta"),
+        "dallas": ("DFW", "Dallas"), "houston": ("IAH", "Houston"),
+        "phoenix": ("PHX", "Phoenix"), "washington": ("WAS", "Washington DC"),
+        "philadelphia": ("PHL", "Philadelphia"), "san diego": ("SAN", "San Diego"),
+        "honolulu": ("HNL", "Honolulu"), "detroit": ("DTW", "Detroit"),
+        "minneapolis": ("MSP", "Minneapolis"), "austin": ("AUS", "Austin"),
+        # Europe
+        "london": ("LON", "London"), "heathrow": ("LHR", "London Heathrow"),
+        "gatwick": ("LGW", "London Gatwick"), "paris": ("PAR", "Paris"),
+        "amsterdam": ("AMS", "Amsterdam"), "frankfurt": ("FRA", "Frankfurt"),
+        "munich": ("MUC", "Munich"), "berlin": ("BER", "Berlin"),
+        "madrid": ("MAD", "Madrid"), "barcelona": ("BCN", "Barcelona"),
+        "lisbon": ("LIS", "Lisbon"), "porto": ("OPO", "Porto"),
+        "rome": ("ROM", "Rome"), "milan": ("MIL", "Milan"),
+        "venice": ("VCE", "Venice"), "zurich": ("ZRH", "Zurich"),
+        "geneva": ("GVA", "Geneva"), "vienna": ("VIE", "Vienna"),
+        "prague": ("PRG", "Prague"), "budapest": ("BUD", "Budapest"),
+        "warsaw": ("WAW", "Warsaw"), "copenhagen": ("CPH", "Copenhagen"),
+        "stockholm": ("STO", "Stockholm"), "oslo": ("OSL", "Oslo"),
+        "helsinki": ("HEL", "Helsinki"), "dublin": ("DUB", "Dublin"),
+        "edinburgh": ("EDI", "Edinburgh"), "manchester": ("MAN", "Manchester"),
+        "reykjavik": ("KEF", "Reykjavik"), "athens": ("ATH", "Athens"),
+        "istanbul": ("IST", "Istanbul"), "brussels": ("BRU", "Brussels"),
+        # Asia, Middle East, Africa
+        "tokyo": ("TYO", "Tokyo"), "narita": ("NRT", "Tokyo Narita"),
+        "haneda": ("HND", "Tokyo Haneda"), "osaka": ("OSA", "Osaka"),
+        "seoul": ("SEL", "Seoul"), "beijing": ("BJS", "Beijing"),
+        "shanghai": ("SHA", "Shanghai"), "hong kong": ("HKG", "Hong Kong"),
+        "taipei": ("TPE", "Taipei"), "singapore": ("SIN", "Singapore"),
+        "bangkok": ("BKK", "Bangkok"), "kuala lumpur": ("KUL", "Kuala Lumpur"),
+        "jakarta": ("CGK", "Jakarta"), "manila": ("MNL", "Manila"),
+        "delhi": ("DEL", "Delhi"), "new delhi": ("DEL", "Delhi"),
+        "mumbai": ("BOM", "Mumbai"), "bangalore": ("BLR", "Bangalore"),
+        "chennai": ("MAA", "Chennai"), "hyderabad": ("HYD", "Hyderabad"),
+        "karachi": ("KHI", "Karachi"), "lahore": ("LHE", "Lahore"),
+        "islamabad": ("ISB", "Islamabad"), "dhaka": ("DAC", "Dhaka"),
+        "colombo": ("CMB", "Colombo"), "kathmandu": ("KTM", "Kathmandu"),
+        "dubai": ("DXB", "Dubai"), "abu dhabi": ("AUH", "Abu Dhabi"),
+        "doha": ("DOH", "Doha"), "riyadh": ("RUH", "Riyadh"),
+        "jeddah": ("JED", "Jeddah"), "tel aviv": ("TLV", "Tel Aviv"),
+        "cairo": ("CAI", "Cairo"), "nairobi": ("NBO", "Nairobi"),
+        "johannesburg": ("JNB", "Johannesburg"), "cape town": ("CPT", "Cape Town"),
+        "lagos": ("LOS", "Lagos"), "casablanca": ("CMN", "Casablanca"),
+        "addis ababa": ("ADD", "Addis Ababa"),
+        # Oceania, Latin America
+        "sydney": ("SYD", "Sydney"), "melbourne": ("MEL", "Melbourne"),
+        "brisbane": ("BNE", "Brisbane"), "perth": ("PER", "Perth"),
+        "auckland": ("AKL", "Auckland"), "mexico city": ("MEX", "Mexico City"),
+        "cancun": ("CUN", "Cancun"), "sao paulo": ("SAO", "Sao Paulo"),
+        "rio": ("RIO", "Rio de Janeiro"), "rio de janeiro": ("RIO", "Rio de Janeiro"),
+        "buenos aires": ("BUE", "Buenos Aires"), "santiago": ("SCL", "Santiago"),
+        "lima": ("LIM", "Lima"), "bogota": ("BOG", "Bogota"),
+        "havana": ("HAV", "Havana"), "san juan": ("SJU", "San Juan"),
+        "punta cana": ("PUJ", "Punta Cana"), "montego bay": ("MBJ", "Montego Bay"),
+    }
+    _CODE_NAME = {c: n for c, n in _IATA.values()}
+
+    # --- intent. DEFAULT DENY, and the deny arms run FIRST, because "my flight was delayed" carries
+    # every positive token a real request does. Same discipline as _is_image_request (:868-877).
+    _FLIGHT_FIGURATIVE = re.compile(
+        r"\bflights?\s+of\s+(?:stairs?|fancy|steps?|imagination)\b"
+        r"|\b(?:flight|aviation)\s+(?:simulator|sim|school|attendant|crew|deck|recorder|path|risk"
+        r"|plan|log|academy|training)\b"
+        r"|\bin[\s-]flight\s+(?:entertainment|meal|wifi|service)\b"
+        r"|\b(?:bus|train|taxi|uber|lyft|transit|subway|metro|cab|ferry|toll)\s+fares?\b"
+        r"|\btook\s+flight\b|\bpowered\s+flight\b|\bflight\s+of\s+the\b"
+        r"|\bhow\s+(?:did|does|do)\s+(?:you|i|we|they|it)\s+fare\b|\bfare\s+thee\s+well\b", re.I)
+    _FLIGHT_PAST = re.compile(
+        r"\b(?:my|our|his|her|their|the)\s+flight\s+(?:was|is|got|has|had|arrives?|arrived"
+        r"|lands?|landed|leaves?|left|departs?|took|boards?|gets?\s+in)\b"
+        r"|\bi\s+(?:flew|took\s+a\s+flight|watched|saw|read|missed|already\s+booked|just\s+booked)\b"
+        r"|\bflights?\s+(?:i|we|they)\s+(?:booked|took|missed)\b", re.I)
+    # Asking ABOUT air travel rather than for a flight. Narrower than _BG_QUESTION, because
+    # "how much is a flight to reykjavik in feb" IS a request wearing a question mark. Manage verbs
+    # are denied here so "stop watching flights to vancouver" reaches the scheduler path.
+    _FLIGHT_META = re.compile(
+        r"^\s*(?:how|why)\s+(?:do|does|are|is|come)\b"
+        r"|^\s*is\s+it\s+(?:cheap(?:er)?|better|worth|smart|ok|possible|true|safe)\b"
+        r"|^\s*should\s+i\b|^\s*(?:do|does)\s+(?:flight|airline|fare|price)s?\b"
+        r"|^\s*wh(?:at|ich)\s+(?:airlines?|carriers?|planes?|aircraft|airports?)\b"
+        r"|^\s*wh(?:at|en)\s+is\s+the\s+(?:best|cheapest|worst)\s+(?:time|day|month|season)\b"
+        r"|^\s*(?:cancel|delete|remove|stop|pause|resume|end|kill|disable|unpause|turn\s+off)\b",
+        re.I)
+    # Signal 1: this is about air travel. Bare \bfares?\b is included because _KIND_RULES already
+    # uses it for the fare kind and the two must agree; its false friends are denied above.
+    _FLIGHT_NOUN = re.compile(
+        r"\bflights?\b|\bairfares?\b|\bair\s?fares?\b|\bfares?\b|\bplane\s+tickets?\b"
+        r"|\bairline\s+tickets?\b|\bround[\s-]?trips?\b|\bred[\s-]?eyes?\b"
+        # "a one way to calgary" and "cheapest nonstop from montreal" name air travel with no other
+        # noun in the sentence. Both are safe here only because a route AND a request frame are still
+        # required: "one way or another" and "she talked nonstop" name no place, and "it's a one way
+        # street to Rome" matches no imperative. Pinned by negatives in tests/test_flight_intent.py.
+        r"|\bone[\s-]?way\b|\bnon[\s-]?stops?\b|\blayovers?\b"
+        r"|\bfly(?:ing)?\s+(?:from|to|out)\b", re.I)
+    # An IATA pair is a noun and a route in one token. Case is the precision signal, so this runs on
+    # the ORIGINAL text; a lowercase pair needs a hard separator and must be in the table.
+    _FLIGHT_PAIR = re.compile(r"\b([A-Z]{3})\s*(?:->|→|–|—|-|to|/)\s*([A-Z]{3})\b")
+    _FLIGHT_PAIR_LC = re.compile(r"\b([a-z]{3})\s*(?:->|→|/|-)\s*([a-z]{3})\b")
+    # Signal 2: a request frame, anchored. Position is the discriminator, as in _IMPERATIVE_DRAW.
+    _FLIGHT_ASK = re.compile(
+        r"^\s*(?:please\s+|pls\s+|hey\s+|ok(?:ay)?[,\s]+|so\s+|and\s+|also\s+)*"
+        r"(?:(?:can|could|will|would)\s+you\s+(?:please\s+)?)?"
+        r"(?:find|search|look|get|show|give|book|price|check|compare|watch|track|monitor"
+        r"|keep\s+an\s+eye\s+on|alert\s+me|notify\s+me|text\s+me|ping\s+me|email\s+me"
+        r"|tell\s+me\s+(?:when|if)|let\s+me\s+know\s+(?:when|if)"
+        r"|i\s+(?:want|need|am\s+looking|wanna|would\s+like)|looking\s+for|set\s+up|add)\b", re.I)
+    _FLIGHT_SUPER = re.compile(
+        r"\b(?:cheap(?:est|er)?|best|lowest|good|affordable|deals?\s+on)\s+(?:\w+\s+){0,2}"
+        r"(?:flights?|fares?|airfares?|tickets?|deals?)\b"
+        r"|\b(?:flights?|fares?|tickets?)\s+(?:under|below)\s+\$?\d"
+        r"|\bhow\s+much\s+(?:is|are|would|will)\b[^?]{0,30}\b(?:flights?|fares?|tickets?)\b", re.I)
+    # Signal 3: somewhere to go. This is what separates a request from a question about pricing in
+    # general — "is it cheaper to book flights on a tuesday" has the noun and a superlative and names
+    # no destination.
+    _FL_STOP = (r"(?:book|buy|fly|flying|get|find|save|be|do|go|going|make|watch|track|see|check"
+                r"|know|my|the|a|an|it|there|that|this|and|or|me|us|now|then)")
+    _FLIGHT_PLACE = re.compile(rf"\b(?:to|from|into)\s+(?!{_FL_STOP}\b)([A-Za-z][A-Za-z.'\- ]{{2,}})",
+                               re.I)
+
+    _FLIGHT_CLASSIFY_PROMPT = (
+        "Classify the user's message. Answer with ONE word, nothing else.\n"
+        "Answer FLIGHT if they want you to find, price, book or watch an air fare or plane ticket "
+        "for a trip they have not taken yet.\n"
+        "Answer OTHER for anything else, including a flight they already took or booked, questions "
+        "about airlines or airports, how ticket pricing works, and any other kind of price or stock "
+        "watching.\n\n"
+        "Examples:\n"
+        "flights to tokyo -> FLIGHT\n"
+        "my flight was delayed three hours -> OTHER\n"
+        "yyz yvr september -> FLIGHT\n"
+        "what airline flies to osaka -> OTHER\n"
+        "round trip lisbon october -> FLIGHT\n"
+        "how do flight prices work -> OTHER\n"
+        "airfare tokyo march under 900 -> FLIGHT\n"
+        "track the price of the rtx 5090 -> OTHER\n\n"
+        "Message: {msg}\nAnswer:")
+
+    def _flight_deny(self, text):
+        t = text or ""
+        return bool(self._FLIGHT_FIGURATIVE.search(t) or self._FLIGHT_PAST.search(t)
+                    or self._FLIGHT_META.search(t))
+
+    def _flight_pair(self, text):
+        m = self._FLIGHT_PAIR.search(text or "")
+        if m:
+            return m.group(1).upper(), m.group(2).upper()
+        m = self._FLIGHT_PAIR_LC.search((text or "").lower())
+        if m:
+            a, b = m.group(1).upper(), m.group(2).upper()
+            if a in self._CODE_NAME and b in self._CODE_NAME:
+                return a, b
+        return None
+
+    def _classify_flight(self, text):
+        """The 1B tier for the ambiguous band. Same contract as _classify_code, deliberately.
+
+        Any failure returns False so the turn falls back to ordinary routing — a routing helper must
+        never be able to break the chat path. Every call writes a job:'classifier' row carrying
+        domain='flight', which is what keeps the two consult streams separable in route_metrics.
+        """
+        t0 = time.monotonic()
+        try:
+            r = requests.post(
+                f"{self.ollama}/api/chat",
+                json={"model": ROUTE_CLASSIFIER_MODEL, "stream": False, "think": False,
+                      "options": {"temperature": 0, "num_predict": 4},
+                      "messages": [{"role": "user",
+                                    "content": self._FLIGHT_CLASSIFY_PROMPT.format(msg=text[:600])}]},
+                timeout=ROUTE_CLASSIFIER_TIMEOUT)
+            latency = round((time.monotonic() - t0) * 1000)
+            if r.status_code != 200:
+                self._metric(job="classifier", domain="flight", ok=False,
+                             error=f"http_{r.status_code}", latency_ms=latency)
+                return False
+            verdict = ((r.json().get("message") or {}).get("content") or "").strip().upper()
+            self._metric(job="classifier", domain="flight", ok=True, verdict=verdict[:12],
+                         latency_ms=latency)
+            return verdict.startswith("FLIGHT")
+        except Exception as e:
+            self._metric(job="classifier", domain="flight", ok=False,
+                         error=type(e).__name__, latency_ms=round((time.monotonic() - t0) * 1000))
+            return False
+
+    def _is_flight_request(self, text):
+        """(tier, rule) when this turn asks for a flight fare, else (None, None)."""
+        if not FLIGHT_ROUTE or not text:
+            return None, None
+        if self._flight_deny(text):
+            return None, None
+        pair = self._flight_pair(text)
+        if not (pair or self._FLIGHT_NOUN.search(text)):
+            return None, None
+        framed = bool(self._FLIGHT_ASK.match(text) or self._FLIGHT_SUPER.search(text))
+        placed = bool(pair or self._FLIGHT_PLACE.search(text))
+        if framed and placed:
+            return 1, "flight_strong"
+        # HINT band. Suppressed on developer vocabulary: "build me a flight search API" has the noun,
+        # no frame, and belongs to the coder tier further down the cascade.
+        if not FLIGHT_CLASSIFIER or self._CODE_HINT.search(text):
+            return None, None
+        if self._classify_flight(text):
+            return 3, "flight_classifier"
+        return None, None
+
+    # --- slots. Everything here is deterministic. The model never supplies a date, an airport or a
+    # number, only ever a category — the same closed-hallucination-surface rule _KIND_RULES states
+    # at :1095. A guessed itinerary is watched forever and the user finds out at the airport.
+    _FL_MON = {m: i for i, m in enumerate(
+        ["", "jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "oct", "nov", "dec"])
+        if m}
+    _FL_MONWORD = (r"jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|jun(?:e)?|jul(?:y)?"
+                   r"|aug(?:ust)?|sep(?:t|tember)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?")
+    _FL_ISO = re.compile(r"\b(20\d{2})-(\d{1,2})-(\d{1,2})\b")
+    _FL_MD = re.compile(rf"\b({_FL_MONWORD})\.?\s+(\d{{1,2}})(?:st|nd|rd|th)?\b", re.I)
+    _FL_DM = re.compile(rf"\b(\d{{1,2}})(?:st|nd|rd|th)?\s+({_FL_MONWORD})\b", re.I)
+    _FL_NEXTDOW = re.compile(r"\b(?:next|this)\s+"
+                             r"(mon|tue|tues|wed|thu|thur|thurs|fri|sat|sun)[a-z]*\b", re.I)
+    _FL_INN = re.compile(r"\bin\s+(\d{1,2})\s+(day|week|month)s?\b", re.I)
+    # A part-month is a RANGE; a bare month is a MONTH. Ordering matters and is load-bearing:
+    # "first week of september" must be claimed here before the bare-month arm sees "september".
+    _FL_PARTMON = re.compile(rf"\b(early|mid(?:dle)?|late|first\s+week\s+of|last\s+week\s+of"
+                             rf"|second\s+week\s+of|third\s+week\s+of|beginning\s+of|end\s+of)\s+"
+                             rf"({_FL_MONWORD})\b", re.I)
+    _FL_BAREMON = re.compile(rf"\b(?:in|during|sometime\s+in|for|around)\s+({_FL_MONWORD})\b"
+                             rf"(?!\s*\.?\s*\d)", re.I)
+    _FL_ONEWAY = re.compile(r"\bone[\s-]?way\b|\bno\s+return\b|\bnot\s+coming\s+back\b"
+                            r"|\bsingle\s+ticket\b|\bjust\s+going\b", re.I)
+    _FL_TRIPLEN = re.compile(r"\bfor\s+(?:(\d{1,2})|a|one|two|three|four)\s+(day|week|month|night)s?\b"
+                             r"|\b(\d{1,2})\s+nights?\b|\b(long\s+weekend)\b", re.I)
+    _FL_SEASON = re.compile(r"\b(spring|summer|fall|autumn|winter|holidays?|christmas|new\s+year)\b",
+                            re.I)
+    _FL_TARGET = re.compile(r"\b(?:under|below|less\s+than|at\s+most|max(?:imum)?|budget\s+of"
+                            r"|no\s+more\s+than|cheaper\s+than)\s*\$?\s*([\d,]+(?:\.\d{2})?)\b", re.I)
+    _FL_WORDNUM = {"a": 1, "one": 1, "two": 2, "three": 3, "four": 4}
+    _FL_DOW = {"mon": 0, "tue": 1, "tues": 1, "wed": 2, "thu": 3, "thur": 3, "thurs": 3,
+               "fri": 4, "sat": 5, "sun": 6}
+
+    @classmethod
+    def _fl_month_spec(cls, mon, today, part=None):
+        """A month name -> a month or range spec, resolved to the NEXT occurrence.
+
+        "in March" asked in August 2026 means March 2027, not a date four months past. A month that
+        is partly elapsed keeps only its remaining days; one fully past rolls to next year.
+        """
+        mi = cls._FL_MON[mon[:3].lower()]
+        year = today.year if (mi > today.month or (mi == today.month)) else today.year + 1
+        last = calendar.monthrange(year, mi)[1]
+        if not part:
+            lo = max(datetime.date(year, mi, 1), today)
+            return {"kind": "month", "month": f"{year:04d}-{mi:02d}",
+                    "from": lo.isoformat(), "to": datetime.date(year, mi, last).isoformat()}
+        p = part.lower()
+        if p.startswith(("early", "beginning", "first")):
+            a, b = 1, 7
+        elif p.startswith(("mid", "second", "third")):
+            a, b = 8 if p.startswith(("mid", "second")) else 15, 14 if p.startswith(("mid", "second")) else 21
+        else:                                       # late / last week / end of
+            a, b = max(1, last - 6), last
+        lo = max(datetime.date(year, mi, a), today)
+        return {"kind": "range", "month": f"{year:04d}-{mi:02d}",
+                "from": lo.isoformat(), "to": datetime.date(year, mi, b).isoformat()}
+
+    @classmethod
+    def _fl_find_dates(cls, text, today):
+        """[spec, ...] in the order they appear. Exact dates first, then ranges, then bare months.
+
+        Each arm removes what it consumed, so "Sep 3 back Sep 10" cannot also be read as a bare
+        September, and "first week of September" cannot be re-read as the whole month.
+        """
+        t = text or ""
+        found = []
+
+        def take(pat, fn):
+            nonlocal t
+            out = []
+            for m in pat.finditer(t):
+                spec = fn(m)
+                if spec:
+                    out.append((m.start(), spec))
+            for m in reversed(list(pat.finditer(t))):
+                t = t[:m.start()] + " " * (m.end() - m.start()) + t[m.end():]
+            found.extend(out)
+
+        def _exact(y, mo, d):
+            try:
+                dt = datetime.date(int(y), int(mo), int(d))
+            except ValueError:
+                return None
+            return {"kind": "exact", "date": dt.isoformat()}
+
+        take(cls._FL_ISO, lambda m: _exact(m.group(1), m.group(2), m.group(3)))
+
+        def _monthday(mon, day):
+            """A month/day with no year -> the next occurrence of it. 'Dec 20 returning Jan 5' has to
+            roll the January over, or the return lands eleven months before the departure."""
+            mi = cls._FL_MON[mon[:3].lower()]
+            d = int(day)
+            y = today.year if (mi, d) >= (today.month, today.day) else today.year + 1
+            return _exact(y, mi, d)
+
+        take(cls._FL_MD, lambda m: _monthday(m.group(1), m.group(2)))   # "Sep 15"
+        take(cls._FL_DM, lambda m: _monthday(m.group(2), m.group(1)))   # "15 Sep"
+
+        def _dow(m):
+            want = cls._FL_DOW.get(m.group(1)[:4].lower(), cls._FL_DOW.get(m.group(1)[:3].lower()))
+            if want is None:
+                return None
+            ahead = (want - today.weekday()) % 7 or 7
+            return {"kind": "exact", "date": (today + datetime.timedelta(days=ahead)).isoformat()}
+        take(cls._FL_NEXTDOW, _dow)
+
+        def _inn(m):
+            n, unit = int(m.group(1)), m.group(2).lower()
+            days = n * {"day": 1, "week": 7, "month": 30}[unit]
+            return {"kind": "exact", "date": (today + datetime.timedelta(days=days)).isoformat()}
+        take(cls._FL_INN, _inn)
+
+        take(cls._FL_PARTMON, lambda m: cls._fl_month_spec(m.group(2), today, part=m.group(1)))
+        take(cls._FL_BAREMON, lambda m: cls._fl_month_spec(m.group(1), today))
+        return [s for _o, s in sorted(found, key=lambda p: p[0])]
+
+    @classmethod
+    def _fl_trip_days(cls, text):
+        m = cls._FL_TRIPLEN.search(text or "")
+        if not m:
+            return None
+        if m.group(4):                                   # "long weekend"
+            return 3
+        if m.group(3):                                   # "10 nights"
+            return int(m.group(3))
+        n = int(m.group(1)) if m.group(1) else cls._FL_WORDNUM.get(
+            (m.group(0).split()[1] if len(m.group(0).split()) > 1 else "a"), 1)
+        return n * {"day": 1, "night": 1, "week": 7, "month": 30}[m.group(2).lower()]
+
+    def _fl_scan_places(self, low):
+        """[(start, end, code, display)] for every airport name in the text, non-overlapping.
+
+        Longest name first so "toronto pearson" beats "toronto", then sorted back into DOCUMENT
+        order — which is the part that matters, and the part the first version got wrong.
+        """
+        hits, taken = [], [False] * len(low)
+        for name in sorted(self._IATA, key=len, reverse=True):
+            for m in re.finditer(rf"(?<![a-z]){re.escape(name)}(?![a-z])", low):
+                if any(taken[m.start():m.end()]):
+                    continue
+                for i in range(m.start(), m.end()):
+                    taken[i] = True
+                code, disp = self._IATA[name]
+                hits.append((m.start(), m.end(), code, disp))
+        return sorted(hits)
+
+    def _fl_places(self, text):
+        """(origin, dest, unknown_fragments). Either place may be None.
+
+        POSITIONAL, not fragment-matching, and that is the fix for two live bugs. Matching inside a
+        "from ..." capture read "from toronto to vancouver" as origin=Vancouver, because the capture
+        swallowed the whole tail and longest-name-first found "vancouver" before "toronto". And
+        keying only off prepositions missed a bare "toronto to karachi" entirely, since nothing says
+        "from". Scanning for every airport and then reading the separators between them handles both,
+        and handles "YYZ to YVR" and "montreal to porto" with the same rule.
+        """
+        pair = self._flight_pair(text)
+        if pair:
+            a, b = pair
+            return ((a, self._CODE_NAME.get(a, a)), (b, self._CODE_NAME.get(b, b)), [])
+        low = (text or "").lower()
+        hits = self._fl_scan_places(low)
+        origin = dest = None
+        for st, _en, code, disp in hits:
+            pre = low[max(0, st - 8):st]
+            if re.search(r"\bfrom\s+$", pre) and not origin:
+                origin = (code, disp)
+            elif re.search(r"\b(?:to|into)\s+$", pre) and not dest:
+                dest = (code, disp)
+        # A bare "A to B" with no "from": the separator between two adjacent places IS the direction.
+        if len(hits) >= 2 and not (origin and dest):
+            for a, b in zip(hits, hits[1:]):
+                if re.fullmatch(r"\s*(?:to|-|–|—|→|>|until)\s*", low[a[1]:b[0]]):
+                    origin = origin or (a[2], a[3])
+                    dest = (b[2], b[3])
+                    break
+        # A named place that resolved to nothing is worth asking about rather than ignoring.
+        unknown = []
+        for m in re.finditer(r"\b(?:to|from|into)\s+([a-z][a-z.'\- ]{2,}?)"
+                             r"(?=\s*(?:$|[,.]|\b(?:on|in|for|under|below|and|back|returning"
+                             r"|departing|leaving|between|around|next|this|by|before|after|to)\b))",
+                             low):
+            frag = m.group(1).strip(" .,-'")
+            if frag and not any(s <= m.start(1) < e for s, e, _c, _d in hits) \
+                    and frag not in unknown and len(frag) > 2:
+                unknown.append(frag)
+        return origin, dest, unknown
+
+    def _flight_slots(self, text, prev=None, today=None):
+        """The itinerary this turn describes, merged onto any draft already in flight."""
+        today = today or datetime.date.today()
+        s = dict(prev or {})
+        o, d, unknown = self._fl_places(text)
+        if o:
+            s["origin"] = list(o)
+        if d:
+            s["dest"] = list(d)
+        if unknown:
+            s["unknown_places"] = unknown
+        dates = self._fl_find_dates(text, today)
+        if dates:
+            s["depart"] = dates[0]
+            if len(dates) > 1:
+                s["ret"] = dates[1]
+            elif dates[0]["kind"] in ("month", "range") and "ret" not in s:
+                # A same-window round trip is overwhelmingly the common case. Defaulted rather than
+                # asked, and STATED in the reply so one word corrects it.
+                s["ret"] = dict(dates[0])
+                s["ret_defaulted"] = True
+        if self._FL_ONEWAY.search(text or ""):
+            s["one_way"] = True
+            s.pop("ret", None)
+            s.pop("ret_defaulted", None)
+        n = self._fl_trip_days(text)
+        if n:
+            s["trip_days"] = n
+        m = self._FL_TARGET.search(text or "")
+        if m:
+            s["target"] = float(m.group(1).replace(",", ""))
+        if self._FL_SEASON.search(text or "") and not dates:
+            s["season_only"] = True
+        return s
+
+    @staticmethod
+    def _flight_missing(s):
+        """Which slots still block an answer. Target is optional; a contact is not needed at all,
+        because nothing is scheduled — there is nothing to be notified about."""
+        need = []
+        if not s.get("origin"):
+            need.append("origin")
+        if not s.get("dest"):
+            need.append("destination")
+        if not s.get("depart"):
+            need.append("dates")
+        return need
+
+    # --- rendering. The slot table is deliberately VISIBLE, and it is also the recovery mechanism:
+    # _flight_draft_from_reply reads it back out of the transcript when the in-memory draft is lost
+    # to a pipe reload. State the user can see is state that survives, which is the opposite of the
+    # HTML-comment approach _marks() records as having failed.
+    _FL_TBL_O = re.compile(r"\|\s*From\s*\|\s*\*\*([A-Z]{3})\*\*\s*([^|]*)\|")
+    _FL_TBL_D = re.compile(r"\|\s*To\s*\|\s*\*\*([A-Z]{3})\*\*\s*([^|]*)\|")
+    _FL_TBL_DEP = re.compile(r"\|\s*Depart\s*\|\s*\*\*([^*]+)\*\*")
+    _FL_TBL_RET = re.compile(r"\|\s*Return\s*\|\s*\*\*([^*]+)\*\*")
+
+    @staticmethod
+    def _fl_show(spec):
+        """A date spec as a person would say it."""
+        if not spec:
+            return None
+        if spec["kind"] == "exact":
+            d = datetime.date.fromisoformat(spec["date"])
+            return d.strftime("%a %-d %b %Y") if os.name != "nt" else d.strftime("%a %d %b %Y")
+        lo = datetime.date.fromisoformat(spec["from"])
+        hi = datetime.date.fromisoformat(spec["to"])
+        if spec["kind"] == "month":
+            return f"any time in {lo.strftime('%B %Y')}"
+        return f"{lo.day}–{hi.day} {lo.strftime('%B %Y')}"
+
+    def _gflights_url(self, s):
+        """A Google Flights deep link for these slots. Its ?q= form takes natural language, which is
+        why a month works here at all — and it is the one place a user can act on this today."""
+        o = (s.get("origin") or ["", ""])[0]
+        d = (s.get("dest") or ["", ""])[0]
+        dep, ret = s.get("depart"), s.get("ret")
+        lead = "One way flights" if s.get("one_way") or not ret else "Flights"
+        q = f"{lead} from {o} to {d}"
+        if dep and dep["kind"] == "exact":
+            q += f" on {dep['date']}"
+            if ret and ret.get("kind") == "exact":
+                q += f" through {ret['date']}"
+        elif dep:
+            lo = datetime.date.fromisoformat(dep["from"])
+            q += f" in {lo.strftime('%B %Y')}"
+        return ("https://www.google.com/travel/flights?q="
+                + urllib.parse.quote(q) + "&curr=CAD&hl=en-CA")
+
+    def _flight_table(self, s):
+        rows = []
+        for label, key in (("From", "origin"), ("To", "dest")):
+            v = s.get(key)
+            rows.append(f"| {label} | **{v[0]}** {v[1]} |" if v
+                        else f"| {label} | ❓ *need this* |")
+        rows.append(f"| Depart | **{self._fl_show(s.get('depart'))}** |" if s.get("depart")
+                    else "| Depart | ❓ *need this* |")
+        if s.get("one_way"):
+            rows.append("| Return | *one way* |")
+        else:
+            r = self._fl_show(s.get("ret"))
+            rows.append(f"| Return | **{r}**{' *(assumed same window — say so if not)*' if s.get('ret_defaulted') else ''} |"
+                        if r else "| Return | ❓ *need this — or say **one way*** |")
+        if s.get("target"):
+            rows.append(f"| Budget | under **${s['target']:,.0f}** |")
+        if s.get("trip_days"):
+            rows.append(f"| Trip length | about **{s['trip_days']} days** |")
+        return "| | |\n|---|---|\n" + "\n".join(rows)
+
+    def _flight_draft_from_reply(self, messages):
+        """Recover a draft from the last assistant turn's visible table, or None."""
+        prev = next((m.get("content") or "" for m in reversed(messages or [])
+                     if m.get("role") == "assistant"), "")
+        if "✈️" not in prev:
+            return None
+        s = {}
+        for pat, key in ((self._FL_TBL_O, "origin"), (self._FL_TBL_D, "dest")):
+            m = pat.search(prev)
+            if m:
+                s[key] = [m.group(1), m.group(2).strip()]
+        return s or None
+
+    def _flight_ask(self, s, cid, turns):
+        """Ask for everything still missing, in ONE message. With three or four slots, one-at-a-time
+        is four round trips and four chances to lose the thread; most real asks already carry two."""
+        need = self._flight_missing(s)
+        if cid:
+            self._lru(self._flight_draft, cid, {"t": time.time(), "turns": turns, "slots": s})
+        asks, hints = [], []
+        if "origin" in need:
+            asks.append("**where you're flying from**")
+        if "destination" in need:
+            asks.append("**where you're going**")
+        if "dates" in need:
+            asks.append("**when**")
+            hints.append("A month like *March* is fine — I'll search the whole thing.")
+        unknown = s.get("unknown_places") or []
+        note = ("\n\n*" + " ".join(hints) + "*") if hints else ""
+        if unknown:
+            note = (f"\n\nI don't know **{unknown[0]}** as an airport — give me a bigger nearby city "
+                    f"or its 3-letter code.")
+        if s.get("season_only"):
+            note += ("\n\nAlso, *“the fall”* is three months and no site can search all of it at "
+                     "once — pick a month and I'll search the whole thing.")
+        return (f"✈️ **Flight search**\n\n{self._flight_table(s)}\n\n"
+                f"Tell me {' and '.join(asks)}, and I'll pull it up.{note}\n\n"
+                f"*Say “never mind” to drop this.*")
+
+    def _flight_answer(self, s, cid):
+        """The honest answer. Nothing is scheduled, and the reply says why in one sentence.
+
+        This is where a watch WOULD be created if any site were readable. Measured across all 19
+        sites the user named (docs/FLIGHT_RECON.md): 11 block automated clients, 6 expose no fetchable
+        URL, 2 are deal feeds, 0 are readable. Creating a watch anyway would leave a monitor that
+        fires, reports that it cannot read a fare, and texts nobody — so it hands over a link the
+        user can click instead of a promise it cannot keep.
+        """
+        if cid:
+            self._flight_draft.pop(cid, None)
+        url = self._gflights_url(s)
+        tgt = (f"\n\nI've noted your **under ${s['target']:,.0f}** target — Google Flights can set a "
+               f"price alert on that itinerary for you in one click, on the same page."
+               if s.get("target") else "")
+        return (
+            f"✈️ **{s['origin'][1]} → {s['dest'][1]}**\n\n{self._flight_table(s)}\n\n"
+            f"**[Open this search on Google Flights]({url})**\n\n"
+            f"I can't quote you a fare myself, and I'd rather say so than make one up. I checked "
+            f"all 19 flight sites for this: 11 block automated visits outright, 6 have no URL I can "
+            f"read, and 2 are deal blogs rather than search engines — so any number I gave you "
+            f"would be invented. The link above is your exact itinerary, prefilled.{tgt}\n\n"
+            f"*Want a different route or dates? Just say so.*")
+
+    _FL_ABANDON = re.compile(r"^\s*(?:never\s?mind|nvm|forget\s+it|cancel\s+that|drop\s+it|stop"
+                             r"|no\s+thanks?|not\s+now|leave\s+it)\b", re.I)
+
+    def _flight_turn(self, cid, text, messages, resume=False):
+        """The only method pipe() calls. Returns a reply, or None to route normally.
+
+        Returning None on anything that is not an answer is what keeps a false positive cheap: it
+        costs one question and the conversation carries on. Same contract as _phone_reply (:1425).
+        """
+        draft = self._flight_draft.get(cid) if cid else None
+        if draft and (time.time() - draft.get("t", 0)) > FLIGHT_DRAFT_TTL_S:
+            self._flight_draft.pop(cid, None)
+            draft = None
+        prev = (draft or {}).get("slots") or (self._flight_draft_from_reply(messages)
+                                             if resume else None)
+        turns = (draft or {}).get("turns", 0)
+
+        if resume:
+            if self._FL_ABANDON.match(text or ""):
+                self._flight_draft.pop(cid, None)
+                self._route_metric("flight.abandoned", 0, "flight_abandon", text)
+                return self._say("No problem — dropped.")
+            if prev is None:
+                return None
+            slots = self._flight_slots(text, prev=prev)
+            # A reply that fills nothing and answers nothing is the user moving on, not an answer.
+            if slots == prev and not self._is_flight_request(text)[0]:
+                return None
+        else:
+            slots = self._flight_slots(text, prev=None)
+
+        need = self._flight_missing(slots)
+        if not need:
+            self._route_metric("flight.answer", 0 if resume else 1,
+                               "flight_form_complete" if resume else "flight_strong", text,
+                               deterministic=True)
+            return self._say(self._flight_answer(slots, cid))
+        turns += 1
+        if turns > FLIGHT_MAX_TURNS:
+            self._flight_draft.pop(cid, None)
+            self._route_metric("flight.abandoned", 0, "flight_max_turns", text)
+            return self._say(f"I still need {' and '.join(need)} — let's start over when you have "
+                             f"them, or search directly on Google Flights.")
+        self._route_metric("flight.slots", 0 if resume else 1,
+                           "flight_form_reply" if resume else "flight_strong", text,
+                           n_missing=len(need), missing=",".join(need), turns=turns)
+        return self._say(self._flight_ask(slots, cid, turns))
 
     @staticmethod
     def _norm_phone(raw, default_country="+1"):
@@ -5039,6 +5711,17 @@ class Pipe:
         # the same way as a render would make "list my tasks" unanswerable for the whole life of
         # any chat that once produced an image. Only `ref` (a freshly attached image) suppresses
         # it, because that turn is unambiguously about the picture.
+        # A reply to the flight form is handled ABOVE the manage block, not inside the bg block, and
+        # the ordering is load-bearing. _MANAGE_VERB anchors cancel|stop|pause|end|kill at position 0,
+        # and the `referring` branch below fires whenever a job table was rendered in the last two
+        # turns — so a bare "cancel" or "stop" meant to abandon this form would be read as a
+        # scheduler reference and act on a real job. The form owns its own abandonment vocabulary,
+        # which means it has to be asked first.
+        if FLIGHT_ROUTE and not ref and cid in self._flight_draft:
+            done = self._flight_turn(cid, text, omsgs, resume=True)
+            if done is not None:
+                self._mark_bg(cid)
+                return done
         if BG_TASKS and MANAGE_DETERMINISTIC and not ref:
             mhandle = self._alert_username(__user__)
             # Non-admins only see state that was rendered FOR them; admins keep reading the legacy
@@ -5105,6 +5788,19 @@ class Pipe:
                     self._route_metric("task.create", 0, "phone_reply", text)
                     self._mark_bg(cid)
                     return answered
+            # A flight ask is claimed BEFORE _is_bg_task_request, which is the whole point of this
+            # path. Measured: 7 of 8 realistic phrasings match neither _BG_VERB+_BG_RECURRENCE nor
+            # anything else, and reach the chat model, which invents a fare. The eighth DOES match
+            # and builds a price_search --kind fare job that refuses itself. Both are wrong; this
+            # takes them instead. Below _BG_ONESHOT so `/research cheapest flights` stays research,
+            # and below the phone reply so the two contact flows cannot interleave.
+            if FLIGHT_ROUTE:
+                ftier, frule = self._is_flight_request(text)
+                if ftier:
+                    done = self._flight_turn(cid, text, omsgs, resume=False)
+                    if done is not None:
+                        self._mark_bg(cid)
+                        return done
             followup = self._is_bg_followup(text, omsgs, cid)
             if followup or self._is_bg_task_request(text):
                 raw_l = (text or "").strip().lower()
