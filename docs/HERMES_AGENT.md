@@ -201,6 +201,87 @@ request and a **robot wall to a spoofed Chrome User-Agent**. Do not "fix" the fe
 python3 scripts/price_watch.py --selftest     # runs both live reference pages
 ```
 
+### A page offering many prices has no price of its own (2026-08-07)
+
+`candidates()` assumed a page describes one thing and took the first machine-readable price in
+document order. On a category, route or search-result page that is an arbitrary element of a list —
+and it arrives labelled `json-ld/price` at **high** confidence, so `--require-confidence` waves it
+through and the wrong-product scoring has nothing to object to. The number really is read from the
+page. It is simply not the price of anything the user asked about, and no confidence tier can notice
+that.
+
+Measured before the threshold was chosen, which is the only reason the number is defensible:
+
+| Page | Distinct machine-readable prices |
+|---|---|
+| cheapflights.ca route page | **97**, from 103.98 to 358.72+ |
+| books.toscrape product page | 2 (with and without tax) |
+| amazon.ca product page | 0 high (only the `low` offer-listing reading) |
+
+So `LISTING_MIN_PRICES = 5`: above it, `candidates()` returns nothing and records why, and the run
+takes the same path an unreadable page takes — honest LOG every run, one `no_value` alert after
+three, `--selector` to pin an element. This protects **product** watches, on a path people use.
+
+### Stock and availability — `--mode stock` (2026-08-07)
+
+The four stock kinds were in `alert_templates` and listed here as supported for months while nothing
+could read an availability: `candidates()` structurally requires a decimal, and `--kind` was applied
+*after* a numeric comparison. So "tell me when it's back in stock" fired on a price threshold or
+never fired at all. `--mode stock` is **required** for a stock watch; without it the run still
+compares a price. A stock `--kind` passed without it auto-promotes and says so in the LOG.
+
+Three extraction tiers, confidence last in the tuple so the fetch-and-rank loop is shared with
+prices:
+
+- **high** — the page states its own availability in a machine-readable field (schema.org JSON-LD,
+  `itemprop`, `og:`/`product:` feeds, both attribute orders). Each pattern is *bounded* to a single
+  tag; an unbounded `.*?` across a 1.5 MB Amazon page matches a recommendation carousel.
+- **medium** — a site container known to hold the box: Amazon's `#availability`, Shopify product
+  data gated on a Shopify tell, a `stockStatus` field. This is the tier `price_watch`'s docstring
+  had promised since it was written and never once emitted.
+- **low** — visible text, where negatives beat positives on purpose. "Add to Cart" ships on nearly
+  every retail page, disabled or in a carousel; "Currently unavailable" is almost never decoration.
+
+**The vocabulary is closed.** A token the table has never seen yields no candidate, so the page
+takes the "loaded but no value found" path. **An unreadable page is never reported as out of
+stock** — Amazon writes its buy box with JavaScript and may write this box the same way, and "I
+could not read it" is a different statement from "it is gone". A `PreOrder` or `BackOrder` fires
+nothing and is logged every run: a pre-order button is not a restock.
+
+Firing is a **predicate on the current reading**, not a transition — the same rule as prices, so a
+first confirmed `in_stock` alerts. `--kind` now *selects* the predicate. A threshold on a
+non-`inventory` stock watch is ignored **out loud**, because honouring it silently is how the
+original bug stayed invisible. Two suppression layers: a reading must repeat before it is acted on
+(high 1, medium 2, low 3 *matching readings* — an unreadable run is evidence neither way), and at
+most one stock alert per monitor per six hours. Measured: a page flapping every five minutes for six
+hours sends **one** text and logs 71 times.
+
+`--unit` defaults to unset and resolves per mode, because `money(3, "$")` renders "3 left" as a
+34px `$3.00` in the email.
+
+### Fares are refused, not attempted (2026-08-07)
+
+Watching a flight fare is **not supported**, and the refusal is deliberate rather than a gap. Two
+production jobs established it:
+
+- `99cdcb68d1e1` searched six times and resolved no page at all.
+- `52f821a8d3a2` resolved cheapflights.ca and texted *"$358.72, under your $1,000.00 target"* at
+  **high** confidence — the first element of the 97-value offers array above, on a page whose own
+  title reads "C$ 146+". No date, no itinerary, nothing bookable. Every guard in the extractor was
+  satisfied and the reading was still meaningless.
+
+A fare only exists behind an airline's search form, for one itinerary on one date, and nothing
+static carries one. So `price_search.py --kind fare` refuses at its first run: one LOG line saying
+it cannot work and why, one `fare_unsupported` alert, no search spent, exit 0 — because a
+configuration limit is not an infrastructure error, and a run that raises has no LOG line at all.
+It refuses **loudly and once** rather than emitting `not_found` forever, so a monitor that cannot
+work says so instead of looking busy.
+
+Making this work at all would need a headless browser reading one specific itinerary. Playwright
+1.49.1 and Chromium are already on this host, but only under `/usr/bin/python3` — a cron job's bare
+`python3` is the hermes venv 3.11, where the import fails. Anything built here must spell the
+interpreter out.
+
 ### The sending account, and the prefix you cannot remove
 
 Every text arrives with the sending address written in front of it:
@@ -304,9 +385,13 @@ is remembered in the monitor's state, so a later *failure* alert can still say w
 No model is involved: a generated product name is a fabrication with extra steps.
 
 Kinds: `price_drop` `price_rise` `back_in_stock` `out_of_stock` `fare` `inventory` `availability`
-`threshold` `change`, plus the problem kinds `unreachable` `blocked` `no_value` and the closing
-`recovered`. An **unknown kind renders generically rather than raising** — a future job type reaches
-the user before anyone updates the file.
+`threshold` `change`, plus the problem kinds `unreachable` `blocked` `no_value` `not_found`
+`fare_unsupported` and the closing `recovered`. An **unknown kind renders generically rather than
+raising** — a future job type reaches the user before anyone updates the file.
+
+`back_in_stock`, `out_of_stock`, `inventory` and `availability` need `--mode stock` (above); passing
+one without it auto-promotes and says so. `fare` is **refused** (above) — it is kept as a kind only
+so the refusal can be worded as one.
 
 The kind is chosen by keyword rules on the user's own words ("back in stock", "fare", "under 50"),
 and only when the rules cannot tell does the agent pick one at job creation. That is the whole
