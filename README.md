@@ -5,15 +5,26 @@ that does more than chat: it routes between local chat/image/video models,
 watches things on a schedule and texts you when they happen, and is measured by
 a repeatable eval suite instead of vibes.
 
-Everything runs on the stock Open WebUI image — the pipes and filters install
-from *Workspace → Functions*, so there is no fork and no source patch.
+**The pipes and filters need no fork** — they install from *Workspace → Functions* as database rows
+and run on the stock Python backend, which is what keeps them portable. The **frontend** is a
+different story: this host runs a local fork, `ai-stack/open-webui:task-mode`, that adds three
+mutually-exclusive mode buttons (Internet / Code / Task) to the chat input and a Background-tasks
+shortcut to the sidebar. The backend and CUDA layers come straight from a digest-pinned upstream
+image and are untouched — the fork adds nothing the backend depends on — so pointing
+`compose/openwebui/run.sh` back at that digest costs those two UI affordances and nothing else.
+(This paragraph said "there is no fork and no source patch" until 2026-08-08, five days after the
+fork landed.)
 
 ```
 pipes/       Open WebUI Function pipes (the models you pick in the UI)
+  live/        gitignored copy of exactly what is deployed — see "Deploying" below
+  shared/      sidecar modules copied onto OpenWebUI's data volume
 filters/     Open WebUI filters
-scripts/     the alerting side — monitors, delivery, transports
+scripts/     the alerting side — monitors, discovery, delivery, transports
 hermes/      hermes-agent plugins, symlinked into ~/.hermes
-compose/     support services (Tika, SearXNG, Kokoro, reranker)
+compose/     the containers. openwebui/ holds the frontend fork above AND run.sh,
+             the only recorded recipe for creating the container; comfyui/ likewise;
+             docker-compose.yml holds the five support services
 branding/    the OhmzAI skin
 tests/       unit tests, live QA harnesses and the eval suite
 docs/        runbooks, setup, model notes, QA plan
@@ -27,7 +38,7 @@ things and have drifted apart before.
 
 | Function (OpenWebUI id) | Model in the UI | What it does |
 |---|---|---|
-| `auto_assistant` | Ω Assistant | One entry that routes by intent: chat (with vision when an image is in play), automatic coder routing, a RedCraft image (create, or edit via Qwen-Image-Edit), a Wan 2.2 video (text-to-video, image-to-video, or a multi-shot sequence), and standing background jobs through the local hermes agent. Vision-QA on stills and video frames, a confirmation step before a video render, and VRAM choreography around every job. |
+| `auto_assistant` | Ω Assistant | One entry that routes by intent: chat (with vision when an image is in play), automatic coder routing, a RedCraft image (create, or edit via Qwen-Image-Edit), a Wan 2.2 video (text-to-video, image-to-video, or a multi-shot sequence), standing background jobs through the local hermes agent, a deterministic job-management path answered from `/api/jobs` rather than delegated, and a flight path that answers from parsed slots instead of letting a fare reach the chat model. Vision-QA on stills and video frames, a confirmation step before a video render, and VRAM choreography around every job. |
 | `image_krea` | *(hidden)* | RedCraft (Krea 2 base) text-to-image + Qwen-Image-Edit 2509 instruction editing, optional trained LoRA, local prompt-enhance and vision-grounded edit-rewrite, two-round vision-QA correction. Hidden from the picker on 2026-08-02 — the Assistant covers the same two jobs. Restore by setting `image_krea.krea2` active in the `model` table. |
 | `photoreal` | Photoreal | Photorealistic text-to-image on its own SDXL checkpoint. Edits — including text-only follow-ups on the previous picture — run through Qwen-Image-Edit via the shared `identity_edit` module so the subject stays the same person, with an SDXL img2img fallback when Qwen is unavailable. |
 | `animate_scail` | Animate | SCAIL-2 (Wan 2.1 14B GGUF) motion transfer: attach a full-body character image and name one of three built-in motions — dance, wave or walk. Your text picks the motion; it is not a prompt. ~2 s clip, ~3 min. |
@@ -41,6 +52,9 @@ Highlights:
 
 - **Intent routing** with question/small-talk guards — a question *about* an
   image isn't turned into an edit — and default-deny on media intent.
+- **Modes you set, not modes it guesses.** Internet / Code / Task are three exclusive buttons in
+  the chat input rather than inferences from your wording. Reading intent from phrasing kept failing
+  in both directions at once, and each fix made the other direction worse.
 - **Conversation continuity** — "make this picture realistic" keeps editing
   *that* picture. A persistent per-chat reference store survives deploys and
   model switches, and OpenWebUI's own background-task prompts can never reach a
@@ -61,7 +75,7 @@ Highlights:
 | Function | What it does |
 |---|---|
 | `adaptive_memory` | Vendored Adaptive Memory v4.4.1 (`1818TusculumSt/owui-adaptive-memory`) — extracts, dedupes and embeds per-user memories, then prepends them to the last user message. Attached to `Ω Assistant` specifically rather than globally. Provenance and the license caveat: [docs/CAPABILITY_UPGRADE_PLAN.md](docs/CAPABILITY_UPGRADE_PLAN.md). |
-| `task_mode` | The **Task** control in the chat input. While it is on, the turn goes to the hermes background-task agent instead of being guessed at from the wording, and Internet / Code are stood down server-side for that turn. Off by default; the pipe reads it per turn and never remembers it. |
+| `task_mode` | The **Task** control in the chat input — one of the three mutually-exclusive mode buttons the frontend fork adds (Internet / Code / Task). While it is on, the turn goes to the hermes background-task agent instead of being guessed at from the user's wording, and Internet / Code are stood down server-side for that turn. Off by default. The *filter* is stateless — read per turn, never remembered server-side — but the fork's `Chat.svelte` does remember the choice **per chat**, and deliberately only when the user made it, so an incidental reset cannot silently re-arm a mode. `toggle` must be set on the *instance*, not the module: OpenWebUI reads it off the instantiated Filter, and a module-level-only `toggle` loads fine, passes every static check, and produces no control in the UI. |
 
 ### The picker is curated on purpose
 
@@ -107,10 +121,47 @@ scheduler, not the agent's word. Price checks are arithmetic done in Python, not
 asked of a 34B model. Monitors report their own failures — once, after
 confirming them.
 
-Transport is SMTP plus carrier email-to-SMS gateways. Two failures that cost
-real time and are now pinned by tests: texts containing links are silently
-dropped by carriers, and an alert address whose domain has no MX record fails
-without saying so.
+The corollary, added 2026-08-08: **verified-to-exist is not verified-to-work.** The creation check
+caught jobs the agent claimed but never made; it had nothing to say about a job that exists and
+cannot function. So the pipe now holds each freshly-created record to the three parts of the agent's
+brief a machine can decide — delivery is exactly `local`, the prompt asks for a `LOG:` line, the
+prompt carries no leaked tool-call markup — and repairs what is mechanically repairable in one
+`PATCH` before the first run. The boundary is deliberate: whether *"every 6 hours, forever"* is the
+duration the user meant is a judgement, and a validator that guessed would be the fabrication it
+exists to prevent. A repair that changes the text of the job is announced; a failed repair always
+speaks. Every defect is counted on the metric row, so how often the model ignores its brief is
+measurable instead of anecdotal.
+
+What monitors can watch, and what they refuse to:
+
+- **Price** — extraction ranked by confidence, including Amazon's JS-rendered buy box; a listing page
+  offering many prices has no price of its own and says so.
+- **Stock / availability** — three extraction tiers over a closed token vocabulary. Unreadable is
+  *reported*, never guessed; it fires on state rather than transition, and a five-minute flapper
+  texts once.
+- **No URL required.** `scripts/price_search.py` finds the page instead of demanding a link — one
+  search per monitor lifetime, with cooldown and roster-outage backoff.
+- **Flights: deliberately refused.** All 19 candidate fare sites were measured on 2026-08-07 and
+  the gate returned **zero** — 11 block automated clients, 6 expose no fetchable URL, 2 are deal
+  feeds. So a flight ask does not become a watch that would fire and text nobody. It gets a real
+  answer plus a Google Flights deep link **built from the user's own parsed slots**, never a fare
+  typed by a model. Dates, airports and thresholds are parsed deterministically; a season
+  ("sometime in the fall") or a named holiday is not a date and is asked about rather than guessed.
+  [FLIGHT_RECON.md](docs/FLIGHT_RECON.md) has the site-by-site measurements.
+
+Transport is two channels, and both fire by default (`ALERT_CHANNELS` narrows it): **email** over
+SMTP, and **SMS** either through a carrier email-to-SMS gateway or through Twilio — `SMS_METHOD`
+defaults to the gateway when `SMS_GATEWAY` is set and to Twilio otherwise. Addresses come from where
+they already live: email is authoritative in OpenWebUI's user table, while phone numbers exist
+nowhere in it and are opt-in per handle, so a user with no phone entry silently gets email only.
+Partial success counts as success — if SMS lands and email fails the user *was* alerted, and
+returning failure would re-text them on the next tick to fix an email problem.
+
+Three failures that cost real time and are now pinned by tests: texts containing links are silently
+dropped by carriers; an alert address whose domain has no MX record fails without saying so; and a
+domain with no MX but an A record is flagged `implicit` rather than silently trusted, because RFC
+5321 says mail falls back there and it usually still bounces. The resolver check fails **open** — a
+missing `dig` must never be what stops an alert.
 
 ## Models
 
@@ -120,9 +171,16 @@ runs on a single tenant:
 | Slot | Model | Role |
 |---|---|---|
 | Everything | `hermes-genesis:apex-compact` | Chat, code, vision, prompt helpers |
+| Background agent | `hermes-genesis:agent` | What cron jobs run on. Same weights, `num_ctx 65536` |
 | Task model | `gemma3:1b` | Titles, tags, RAG queries — also what the pipes answer task prompts with directly |
 | Router | `gemma3:1b` | Chat-vs-code classifier inside the pipe |
 | Embeddings | `bge-m3` | RAG, 1024-dim / 8192-token |
+
+The agent tag is the one that costs something. Ollama keys runners by model **plus options**, so a
+65536-context tag of the same weights is a *second* ~17 GB runner, and two of those do not fit on a
+24 GB card. A job firing mid-conversation evicts the chat tenant and the user's next turn pays a cold
+reload — **measured at 22.7 s**. Hence the GPU guard, and hence the pipe releasing the chat tenant
+before it hands off rather than letting Ollama evict under memory pressure mid-load.
 
 None of these appear in the model picker. Every one has an inactive `model` row, which is
 OpenWebUI's hide switch — the picker is curated down to the three pipes above. That is safe
@@ -143,10 +201,28 @@ older docs were wrong because of exactly that.
 
 ## Support services
 
-`compose/docker-compose.yml` — Tika (document extraction), SearXNG (web search),
-Kokoro (TTS), and an Infinity cross-encoder reranker. Port choices are deliberate
+`compose/docker-compose.yml` — five containers: Tika (document extraction), **two** SearXNG
+instances, Kokoro (TTS), and an Infinity cross-encoder reranker. Port choices are deliberate
 and explained inline; the upstream defaults collide with other services on this
 host.
+
+**The two SearXNG instances are the point, not duplication.** `searxng` on `:8888` serves chat;
+`searxng-hermes` on `:8889` serves the background monitors and nothing else
+(`compose/searxng-hermes/settings.yml`, 1 uwsgi worker against chat's 4, ~130 MB RSS, roughly one
+request per ten minutes), and `scripts/web_search.py` talks only to `:8889`.
+
+The split buys **partial** insulation, and the limit is worth stating precisely because three places
+in this repo overstated it until 2026-08-08. Engine rate limits are per **source IP**, and both
+containers egress from the same host — so splitting the containers does *not* split the budget for an
+engine both rosters enable. What actually insulates chat is the roster difference: chat runs
+`duckduckgo, bing, mojeek, wikipedia, wikidata`, hermes runs `google, brave, mojeek, bing`, so
+`google` and `brave` are hermes-only and `duckduckgo` is chat-only. **`bing` and `mojeek` are shared**,
+and a monitor can still CAPTCHA those for chat. The older claim — that a monitor "can never CAPTCHA an
+engine chat depends on" — is false for exactly those two.
+
+That matters because a degraded chat search fails *silently*: the model answers from training data and
+still looks grounded. `tests/test_web_search.py` pins *chat's* `compose/searxng/settings.yml` by
+sha256, so the separation cannot be dissolved by quietly editing the other side.
 
 The reranker is not optional polish: with hybrid search on and no reranker, Open
 WebUI re-embeds the fused candidates and re-sorts by plain cosine, discarding the
@@ -170,14 +246,79 @@ it survives upstream class-name churn. The served static directory lives inside
 the image, so re-run it after any `docker rm` or image pull. Details and the
 `WEBUI_NAME` caveat: [branding/README.md](branding/README.md).
 
-## Tests and evals
+`apply.sh` also runs `branding/i18n_brand.py`, which is what stops the UI calling itself "WebUI".
+Those strings are i18n keys, and `loader.js` cannot reach them — it rebrands by rewriting
+`/api/config` at the fetch boundary, but i18next loads its resources with a dynamic `import()`, which
+never passes through `window.fetch`. So instead of patching source, it gives the `en-US` keys
+non-empty values (they ship as `""`, which is why the *key* is what renders), leaving every other
+locale untouched. `--check` reports without changing anything; `--revert` restores stock wording.
+
+## Deploying
+
+**Editing a pipe does not deploy it.** Open WebUI does not import pipes from disk — it stores each
+Function's source as a row in its own SQLite database, so a committed file with a clean `git status`
+and a green test run can all be true while the server goes on serving the previous build. That
+happened on 2026-07-28, and again on 2026-08-08 in a way the drift check itself missed.
 
 ```bash
-python3 -m pytest tests/
+python3 scripts/deploy_pipe.py auto_assistant --dry-run   # what would change
+python3 scripts/deploy_pipe.py auto_assistant             # write it
+python3 scripts/deploy_pipe.py auto_assistant --rollback  # restore the last backup
+python3 scripts/deploy_pipe.py --all --dry-run            # audit every mapped pipe
+python3 tests/test_deployed.py                            # prove it landed
 ```
 
-`tests/` covers routing, media intent, GPU diagnosis, alert setup, templating,
-transports and delivery. Beyond unit tests:
+It preflights the file inside the container using Open WebUI's *own* `extract_frontmatter` and
+`replace_imports`, so a pipe that cannot import is rejected instead of stored, and refuses outright
+to deploy a file whose prose contains a literal `from utils`/`from apps`/`from main`/`from config` —
+`replace_imports` is a naive whole-file `str.replace` that would silently rewrite the comment and
+show up later as unexplained drift. It backs up the previous row to `.deploy-backups/` first, then
+syncs `pipes/live/`. No restart needed; the row is re-read per request.
+
+`tests/test_deployed.py` checks **both links** — tracked `pipes/*.py` → `pipes/live/` → the `webui.db`
+row. Only the second link was checked for four of the five pipes until 2026-08-08, which is how
+`auto_assistant` ran 696 lines ahead of what was deployed while the suite reported ALL PASS.
+
+## Tests and evals
+
+Every suite is a standalone program, not a pytest module. **`pytest` cannot run any of them** —
+each file ends in `sys.exit(main())` at module scope, so `python3 -m pytest tests/` dies during
+collection ("no tests collected, 1 error") and reports zero problems and zero tests
+indistinguishably. That command was in this README until 2026-08-08 and never worked.
+
+```bash
+python3 tests/test_manage_path.py                  # one suite
+for t in tests/test_*.py; do python3 "$t"; done    # all of them
+```
+
+**1998 checks across 30 offline suites that print a count**, measured 2026-08-08 against the tracked
+sources, plus `test_manifold.py` and `test_router.py`, which pass without printing a count — 32
+offline suites in total. 29 of the 30 are green. `test_deployed.py` is red right now on 1 of its 33
+checks, **by design**: the pipe was edited after the last deploy, so `pipes/live/` is behind. Passing
+it the tracked source cannot clear that — comparing the two *is* the suite's job. See **Deploying**.
+
+Six further suites need a live service (SearXNG, ComfyUI, a DNS resolver, a running OpenWebUI) and
+**fail rather than skip** without it, so a red run is not automatically a regression —
+[QA_TEST_PLAN.md](docs/QA_TEST_PLAN.md) lists which.
+
+**Nineteen suites — half of them — take a pipe path and default to the gitignored `pipes/live/`
+copy.** When that copy is stale they test the *deployed* code, not what you just wrote, and say
+nothing about which one they read. Give them the tracked source explicitly:
+
+```bash
+python3 tests/test_job_shape.py pipes/auto_assistant.py
+```
+
+Both directions of the trap have now been observed on the same day. A suite for undeployed code
+**failed** against the stale copy (`test_hermes_delegation.py`, bare, reports 1 failure of 70 that
+the tracked source does not), and before that the same staleness let suites **pass** against code
+696 lines behind the repo. A green run and a red run can both be reporting on the wrong file.
+
+`tests/` is 38 suites covering routing and the manage path, media intent and the confirm gate, GPU
+diagnosis and lock admission, alert setup/templating/transports/delivery, price and
+stock/availability watching, no-URL price discovery, the background-monitor search layer, flight
+intent and the two flight scripts, job-shape enforcement, the Task filter, task ownership, branding,
+and the deploy chain. Beyond unit tests:
 
 - `tests/eval/` — a repeatable evaluation suite with objective graders and a
   checked-in baseline. The judge honours `cases.json`; self-grading was removed.
@@ -194,8 +335,16 @@ Methodology and the current baseline: [docs/QA_TEST_PLAN.md](docs/QA_TEST_PLAN.m
 
 ## Requirements
 
-- Open WebUI (official image) with Ollama (`localhost:11434`) and ComfyUI
-  (`localhost:8188`) reachable.
+- Open WebUI — **not the official image directly**: `ai-stack/open-webui:task-mode`, built from
+  [`compose/openwebui/fork/`](compose/openwebui/fork/) (a frontend-only fork of a digest-pinned
+  upstream image) and created by `compose/openwebui/run.sh`. With Ollama (`localhost:11434`) and
+  ComfyUI (`localhost:8188`) reachable.
+
+  ```bash
+  docker build -t ai-stack/open-webui:task-mode compose/openwebui/fork/
+  compose/openwebui/run.sh          # idempotent; safe to re-run after an image pull
+  ./branding/apply.sh               # both static dirs live inside the image, so re-run after any rebuild
+  ```
 - ComfyUI with the referenced checkpoints/GGUFs (RedCraft on a Krea 2 base,
   Wan 2.2 A14B, Qwen-Image-Edit 2509, SCAIL-2, and the SDXL checkpoint named in
   `pipes/photoreal.py`).
@@ -212,4 +361,9 @@ Methodology and the current baseline: [docs/QA_TEST_PLAN.md](docs/QA_TEST_PLAN.m
 | [IMAGE_CONTINUATION.md](docs/IMAGE_CONTINUATION.md) | Why a follow-up edits *that* picture: the task guard, the reference store, the prompt contracts |
 | [openwebui-config-snapshot.md](docs/openwebui-config-snapshot.md) | Sanitized workspace config, and which config rows the runtime actually reads |
 | [KREA_LORA_GUIDE.md](docs/KREA_LORA_GUIDE.md) · [SCAIL_ANIMATE.md](docs/SCAIL_ANIMATE.md) | Media pipe guides |
-| [UPGRADE_ROADMAP.md](docs/UPGRADE_ROADMAP.md) · [CAPABILITY_UPGRADE_PLAN.md](docs/CAPABILITY_UPGRADE_PLAN.md) · [VIDEO_QUALITY_ROADMAP.md](docs/VIDEO_QUALITY_ROADMAP.md) | Where this is going |
+| [BACKUPS.md](docs/BACKUPS.md) | Nightly off-disk backups, and the watchdog that alerts on transitions |
+| [TRACKING_ENHANCEMENT.md](docs/TRACKING_ENHANCEMENT.md) | What the monitor work measured — including what it refuted |
+| [FLIGHT_RECON.md](docs/FLIGHT_RECON.md) | The 19-site fare recon: a negative result, site by site |
+| [ROUTING_ROADMAP.md](docs/ROUTING_ROADMAP.md) · [MANAGE_PATH_PLAN.md](docs/MANAGE_PATH_PLAN.md) | How a turn is routed, and the deterministic job-management path |
+| [branding/README.md](branding/README.md) · [compose/openwebui/fork/gen/README.md](compose/openwebui/fork/gen/README.md) | The skin, and how to regenerate the frontend patch |
+| [UPGRADE_ROADMAP.md](docs/UPGRADE_ROADMAP.md) · [CAPABILITY_UPGRADE_PLAN.md](docs/CAPABILITY_UPGRADE_PLAN.md) · [VIDEO_QUALITY_ROADMAP.md](docs/VIDEO_QUALITY_ROADMAP.md) · [FLIGHT_WATCH_PLAN.md](docs/FLIGHT_WATCH_PLAN.md) · [openwebui-improvement-plan.md](docs/openwebui-improvement-plan.md) | Where this is going |

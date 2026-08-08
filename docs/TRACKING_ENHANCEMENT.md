@@ -31,6 +31,32 @@ Chat's `settings.yml` is byte-identical and pinned.
 Engine limits are **per source IP, not per container**, so the rosters are kept almost disjoint. That
 is the real isolation: a monitor cannot spend an engine chat depends on.
 
+> **Scoped 2026-08-08.** The second sentence is false as written, and the same absolute claim is
+> written in two other places this note does not reach: `compose/searxng-hermes/settings.yml:17-20`
+> ("the rosters are therefore kept almost disjoint … so a monitor can never CAPTCHA an engine that
+> chat depends on") and `scripts/web_search.py:14-16`. All three need the same scoping.
+>
+> Measured from the two rosters. Chat keeps `duckduckgo, bing, mojeek, wikipedia, wikidata`
+> (`compose/searxng/settings.yml:31-35`); hermes keeps `google, brave, mojeek, bing`
+> (`compose/searxng-hermes/settings.yml:41,48,54,58`, equal to `web_search.ENGINE_ORDER`). `bing` and
+> `mojeek` are on **both**, so a monitor does spend them, out of the same source IP where the limit
+> applies — and those are two of chat's three real web engines (`wikipedia` and `wikidata` are
+> infobox sources, not a web index).
+>
+> The overlap is a chosen risk, not an oversight. `bing` and `mojeek` are precisely the two engines
+> measured never to rate-limit from this IP — chat's file calls bing "the most tolerant of
+> server-to-server use from this IP" and mojeek "rarely rate-limits"
+> (`compose/searxng/settings.yml:32-33`), and hermes makes them its two "floor" engines for that
+> reason (`compose/searxng-hermes/settings.yml:55,60`) — while the CAPTCHA-prone engines, `google`
+> and `brave`, are hermes-only. So the guarantee that holds is the narrower one: a monitor cannot
+> CAPTCHA an engine that is *exclusively* chat's, and chat cannot spend google's or brave's budget.
+>
+> The exclusivity is also thinner than it was when this section was written. `startpage` and `qwant`
+> were dropped for CAPTCHA-ing on sight (see *What the live instance measured*), and as of the
+> 2026-08-07 `/config` measurement recorded in *Still open* #1, `google` is still absent from the
+> live roster — which leaves `brave` as the only hermes-exclusive engine actually in service. Two of
+> the three engines a monitor query really hits are chat's.
+
 **2. Whether exact keyless fares are sustainable.** **No, and the failure mode is worse than
 nothing.** The draft worried fares would "break monthly". What actually happens is that they appear
 to *work*: job `52f821a8d3a2` reported `$358.72` at high confidence from a page carrying 97 different
@@ -99,19 +125,39 @@ one-candidate-per-host, which is what a spammy single-engine result set collapse
    **startpage and qwant are gone, and google is still absent.** That recreate is the control: it
    proves the file WAS reloaded, so "the container never picked it up" is no longer available as an
    explanation. And the flip block now contains only `mojeek` and `bing` — `google` appears nowhere
-   in this file except `keep_only` and prose. So the hypothesis at :55-59, that a redundant
-   flip-block entry shadows the real definition with a module-less stub, **does not hold**: google was
-   absent with the entry and is absent without it. Its presence there was never the variable.
+   in this file except `keep_only` and prose. So the hypothesis at :81-85 (cited as :55-59 until the
+   2026-08-08 corrections above lengthened this file), that a redundant flip-block entry shadows the
+   real definition with a module-less stub, **does not hold**: google was absent with the entry and is
+   absent without it. Its presence there was never the variable.
 
    What is still unexplained is why `keep_only: [google, ...]` drops google specifically, silently,
    with the container exiting 0. Do NOT change `search.default_lang` next just because this file
    used to say so — that was the follow-on guess to a hypothesis now known to be wrong. Diagnose
    before editing: whether the image's own defaults declare an engine named exactly `google` and
    whether it ships disabled, whether the container logged anything at load, and whether `/config`
-   reports `enabled` for the three that survive. Verify against `/config` after every change —
-   nothing in that file fails loudly.
+   reports `enabled` for the three that survive.
 
-   Until then, prefer `price_watch.py --url` with a real link over the no-URL path.
+   **Added 2026-08-08.** The hand-curl instruction this bullet used to end with — "verify against
+   `/config` after every change" — is now automated, and the automated form is the one to run:
+
+   ```
+   python3 scripts/flight_probe.py --stack     # Phase 0 only; zero site traffic
+   ```
+
+   `probe_stack()` does the three-way check by itself — `web_search.ENGINE_ORDER` vs `settings.yml`'s
+   `keep_only` vs the live `127.0.0.1:8889/config` — and reports `missing_from_live` and
+   `unexpected_in_live` as separate fields, because they are different bugs: a missing engine is an
+   addition that never landed, an unexpected one is a removal that never landed. That is the exact
+   pair of bugs this bullet records above. Its inline comment cites this section as the reason it
+   exists (`scripts/flight_probe.py:489-533`, commit `ccfa7ff`).
+
+   Run it after every roster change: `tests/test_web_search.py` still pins the two *declarations* to
+   each other and neither to the live instance (86 checks, all pass), and nothing in `settings.yml`
+   fails loudly. The same bare instruction is still standing in the 2026-08-07 record at :85, kept as
+   written that day; `--stack` is that check, three-way and automated.
+
+   Until google is back on the live roster, prefer `price_watch.py --url` with a real link over the
+   no-URL path.
 
    None of this touches flight fares: `scripts/flight_watch.py` issues no search queries at all,
    because it builds its URL from an itinerary instead of finding one.
@@ -134,8 +180,30 @@ one-candidate-per-host, which is what a spammy single-engine result set collapse
    Two things genuinely still open, in order: Chrome recon on the six unmeasured `no_deeplink` sites
    (the only remaining free path, worth ~3 independent sources not 6), and costing a keyed fare API
    (Amadeus / Duffel / Kiwi partner), which is the option that actually works.
-3. **Price mode has no flap cooldown.** A price oscillating either side of a target still texts every
-   run. The cooldown is implemented mode-agnostically and gated to stock mode with a comment.
+3. **Price mode has no flap cooldown — only the identical-reading dampener.** A price that keeps
+   landing on a *different* value below target texts on every new value; an exact repeat is already
+   suppressed. `alerted_price` is stored on every fire and a later reading within 0.005 of it prints
+   "already alerted on this exact reading" instead (`scripts/price_watch.py:680-682`, `:701-702`,
+   `:724`; `tests/test_price_watch.py:134` "identical repeat is dampened" — 97 checks, all pass).
+
+   The cooldown is **stock-only end to end**, not mode-agnostic behind a gate. Its timestamp
+   `stock_alerted_ts` is written only inside the `if mode == "stock"` branch of the firing block
+   (`scripts/price_watch.py:718-724`), the hold reads that key
+   (`:703`, `elif fires and mode == "stock" and state.get("stock_alerted_ts") is not None:`) and the
+   note it produces hardcodes "one stock alert per 6h" (`:711`). Extending it to price mode means
+   stamping a timestamp on the price branch and generalising the note — **not** just widening the
+   `mode == "stock"` condition. Widening it alone gives price mode a hold that can never engage,
+   because nothing ever stamps a price alert: that branch writes only `alerted_price`.
+
+   > **Two sentences here were false when written, corrected 2026-08-08.** They were: "A price
+   > oscillating either side of a target still texts every run" — a two-value oscillation (49.99 /
+   > 50.99 against `--below 50`) texts once, because the second 49.99 is dampened as an identical
+   > repeat; and "the cooldown is implemented mode-agnostically and gated to stock mode with a
+   > comment" — there is no such gate comment. The comment at `scripts/price_watch.py:704-706`
+   > explains why the timestamp must default to `None` rather than `0`, and `FLAP_COOLDOWN_S`'s
+   > rationale at `:476-481` is entirely about a page flipping in and out of stock. Neither says why
+   > price mode is excluded. Cost of the wrong wording: it invites the one-line "fix" of deleting the
+   > `mode == "stock"` condition, which ships a price cooldown that silently never fires.
 4. **`--label` is not sanitised.** Page phrases and `--query` are both folded; a user-supplied label
    reaches the ALERT sentence as given.
 

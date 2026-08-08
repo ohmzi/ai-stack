@@ -4,7 +4,8 @@ Warm-dark shell, one amber accent, Ω mark. Built from the `OhmzAI Brand.dc.html
 brand sheet and verified against Open WebUI **0.10.2**.
 
 ```bash
-python3 branding/build_assets.py   # render the mark (only after editing it)
+python3 branding/build_assets.py   # render the mark (only after editing it) — this also
+                                   # overwrites assets/site.webmanifest; see "The mark"
 ./branding/apply.sh                # install into the running container
 ./branding/apply.sh --revert       # put the stock look back
 python3 tests/test_branding.py     # 43 checks; --restart adds the restart case
@@ -68,9 +69,9 @@ browser actually run the current file?" in one lookup.
 | `loader.js` | App-name override for the running app. Installs as `loader.js`. |
 | `i18n_brand.py` | Rebrands the UI copy that says *WebUI*. |
 | `assets/` | Rendered marks — favicons, splash, manifest icons. Committed. |
-| `assets/site.webmanifest` | The PWA manifest — what names a home-screen shortcut. |
+| `assets/site.webmanifest` | The PWA manifest — what names a home-screen shortcut. **Hand-edited, not rendered:** `build_assets.py` overwrites it with a shorter template. |
 | `fonts/` | Space Grotesk + IBM Plex Mono `woff2`, self-hosted. |
-| `build_assets.py` | Regenerates `assets/` from the font outline. |
+| `build_assets.py` | Regenerates `assets/` from the font outline — and rewrites `assets/site.webmanifest` from a hardcoded literal that is **not** what is committed. See "The mark". |
 | `apply.sh` | Idempotent installer / reverter. |
 
 ## How the theme works
@@ -116,6 +117,31 @@ from the same source, sized so the ink is ~0.42 of the tile (the brand sheet's
 treatment so the OS circle-crop doesn't clip the mark.
 
 Re-run it only if you change the mark; `assets/` is committed.
+
+> **Re-running it reverts the manifest fixes. Recorded 2026-08-08; not yet fixed in
+> code.** `main()` also writes `assets/site.webmanifest`, unconditionally, from a
+> hardcoded literal (`build_assets.py:165-188`) holding only `name`, `short_name`, the two
+> maskable icons, `theme_color`, `background_color` and `display`. The committed manifest
+> (1078 bytes, last touched by `d0f12e9`) was hand-extended after that render and is not
+> reproducible from the script, so a render drops `id`, `description`, `start_url`,
+> `scope`, `orientation`, `share_target` and all three `purpose: "any"` icons
+> (`favicon-96x96.png`, `apple-touch-icon.png`, `favicon.png`) — every one of the fixes
+> credited under "The name on a phone home screen" below. `assets/site.webmanifest` is
+> hand-maintained; only the PNGs, the SVG and the `.ico` come from the font outline.
+>
+> What that costs: `apply.sh` installs whatever is in `assets/`, so the next
+> `./branding/apply.sh` ships the stripped manifest — Android loses OhmzAI from the share
+> sheet, the three non-maskable icons go with it, and nothing says so. The suite does not
+> catch it: `tests/test_branding.py:195-211` asserts the manifest's `name`, `short_name`,
+> per-icon bytes and declared-vs-IHDR sizes, and nothing else — there is no `id`, `scope`
+> or `share_target` assertion. The only trace is the printed count, which is
+> `len(results)` (`tests/test_branding.py:304`) and spends two checks per manifest icon,
+> so dropping three icons quietly moves the figure in the quickstart above by six.
+>
+> Two ways to close it, neither done yet: move the full manifest into the script's
+> template so `assets/` really is regenerable, or stop the script writing that file at
+> all. Until one lands, run `git diff branding/assets/site.webmanifest` after every render
+> and put the file back if the render touched it.
 
 ## Where this installs — TWO directories, and both are mandatory
 
@@ -214,6 +240,10 @@ Three further things the stock manifest got wrong, now fixed in ours:
 `share_target` is carried over from the stock manifest — without it Android
 loses OhmzAI from the system share sheet.
 
+All of that was hand-added to `assets/site.webmanifest` after it was first rendered, and
+`build_assets.py` still overwrites the file from a template that has none of it — see the
+warning under "The mark" before you re-render.
+
 Three more things live only in the shell, where no amount of correct files under
 `/static` can reach them:
 
@@ -252,12 +282,23 @@ It finds the chunk through the app's own locale registry
 than by filename, because Vite content-hashes those on every build.
 
 The rewrite is a **rule, not a list**, so a string added upstream is picked up
-instead of quietly keeping stock wording:
+instead of quietly keeping stock wording. Applied top to bottom — this is
+`i18n_brand.py`'s `RULES` (`i18n_brand.py:80-86`), in order and in full:
 
 ```
-"the WebUI"  -> "OhmzAI"                 "Open WebUI" -> "OhmzAI"
-"your WebUI" -> "your OhmzAI instance"    "WebUI"     -> "OhmzAI"
+"The WebUI"  -> "OhmzAI"
+"the WebUI"  -> "OhmzAI"
+"your WebUI" -> "your OhmzAI instance"
+"Open WebUI" -> "OhmzAI"
+"WebUI"      -> "OhmzAI"
 ```
+
+**Corrected 2026-08-08.** This block listed four rules in two columns and omitted the
+sentence-initial `"The WebUI"`, which is `RULES[0]`. Anyone rebuilding the table from the
+doc dropped it, and every string starting *"The WebUI ..."* then fell through to the bare
+substitution and rendered as *"The OhmzAI ..."*. The four that were listed were in the
+right relative order; the two-column layout was also making that order guesswork, so the
+rules are now one column.
 
 Order is load-bearing. The article rules exist because a bare substitution reads
 as *"To access the OhmzAI"*, and they must run before `"Open WebUI"` or
@@ -285,6 +326,19 @@ naming the upstream project — version strings, Community links, the funding
 notice. Some of those now label an external service with our name; that is
 known. The licence permits removing the branding at 50 users or fewer.
 
-Open WebUI's licence permits removing its branding for deployments of 50 users
-or fewer (or with a commercial agreement). This is a single-user instance. The
-version footer is left as-is.
+**Removed 2026-08-08.** A paragraph stood here saying "Open WebUI's licence permits
+removing its branding for deployments of 50 users or fewer (or with a commercial
+agreement). This is a single-user instance. The version footer is left as-is." It was
+pre-2026-08-04 text left behind under the scope decision above: it restated the licence
+sentence already in that paragraph, and its version-footer exemption contradicted a scope
+that names version strings explicitly. The code has no such carve-out — `RULES` is applied
+to every key containing `WebUI` (`i18n_brand.py:80-86`, `:100-103`) and the script dies
+unless the number of keys it matched equals `body.count("WebUI")` (`i18n_brand.py:191-195`).
+So the footer is rebranded like everything else.
+
+Nor is exempting it a one-line change: a skipped key keeps its empty upstream value,
+i18next falls back to the key, the stock wording renders, and
+`tests/test_branding.py:255-258` — "no 'WebUI' string is left to fall back to its key" —
+fails. A genuine exemption needs its own mechanism plus a named carve-out in that check.
+The same sentence in `loader.js:20-22` stays where it is: there it correctly describes what
+`loader.js` does not touch.

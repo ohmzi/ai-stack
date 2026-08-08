@@ -12,10 +12,18 @@ Two instances, and the reason the split exists
 ----------------------------------------------
 This module talks to the HERMES SearXNG instance (:8889, compose/searxng-hermes/settings.yml),
 never to the chat instance (:8888, compose/searxng/settings.yml). Engine rate limits are per source
-IP, so the rosters are kept almost disjoint: google, startpage, brave and qwant are hermes-only. A
-monitor therefore cannot CAPTCHA an engine OpenWebUI chat depends on — which matters because a
-degraded chat search fails silently, with the model answering from training data and still looking
-grounded.
+IP, so the rosters are kept almost disjoint: google and brave are hermes-only, duckduckgo is
+chat-only. That protects the hermes-only engines and matters because a degraded chat search fails
+silently, with the model answering from training data and still looking grounded.
+
+CORRECTED 2026-08-08. This used to read "A monitor therefore cannot CAPTCHA an engine OpenWebUI chat
+depends on", and that is false — it was also the only sentence here anyone would act on. Measured
+from the two rosters: chat runs duckduckgo, bing, mojeek, wikipedia, wikidata; this instance runs
+google, brave, mojeek, bing. **bing and mojeek are on BOTH rosters**, and the two containers share
+one egress IP, so splitting the containers does not split those two engines' budget — a monitor can
+still burn them for chat. Splitting the CONTAINERS buys configuration independence; only the roster
+difference buys insulation, and it covers google/brave/duckduckgo, not bing/mojeek. (startpage and
+qwant were named here as hermes-only and are not in that roster at all.)
 
 The fan-out multiplies engines PER QUERY, not queries PER ENGINE
 ---------------------------------------------------------------

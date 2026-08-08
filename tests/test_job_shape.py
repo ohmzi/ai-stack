@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """Job-shape enforcement: hold an agent-authored cron job to the parts of the brief a machine can check.
 
-WHY THIS FILE EXISTS. _HERMES_BRIEF is instructions to a 20B local model, and on 2026-08-07 it broke
+WHY THIS FILE EXISTS. _HERMES_BRIEF is instructions to a local MoE (hermes-genesis:agent — the same
+weights as the chat tenant, ~3 B active of 34.7 B), and on 2026-08-07 it broke
 three of them in one job. Two flight jobs reached the scheduler with deliver='origin' — whose only
 origin on this host is the api_server, which has no push channel — so every run ended in "Adapter
 send failed: API server uses HTTP request/response, not send()". Neither prompt asked for a LOG line,

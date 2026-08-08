@@ -15,15 +15,42 @@ Ollama keys runners by model+options, so the two cannot co-reside on this card.)
 | **QA judge** | `gemma4:e2b` | 3307 MiB | 166.6 | Still the eval judge (cross-family control). Kept on disk; no longer in the request path. ⚠️ see "the phantom". |
 | **Router classifier** | `gemma3:1b` | **1313 MiB** | 235.4 | The HINT-tier chat-vs-code classifier in the pipe. Co-resides with the main tenant. |
 | **Embeddings** | `bge-m3:latest` | ~941 MiB, transient | — | RAG embeddings via the Ollama engine. 1024-dim, 8192-token window. |
+| **Background agent** | `hermes-genesis:agent` | ~17 GB (**not measured here** — see note) | — | The tag `hermes-agent` runs cron jobs on. Same weights as `apex-compact` via `ollama create` + `PARAMETER num_ctx 65536`, so ~0 extra disk — but Ollama keys runners by model+options, making it a **separate ~17 GB runner** that cannot co-reside with the 32768-ctx chat tenant. A tick firing mid-conversation evicts chat and the next turn pays a cold reload, **measured at 22.7 s**. That is why the pipe releases the chat tenant before handing off, and why the GPU guard exists. Full account: [HERMES_AGENT.md](HERMES_AGENT.md). |
+
+> **The agent row is the one number on this page that is not an `nvidia-smi` delta.** It was missing
+> from this table entirely until 2026-08-08 — the paragraph above counted it toward "FIVE models"
+> while the table listed only the other four distinct tags, so the doc contradicted itself for a
+> week. The `~17 GB` is carried over from `HERMES_AGENT.md` and the pipe's own comment rather than
+> re-measured, and it is flagged instead of quietly formatted like the measured rows, because
+> "every number here is measured" is the claim this file opens with.
 
 **Deleted 2026-07-26** — ~55 GB reclaimed, disk 277 → 332 GB free:
 `hf.co/unsloth/Qwen3.6-35B-A3B-GGUF:UD-IQ4_XS` (18 GB) · `dolphin-venice:24b` (14 GB) ·
 `gemma4:31b` (19 GB) · `gemma4:e2b-it-qat` (4.3 GB) · `qwen3-embedding:0.6b` · `embeddinggemma:300m`
 (the last three were never referenced by anything).
 
-Idle baseline is **1023–1070 MiB**, and it is not what the old version of this doc claimed: the
-desktop is only ~186 MiB (Xorg + gnome-shell + TeamViewer + nautilus). The rest is
-**ComfyUI 444 MiB + the Open WebUI CUDA embedder 360 MiB**.
+Idle baseline is **~630 MiB** since the 2026-07-26 embeddings move: the desktop is only ~186 MiB
+(Xorg + gnome-shell + TeamViewer + nautilus — not the "880–1050 MiB desktop overhead" the older docs
+claimed, corrected in `UPGRADE_ROADMAP.md` §4 “The VRAM budget after Wave 1 + 2.1”), and the rest is **ComfyUI idle 444 MiB**. Open WebUI
+now holds **zero** VRAM: pointing retrieval at the Ollama engine (`rag.embedding_engine = "ollama"` —
+the Embeddings row above) stops OWUI constructing a local SentenceTransformer at all, which freed the
+360 MiB CUDA embedder it used to hold permanently. Measured at 664 MiB immediately after the switch
+(`UPGRADE_ROADMAP.md` §1.5, the SHIPPED Embeddings row — “baseline 1029→664 MiB”) and decomposed as
+186 + 444 in `UPGRADE_ROADMAP.md` §4 (“Baseline changes from 1023–1070 MiB to **~630 MiB**”).
+
+> **Cited by section and quoted phrase, not line number — deliberately, since 2026-08-08.** The three
+> line numbers this paragraph used (`:955`, `:953-955`, and `:621` further down) all broke the same
+> day they were written, because `UPGRADE_ROADMAP.md` was being edited above them and every insertion
+> shifted the target. `:955` landed on unrelated VQA prose. A pointer that silently moves is worse
+> than no pointer: it makes a measured number read as unsourced.
+
+> **Superseded 2026-08-08.** Until today this paragraph read "Idle baseline is **1023–1070 MiB** …
+> The rest is **ComfyUI 444 MiB + the Open WebUI CUDA embedder 360 MiB**". That is the
+> pre-2026-07-26 figure, and it stayed in the present tense for the fortnight after the embedder was
+> removed, contradicting this doc's own Embeddings row. It is recorded here because it remains the
+> correct baseline for any measurement taken before 2026-07-26. What the staleness cost: the
+> co-tenant ceiling under "Considered, not adopted" was subtracting 1023 MiB, so anyone sizing a
+> second tenant off this page under-counted free VRAM by ~393 MiB.
 
 > ### ⚠️ Never budget from `/api/ps`
 > `size_vram` omits the multimodal projector and the ~305 MiB CUDA context. It understates real VRAM
@@ -104,9 +131,11 @@ phantom reservation**. It therefore needs ~9.4 GiB free to load and cannot co-re
 in either order. This is the single largest VRAM inefficiency on the box.
 
 The old rationale in this doc — *"the task model is tiny on purpose so a title/tag generation never
-evicts the resident chat model"* — is **falsified by measurement**. It evicts the coder on every new
-chat. `gemma3:1b` (1313 MiB, no phantom) does co-reside. Reverting the task model is a pending
-decision; the cost of not doing it is ~6 s of warm reload on the first coder message after a new chat.
+evicts the resident chat model"* — is **falsified by measurement**. (Recorded before the 2026-08-01
+revert — see the blockquote above. While `gemma4:e2b` held the task slot it evicted the coder on
+every new chat.) `gemma3:1b` (1313 MiB, no phantom) does co-reside. Leaving `gemma4:e2b` in the task
+slot cost ~6 s of warm reload on the first coder message after each new chat; the 2026-08-01 revert
+is what removed that.
 
 ## Context length is pure cost
 
@@ -194,9 +223,11 @@ without one). Anything that depends on a negative must run a cfg > 1 tier.
 - **A 30–35B MoE for the *task* slot** — rejected. MoE saves compute, not memory; ~18 GB resident
   would evict the chat model on every title. Wrong slot.
 - **Replacing dolphin with a smaller DENSE chat model so it fits beside the coder** —
-  arithmetically impossible. The ceiling for a coder co-tenant is 24115 − 18372 − 1023 = 4720 MiB
-  physical, and Ollama's floor cuts that to ~3.3 GiB, i.e. a 4B-class model. Even a 12B Q4
-  (~8.1 GiB) fails: 18044 + 8140 > 24115.
+  arithmetically impossible. The ceiling for a coder co-tenant is 24115 − 18372 − 630 = 5113 MiB
+  physical (recomputed 2026-08-08 on the ~630 MiB baseline; it read 24115 − 18372 − 1023 = 4720 MiB
+  while the stale 1023 MiB figure stood, and the conclusion does not move), and Ollama's per-model
+  free-memory floor cuts the usable budget to ~3.3 GiB (`UPGRADE_ROADMAP.md` §2 “Wave 2 — needs a decision or a download”, “co-tenant under ~3.3 GiB”), i.e. a 4B-class
+  model. Even a 12B Q4 (~8.1 GiB) fails: 18044 + 8140 > 24115.
 - **`gemma4:e2b` as the vision model** — superseded; vision went to the coder instead, which costs
   zero extra GB and zero downloads.
 - **q4_0 KV cache** — measured and rejected above.
@@ -222,7 +253,11 @@ three large tenants to one.
 > **SUPERSEDED — kept for the measurements, not the recommendation.** Everything below
 > this line was written before the consolidation and argues for a swap that has since
 > happened: chat/vision/coder all point at `hermes-genesis:apex-compact` today
-> (pipe lines 330/335/340). Read it as a record of how the decision was reached.
+> (`self.chat_model` / `self.vision_model` / `self.coder_model` in `pipes/auto_assistant.py`,
+> currently lines 456/461/466). **Citation corrected 2026-08-08** — it read "pipe lines
+> 330/335/340", which by now lands in the job-ownership block (`TASK_OWNERS_FILE`,
+> `OWNER_PRUNE_S`, `OWUI_DB`); the symbols are the durable reference, the line numbers are not.
+> Read it as a record of how the decision was reached.
 
 **Now measured, 2026-07-26.** The refusal gap is real: on five prompt-enhancer-style requests the
 coder refused **2 of 5**, while `dolphin` and an uncensored Qwen3.6 both complied 5/5. So `dolphin`
@@ -244,7 +279,9 @@ download size, not just config.
 
 | To undo | Steps |
 |---|---|
-| **The whole consolidation** | `ollama pull hf.co/unsloth/Qwen3.6-35B-A3B-GGUF:UD-IQ4_XS` (17.7 GB) and `ollama pull dolphin-venice:24b` (14 GB), then revert `chat_model`/`vision_model`/`coder_model` in `pipes/auto_assistant.py`, `text_model` in `uncensored.py (function id `uncensored`, shown as "Photoreal")`, and both in `image_krea.py`. Git history has the exact prior values. |
+| **The whole consolidation** | `ollama pull hf.co/unsloth/Qwen3.6-35B-A3B-GGUF:UD-IQ4_XS` (17.7 GB) and `ollama pull dolphin-venice:24b` (14 GB), then revert `chat_model`/`vision_model`/`coder_model` in `pipes/auto_assistant.py`, `self.text_model` in `pipes/photoreal.py` (**function id** `photoreal`, shown as "Photoreal" — renamed from the function id `uncensored` on 2026-08-02, commit 35d629f), and both in `image_krea.py`.
+
+> **Corrected 2026-08-08.** A note here briefly claimed a pre-rename `uncensored.py` file "no longer exists". No such file ever existed: `git log --diff-filter=A` shows the pipe was added as `pipes/photoreal.py` in 504d102 and has never been renamed. What changed in 35d629f was the **OpenWebUI function id** — the key on the `function` DB row — not a filename. The distinction matters because `scripts/deploy_pipe.py` takes the function id, and the two have drifted apart before. Git history has the exact prior values. |
 | **Vision only** | `ollama pull gemma4:31b` (19 GB), set `self.vision_model`. |
 | **Task model → `gemma4:e2b`** | set `task.model.default` / `task.model.external` back, restart OpenWebUI. No download — it is still installed, and still carries `{"think": false}`. Note the visibility trap above: an id the registry cannot see is ignored in favour of the chat's model. |
 | **Image checkpoint → Krea 2 Turbo** | `self.unet` in `pipes/image_krea.py` and `unet_name` in `auto_assistant._build_t2i_wf`, then `python3 scripts/deploy_pipe.py --all`. The file was never deleted. |

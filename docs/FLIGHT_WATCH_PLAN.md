@@ -1,10 +1,26 @@
 # A flight path of its own: deterministic flight routing, and a fare capability that is measured before it ships
 
-> ## ⛔ THE PHASE 1D GATE RETURNED ZERO. PHASES 2 AND 3 ARE ON HOLD.
+> ## ⛔ THE PHASE 1D GATE RETURNED ZERO. PHASE 2 IS ON HOLD; PHASE 3 SHIPPED ROUTING ONLY.
 >
-> Measured 2026-08-07 across all 19 sites, plain tier and browser tier: **11 blocked, 6 never
-> fetched, 2 wrong-role, 0 readable.** skyscanner.ca was the last candidate and rendering it produced
-> a PerimeterX challenge. See **`docs/FLIGHT_RECON.md`** for the evidence and the remaining options.
+> *(This heading read "PHASES 2 AND 3 ARE ON HOLD" until 2026-08-08. Phase 3's routing — 3a, 3b, 3c and
+> a renamed 3g — shipped in commit 03c46da; everything that would create a watch did not. Details in
+> the supersession note below.)*
+>
+> Measured 2026-08-07: **11 blocked, 6 never fetched, 2 wrong-role, 0 readable** — the registry state
+> after re-judgement. skyscanner.ca was the last candidate and rendering it produced a PerimeterX
+> challenge. See **`docs/FLIGHT_RECON.md`** for the evidence and the remaining options.
+>
+> **Corrected 2026-08-08.** That sentence read *"across all 19 sites, plain tier and browser tier"*,
+> which claimed browser coverage that was never measured. **Only the plain tier covered all 19.** The
+> browser tier fetched **6**: google.com, skiplagged.com, kayak.com, momondo.ca and cheapflights.ca in
+> one run, which then aborted at cheapflights.ca on `"4 consecutive blocks — the IP is being
+> fingerprinted"`, plus skyscanner.ca rendered on its own afterwards. kiwi.com appears in that browser
+> record as `no_deeplink` with `bytes: null` — attempted, never fetched. The remaining **12 sites
+> appear in no browser record at all**, so their `blocked` verdict is a plain-tier measurement.
+> Raw records: `docs/flight-recon/20260807T184200Z/probe.json` (19 results, all tier `plain`),
+> `20260807T185945Z/probe.json` (6 results, tier `browser`) and `20260807T190939Z/probe.json`
+> (skyscanner.ca alone). `docs/FLIGHT_RECON.md` scopes its own headline correctly — *"zero of nineteen
+> sites can currently be read on the plain tier"* — and this banner dropped the scoping.
 >
 > Per this plan's own Phase 1d, written before anything was measured: *"0 → stop and report. Do not
 > ship a flight watcher with nothing behind it."* So Phase 2 shipped as **inert** code and **Phase 3
@@ -14,6 +30,46 @@
 > What IS built and tested: `flight_probe.py` (62 checks), `flight_watch.py` (73), `flight_render.py`,
 > the registry, and the alert kinds. What is NOT built: every part of Phase 3, and the tests/ files
 > for Phase 4 (coverage currently lives in each script's `--selftest`).
+>
+> **Superseded 2026-08-08 (commit 03c46da, "a flight ask stops reaching the model that invents
+> fares").** The two paragraphs above are kept because they record why the pause was right, but *"Phase
+> 3 was deliberately not started"* stopped being true 15 minutes after this banner was committed:
+> `git log -- docs/FLIGHT_WATCH_PLAN.md` ends at 868df64 (2026-08-07 15:13), and 03c46da (15:28) added
+> **696 lines to `pipes/auto_assistant.py`** and 263 to `tests/test_flight_intent.py`. The banner simply
+> predates the work. What shipped is **3a** (placement), **3b** (deterministic intent, deny arms first,
+> with the `gemma3:1b` hint tier), **3c** (slots and the fill loop) and a renamed **3g** (route
+> metrics): `FLIGHT_ROUTE = True` (`:312`), `FLIGHT_CLASSIFIER = True` (`:313`),
+> `FLIGHT_DRAFT_TTL_S = 3600` (`:314`), `FLIGHT_MAX_TURNS = 6` (`:315`), `_flight_deny` (`:1324`),
+> `_classify_flight` (`:1340`), `_is_flight_request` (`:1370`), `_flight_slots` (`:1580`),
+> `_flight_missing` (`:1616`), `_gflights_url` (`:1651`), `_flight_ask` (`:1702`), `_flight_answer`
+> (`:1728`), `_flight_turn` (`:1755`).
+>
+> What did **not** ship is every part that needs a readable site. There is no `_flight_create_job`
+> anywhere in `pipes/` (grep: no match), no contact is collected (`_flight_missing`'s docstring says a
+> contact "is not needed at all, because nothing is scheduled"), and nothing reaches `POST /api/jobs`.
+> The terminal action is a Google Flights deep link built from the deterministically-parsed slots. So
+> **3d** (contact gating), **3e** (answer now), **3f** (deterministic job creation) and Phase 2's
+> watcher are still not started — correctly, because the gate still reads zero. What 03c46da bought is
+> narrower and worth stating exactly: a flight ask no longer reaches a chat model that invents a fare.
+>
+> **The flight route is deployed.** `pipes/live/auto_assistant.py` (6067 lines) and
+> `pipes/auto_assistant.py` (6075) are
+> no longer byte-identical — the pipe was edited on 2026-08-08 after the last deploy — but `diff`
+> reports only two hunks, the `_HERMES_BRIEF` model-description comment (`:4861`) and the position of
+> the `repaired` count (`:5177`). Every line of the flight path is identical in both, so the route is
+> live.
+>
+> **Also superseded 2026-08-08:** the tests/ files for Phase 4 are no longer all missing.
+> `tests/test_flight_intent.py` exists, is 263 lines of *original* coverage — its own labelled corpus
+> and an injected `TODAY = 2026-08-07`, not a `--selftest` delegate — and measured today at **115
+> checks — ALL PASS** against `pipes/auto_assistant.py`. `tests/test_flight_probe.py` (**62 checks**)
+> and `tests/test_flight_watch.py` (**73**) also exist and pass, but the parenthetical above still holds
+> for those two: each states in its own docstring that it "adds no coverage of its own" and ends in
+> `sys.exit(mod.selftest())`, so probe and watch coverage does still live in each script's `--selftest`
+> and the tests/ file only surfaces it to anyone running `tests/`. All three are registered in
+> `docs/QA_TEST_PLAN.md`. There is still **no separate slots suite**; its coverage currently sits inside
+> `test_flight_intent.py` (date, IATA, target and precision parsing), which is what the Phase 4 table
+> below now says.
 >
 > Phase 1e (date flexibility) is fully designed below and **implemented in `flight_watch.py`**, but no
 > site's `date_flex` could be measured, so the ladder resolves against nothing today.
@@ -28,20 +84,51 @@
 > `verdict: "untested"`, so nothing is queried) and `scripts/flight_render.py`. No routing has
 > changed, no pipe has been redeployed, and no fare has been read.
 >
+> > **Superseded 2026-08-08. The two paragraphs above are the plan's original banner, written verbatim
+> > in commit 36f6f06 before any flight code existed, and never updated as the four later flight
+> > commits landed underneath them (6337e86, 9fa0cab, 868df64, 03c46da).** They contradict the ⛔
+> > header above, which lists `flight_probe.py` and `flight_watch.py` as built and tested — a
+> > self-contradiction inside one blockquote. Kept, not deleted, because the drift is the lesson: a
+> > status banner that is not re-read on every commit becomes the most confidently wrong text in the
+> > file. What an operator would have seen: a reader trusting this block would conclude no flight ask
+> > is routed, and would go looking for the bug in `price_search.py` when the ask never gets there.
+> >
+> > Measured today, each clause:
+> > - *"Two files exist so far"* — **four do**: `scripts/flight_probe.py` (1351 lines),
+> >   `scripts/flight_watch.py` (875), `scripts/flight_render.py` (195), and the registry.
+> > - *"every `verdict: "untested"`, so nothing is queried"* — **zero rows say `untested`**. Enumerated
+> >   from `scripts/flight_sites.json`: 19 sites, `Counter({'blocked': 11, 'no_deeplink': 6,
+> >   'unusable_role': 2})`, with 11 rows stamped `measured_at: 2026-08-07`. `flight_watch.py` is still
+> >   inert, but for the opposite reason: not because no site has been tried, but because **no site
+> >   came back usable**, so there is nothing for it to query.
+> > - *"No routing has changed, no pipe has been redeployed"* — routing changed in 03c46da and the
+> >   flight path is live (see the deployment note above).
+> > - *"a flight watch is still refused by `scripts/price_search.py:354`"* — `refuse_fare` is at
+> >   **`scripts/price_search.py:360`** (called at `:382`), and it is **now only reached when the
+> >   deterministic flight path does not claim the turn**. The `_KIND_RULES` fare entry is intact
+> >   (`pipes/auto_assistant.py:1130`, fare pattern `:1141`) and the `--kind fare for flights` steer
+> >   survives in the hermes brief (`:3913`), so the agent path can still create a new fare job
+> >   whenever the flight route declines — a deny-arm hit, or a classifier failure returning `False`.
+> > - *"no fare has been read"* — still true, and it is the one clause the gate makes permanent until a
+> >   readable source appears.
+>
 > The go/no-go gate in Phase 1d is real: if reconnaissance clears zero usable sites, the correct
 > outcome is to keep the refusal and ship the findings. Do not read this document as a commitment
 > that flight fares will work.
 >
 > Written 2026-08-07. Supersedes nothing; extends `TRACKING_ENHANCEMENT.md`'s "Still open" item 2
 > ("a fare capability, if wanted at all") and claims brief rule slot `5d-iv`, reserved for exactly
-> this at `pipes/auto_assistant.py:3173`. Sections marked *"Corrected during implementation"* are
-> kept deliberately — the mistake and its correction are both part of the record, which is the same
-> reason `TRACKING_ENHANCEMENT.md` keeps its negative results.
+> this at `pipes/auto_assistant.py:3845-3848` (cited as `:3173` when written; 03c46da's 696 lines moved
+> it, and `:3173` is now ComfyUI OOM handling). The slot is still unallocated — `grep -n '5d-iv'
+> pipes/auto_assistant.py` returns nothing, and the brief has `5d-i.` at `:3899` and `5e.` at `:3936`.
+> Sections marked *"Corrected during implementation"* and *"Superseded"* are kept deliberately — the
+> mistake and its correction are both part of the record, which is the same reason
+> `TRACKING_ENHANCEMENT.md` keeps its negative results.
 
 ## Context
 
 Asking this assistant to watch a flight currently produces a monitor that cannot work. That is by
-design, and the design was right at the time: `scripts/price_search.py:354` `refuse_fare()` refuses
+design, and the design was right at the time: `scripts/price_search.py:360` `refuse_fare()` refuses
 every `--kind fare` job before spending a search, because on 2026-08-07 job `52f821a8d3a2` resolved
 a cheapflights.ca page and reported **"$358.72, under your $1,000.00 target" at high confidence** —
 read out of a JSON-LD array of 97 unrelated itineraries on a page whose own title said "C$ 146+".
@@ -50,6 +137,14 @@ diagnostic that settled it: `{"rows": 10, ..., "reason": "no_candidate"}` — di
 **extraction** was the gap, and "more engines was never the fix for fares."
 
 That job is still on the box, firing the refusal every 15 minutes.
+
+> **Superseded 2026-08-08 (commit 03c46da).** The opening sentence — *"asking this assistant to watch a
+> flight currently produces a monitor that cannot work"* — is no longer true of a **fresh** ask. A
+> flight ask is claimed by `FLIGHT_ROUTE` inside `pipe()` *before* `_is_bg_task_request`, so it never
+> reaches the generic watch machinery and no `--kind fare` job is built for it; it ends in a Google
+> Flights deep link built from the parsed slots. It stays true of any fare job that **already exists**,
+> which is what the next line records, and of any ask the flight route declines — see the per-clause
+> note in the banner above.
 
 What changes now is the shape of the question. A fare cannot be read off a *search result*, because a
 search result is about no itinerary in particular. A fare **can** be read off a page that was
@@ -92,7 +187,7 @@ never texts on its own**.
 | `POST /api/jobs` takes `{name, schedule, prompt, deliver, repeat}`; name ≤200, prompt ≤5000; every prompt passes `_scan_cron_prompt` | A `flight_watch.py --origin … ` command trips none of the threat patterns (checked: they target `cat .env`, `rm -rf /`, curl-exfil). The deterministic path is clear. |
 | Hermes `api_server` toolset is `[web, file, memory, session_search, todo, cronjob, skills]` — **no terminal, no browser** | The chat-facing agent can never run the extractor. "Answer now" cannot go through `_hermes_stream`. |
 | `/volume1/docker/openwebui/config/alerts/` exists, owned `ohmz:ohmz`, and is the container's `/app/backend/data/alerts/` | This is the pipe↔host channel that already carries contacts. It is how "answer now" returns a fare **without granting Hermes terminal access**. |
-| OpenWebUI **escapes HTML comments wherever they appear** (`auto_assistant.py:1354-1365`) | Slot state must live in the pipe's per-chat dicts (`self._phone_ask` precedent, `__init__:459`), never in a message marker. |
+| OpenWebUI **escapes HTML comments wherever they appear** (`_marks()`, `auto_assistant.py:2027-2037`) | Slot state must live in the pipe's per-chat dicts (`self._phone_ask` precedent, `__init__:484`), never in a message marker. |
 | Live job `52f821a8d3a2` is a `price_search --kind fare` job hitting the refusal | Delete it; offer to recreate as a flight watch. Note `YTO` is a metro code — the new extractor must accept metro codes (YTO/NYC/LON). |
 | SearXNG `:8889` and Hermes `:8642` are **unreachable from Claude's sandbox** (localhost blocked, no Docker socket) | Every live check in Phase 0 must be run by the user with `!` or by a Hermes job. Do not claim a check passed that could not run. |
 
@@ -122,6 +217,20 @@ Record the answers in `docs/FLIGHT_FARES.md` before writing any extractor. If (3
 explicit interpreter, the whole capability is blocked and the honest outcome is to say so — the
 existing refusal is a complete outcome, as `docs/TRACKING_ENHANCEMENT.md:90` already says.
 
+> **Corrected 2026-08-08: `docs/FLIGHT_FARES.md` was never created and does not exist.** The Phase 0
+> answers landed in **`docs/flight-recon/stack.json`** instead (commit 26ffb51, "the first Phase 0
+> measurement, and it confirms two assumptions and breaks one"), whose keys are `searxng_8889`,
+> `gateway_8642`, `playwright`, `fare_jobs`, `recipients` and `orphaned_state`. Check 1 is there
+> (`missing_from_live: ["google"]`, `in_sync: false`) and so is check 2 (the full toolset grant, with
+> `browser`, `terminal` and `code_execution` all `configured: true` but `enabled: false`).
+> **Check 3 was never separately recorded.** What `stack.json` holds under `playwright` is a *host-side*
+> import comparison — `/usr/bin/python3` imports it (`detail: ["ok", "3.12.3"]`,
+> `explicit_path_beats_venv_PATH: true`), while
+> `/home/ohmz/.hermes/hermes-agent/venv/bin/python` raises `ModuleNotFoundError: No module named
+> 'playwright'` — which is check 1 of the table above, not the cron tick. Nothing in the repo
+> records a throwaway Hermes job proving PATH holds inside a tick, so that assumption is still
+> unmeasured.
+
 ---
 
 ## Phase 1 — Reconnaissance of the 19 sites
@@ -131,6 +240,14 @@ existing refusal is a complete outcome, as `docs/TRACKING_ENHANCEMENT.md:90` alr
 > and `scripts/flight_render.py` (the Playwright subprocess, typed exit codes 3/4/5/6, `killpg`-safe).
 > Both need the `date_flex` / `month_url_template` / `range_url_template` / `calendar` fields and a
 > `--wait-selector` path for calendar reads. No other flight file exists yet.
+>
+> **Superseded 2026-08-08.** All four clauses are done or false now. Every one of the 19 rows carries
+> `date_flex`, `month_url_template`, `range_url_template` and `calendar` keys; `flight_render.py` has
+> `--wait-selector` (`:70`, awaited at `:142-144`). **No row says `untested`** — the verdicts are
+> `Counter({'blocked': 11, 'no_deeplink': 6, 'unusable_role': 2})` and `date_flex` reads
+> `Counter({'unknown': 16, 'n/a': 2, 'whole_month': 1})`, so the flex ladder is authored but almost
+> entirely unmeasured. And two more flight files exist: `scripts/flight_probe.py` (1351 lines) and
+> `scripts/flight_watch.py` (875).
 
 ### 1a. The registry: `scripts/flight_sites.json` (new)
 
@@ -278,6 +395,13 @@ After 1c, count sites with `verdict ∈ {usable, usable_with_browser}` that are 
 
 Deliverable: `docs/FLIGHT_FARES.md` — the per-site table, the Phase 0 answers, what was refuted, and
 an explicit statement that a fare capability is a maintenance subscription rather than a feature.
+
+> **Corrected 2026-08-08: the deliverable shipped as `docs/FLIGHT_RECON.md`, not `FLIGHT_FARES.md`** —
+> that filename never existed (`grep -rn FLIGHT_FARES docs/ scripts/ pipes/` hits only this plan). The
+> per-site verdict table, the byte counts, the operator-not-host reading, the ranked remaining options
+> and the STOP decision are all in `FLIGHT_RECON.md`, which this plan's own banner already points at.
+> The **Phase 0 answers are not** in it — they are in `docs/flight-recon/stack.json`, per the Phase 0
+> note above, and the cron-tick Playwright check was never recorded anywhere.
 
 ---
 
@@ -530,6 +654,32 @@ flight_watch.py --origin YYZ --dest YVR --depart 2026-09-15 [--return 2026-09-22
                                   count toward a text, and the pipe never passes it
 ```
 
+**Corrected during implementation — five of the flags above were never built, and a real flag the prose
+below depends on was missing from the synopsis.** It is kept as planned, above, because the gap is the
+record.
+`scripts/flight_watch.py:830-859` is the whole parser, and it has no `--max-stops`, `--currency`,
+`--once`, `--return-range` or `--allow-assumed-dates`
+(`grep -n 'return_range\|max_stops\|allow_assumed\|--once' scripts/flight_watch.py` → no matches).
+`--once` is meaningless as built: `run()` is a single pass, so there is no loop to break out of. What
+it does have, which the synopsis omitted:
+
+```
+  --max-sites N                   default MAX_SITES = 3 (:78)
+  --browser {auto,never,always}   default auto
+  --require-confidence            DEFAULT ON (:853-854) — the inverse of price_watch; the
+                                  dangerous mode has to be typed. This is the flag the
+                                  "does not text on one source" rule below rests on.
+  --allow-single-source           the explicit opt-out
+  --registry <path>               default REGISTRY
+  --print-urls                    print each site's URL and date_basis, then exit without fetching
+```
+
+Of the Phase 1e block, `--depart-month`, `--return-month`, `--depart-range`, `--trip-days` and
+`--trip-flex` are all real; only `--return-range` and `--allow-assumed-dates` are not.
+
+**What that costs an operator:** verification step 2 below and the Phase 3e job prompt both invoke
+`flight_watch.py --once`, which exits with an argparse error, not a run. Both are corrected in place.
+
 **Fare validation — what makes this different from the refused path.** A candidate is rejected unless
 all hold:
 
@@ -547,9 +697,16 @@ inside the requested window, and a bare minimum with no dates attached is reject
 unchanged in every mode. Rule 6 becomes "report the minimum validated *tuple*", never a loose number.
 
 **Cross-site agreement.** Query the usable sites in registry order, stop early once two
-**owner-independent** sites agree within 15%. Report the minimum, name its source, and record which
-sites were tried and what each said. One site alone still reports but, with `--require-confidence` on
-by default for fares, **does not text** — it logs, and waits for a second source.
+**owner-independent** sites agree within `AGREE_PCT` — **12.0%** as shipped
+(`scripts/flight_watch.py:76`, the only comparison is at `:378`). *(This paragraph said "within 15%"
+until 2026-08-08; the constant was never 15. The threshold is named rather than numbered from here on,
+as it already is at the Phase 1e cross-site section, so the two cannot drift again. The selftest does
+**not** pin the value — `scripts/flight_watch.py:720-733` exercises quorum with `412.0` vs `430.0`
+(4.4% apart, must agree) and `412.0` vs `900.0` (118% apart, must not), never at the boundary, so the
+constant could move anywhere between those two without failing a check.)* Report the minimum,
+name its source, and record which sites were tried and what each said. One site alone still reports
+but, with `--require-confidence` on by default for fares, **does not text** — it logs, and waits for a
+second source.
 
 In month/range mode the quorum validates the **magnitude only**, because two sites searching March
 will legitimately find different weeks. The reported fare stays a single site's `(value, depart_found,
@@ -608,31 +765,55 @@ All in `pipes/auto_assistant.py`, deployed with `scripts/deploy_pipe.py`.
 
 ### 3a. Where it sits
 
-Inside the existing `if BG_TASKS and not attached_img and not ref:` block (`:5070`), so media, the
-`__task__` guard (`:4865`) and the deterministic manage path (`:5042`) all keep precedence — "cancel
+> **Every `auto_assistant.py:NNNN` citation in Phase 3 and its neighbours was re-derived on
+> 2026-08-08 against the shipped pipe.** The numbers as first written were all wrong by roughly 700
+> lines, because 03c46da inserted the flight path itself (`:293-315` and `:1159-1798`) *above* almost
+> everything Phase 3 cites, shifting it. That is the failure mode of line-number citations, and it
+> cost nothing here only because nobody followed one; a reader who did would have landed on ComfyUI
+> OOM handling while looking for a brief-rule reservation. Symbol names are given alongside the
+> numbers from here on so the next insertion cannot invalidate them wholesale.
+
+Inside the existing `if BG_TASKS and not attached_img and not ref:` block (`:5923`), so media, the
+`__task__` guard (`:5707`) and the deterministic manage path (`:5895`) all keep precedence — "cancel
 my flight watch" is a manage op and must stay one. New order inside that block:
 
-1. `oneshot` (`/research`, `/agent`) — unchanged (`:5087`)
-2. `_pending_phone_request` — unchanged (`:5101`)
-3. **NEW: `_is_flight_request(text)`** — start the form / act on complete slots
-4. existing `followup or _is_bg_task_request` (`:5109`)
+1. `oneshot` (`/research`, `/agent`) — unchanged (`:5940`)
+2. `_pending_phone_request` — unchanged (def `:2113`, the `pending` reply handled at `:5954`)
+3. **NEW: `_is_flight_request(text)`** — start the form / act on complete slots (shipped at `:5967`,
+   under a comment that names the ordering: below `_BG_ONESHOT` so `/research cheapest flights` stays
+   research, below the phone reply so the two contact flows cannot interleave)
+4. existing `followup or _is_bg_task_request` (`:5974`)
 
 **Corrected during implementation — the pending-form check needs its own, earlier insertion point.**
-A reply to the itinerary form must be handled **above** the deterministic manage block (`:5042`), not
-inside the bg block. `_MANAGE_VERB` (`:958`) anchors `cancel|stop|pause|end|kill` at position 0, and
-the `referring` branch (`:5061`) fires whenever a job table was rendered in the last two turns — so a
+A reply to the itinerary form must be handled **above** the deterministic manage block (`:5895`), not
+inside the bg block. `_MANAGE_VERB` (`:987`) anchors `cancel|stop|pause|end|kill` at position 0, and
+the `referring` branch (`:5914`) fires whenever a job table was rendered in the last two turns — so a
 bare "cancel" or "stop" meant to abandon the form would be read as a scheduler reference and act on a
-real job. The form owns its own abandonment vocabulary, which means it must be asked first.
+real job. The form owns its own abandonment vocabulary, which means it must be asked first. **Shipped
+as described**: the resume branch is `if FLIGHT_ROUTE and not ref and cid in self._flight_draft:` at
+`:5890`, five lines above the manage block, carrying that reasoning as its comment.
 
-Placing 4 **before** 5 is the point of the whole exercise: today a flight ask only reaches the agent
-if `_BG_VERB AND _BG_RECURRENCE` both match, so "find me a cheap flight to Tokyo in March" falls
-through to plain chat, and "watch flights YYZ to YVR" reaches the generic watch machinery which builds
-a `price_search --kind fare` job that refuses itself. Both now enter the flight path instead.
+Placing 3 **before** 4 is the point of the whole exercise (corrected 2026-08-08: this read "4 before
+5", which matches no numbering the list above has ever carried — it has had exactly four items in
+every committed revision, with the flight check at 3 and the bg-task check at 4. An off-by-one, and
+the cause is not recorded, so none is guessed at here): today a flight ask only reaches the agent if `_BG_VERB AND
+_BG_RECURRENCE` both match, so "find me a cheap flight to Tokyo in March" falls through to plain chat,
+and "watch flights YYZ to YVR" reaches the generic watch machinery which builds a
+`price_search --kind fare` job that refuses itself. Both now enter the flight path instead.
+
+**Shipped and measured (03c46da's own commit message).** Before the change, **7 of 8** realistic flight
+phrasings reached no background task at all and fell through to the chat model, which answers with a
+fare it made up; the eighth matched and built a `price_search --kind fare` job that refuses itself on
+its first run. After: **8 of 8** reach the flight path.
 
 ### 3b. Intent detection — deterministic first, default deny
 
-Follows the three-tier coder pattern (`_CODE_STRONG` :573 → `_CODE_HINT` :586 → `_classify_code` :611)
-and the DEFAULT-DENY law at `:868-877`.
+Follows the three-tier coder pattern (`_CODE_STRONG` :604 → `_CODE_HINT` :617 → `_classify_code` :642)
+and the DEFAULT-DENY law at `:863-870` — the closing comment of `_is_video_request` (`:837`), where the
+measurement lives ("8 of 10 ordinary sentences started a render"). The shipped flight predicates are
+`_flight_deny` (`:1324`), `_classify_flight` (`:1340`) and `_is_flight_request` (`:1370`); the comment
+heading their regex block (`:1244-1245`) states the same rule — deny arms run FIRST, "because 'my
+flight was delayed' carries every positive token a real request does."
 
 - `_FLIGHT_SLASH` — `/flight`, an explicit escape hatch, precedent `/img` `/vid` `/research`.
 - `_FLIGHT_STRONG` — a flight noun (`flight(s)|airfare|fare|plane ticket|airline ticket`) **and**
@@ -642,17 +823,37 @@ and the DEFAULT-DENY law at `:868-877`.
   flight I`, `was delayed|got cancelled|missed my`, `flight attendant`, `in-flight`, `flight
   simulator`, `flight of stairs`, `flight risk`, `took flight`, and "how do flight prices work"-style
   meta questions.
-- `_FLIGHT_HINT` → `gemma3:1b` classifier (`ROUTE_CLASSIFIER_MODEL` :329), one word,
+- `_FLIGHT_HINT` → `gemma3:1b` classifier (`ROUTE_CLASSIFIER_MODEL` :354), one word,
   `FLIGHT`/`OTHER`, temp 0, `num_predict 4`, failure ⇒ `False`. Same fail-closed contract as
   `_classify_code`, which writes a `job:"classifier"` metric row.
+
+**Corrected 2026-08-08 — the four names above are the plan's, not the code's, and one of them was never
+built.** The shipped decomposition is finer: the deny arms are `_FLIGHT_FIGURATIVE` (`:1246`),
+`_FLIGHT_PAST` (`:1254`) and `_FLIGHT_META` (`:1262`), OR-ed together in `_flight_deny` (`:1324-1327`);
+the positive side is `_FLIGHT_NOUN` (`:1272`) plus a route pair (`_FLIGHT_PAIR` `:1283`,
+`_FLIGHT_PAIR_LC` `:1284`) or a place (`_FLIGHT_PLACE` `:1303`), *and* a request frame (`_FLIGHT_ASK`
+`:1286` or `_FLIGHT_SUPER` `:1293`); the hint band is `_FLIGHT_CLASSIFY_PROMPT` (`:1306`) through
+`_classify_flight`. Requiring a route **and** a frame is what lets bare `fare` and `one way` be flight
+nouns at all — *"the bus fare went up"* and *"one way or another"* name a noun and still do not route.
+**There is no `_FLIGHT_SLASH` and no `/flight` command**: `grep -n '/flight' pipes/auto_assistant.py`
+matches only the Google Flights URL at `:1666`. So the escape hatch for terse phrasing the deny arms
+reject does not exist, and the hint tier is the only fallback.
 
 A labelled corpus of ≥30 positives and ≥30 negatives seeds `tests/test_flight_intent.py`, including
 the real negatives already in `tests/test_bgtask_intent.py` (e.g. `"I watched a great video about
 sourdough yesterday"` must still not route anywhere near here).
 
-`_KIND_RULES`' `fare` entry (`:1110`) stays as-is — it is still how a fare is *worded* — but the fare
-steer at `:4243` that pushes fares toward `price_search.py --kind fare` is removed, since fares no
-longer take that path.
+`_KIND_RULES`' `fare` entry (`:1130`, the fare pattern at `:1141`) stays as-is — it is still how a fare
+is *worded* — but the fare steer at `:4243` that pushes fares toward `price_search.py --kind fare` is
+removed, since fares no longer take that path.
+
+> **Corrected 2026-08-08: the steer was NOT removed.** `_KIND_RULES` is intact as planned, but the
+> `"--kind fare for flights"` line is still in `_HERMES_BRIEF` at `:3913`. So whenever the flight route
+> declines a turn — a deny-arm hit, or `_classify_flight` failing closed to `False` — the agent path can
+> still build a new `price_search --kind fare` job, which refuses itself on its first run. What an
+> operator would see: a monitor that was created successfully and then reports `fare_unsupported`
+> forever. Removing the steer is only safe once something else answers those asks, which is why it is
+> still here and why the `fare_unsupported` advice rewording in Phase 2 matters more, not less.
 
 ### 3c. Slots and the fill loop
 
@@ -660,6 +861,22 @@ Six required slots: **origin, destination, depart, return-or-one-way, target pri
 depart and return may each be an exact date, a range or a whole month (Phase 1e). One conditional
 seventh: **trip length**, when the ask is a round trip in month mode with no duration given.
 Optional: adults, cabin, max stops.
+
+> **Corrected 2026-08-08 — as shipped there are three required slots, not six.** `_flight_missing`
+> (`:1615-1625`) blocks on `origin`, `destination` and `dates` only, and its docstring gives the reason:
+> *"Target is optional; a contact is not needed at all, because nothing is scheduled — there is nothing
+> to be notified about."* The six-slot list is right for the watch and wrong for the link: demanding a
+> target price and a phone number before handing over a Google Flights URL would be three extra turns
+> buying the user nothing. When Phase 2 has a readable source and 3f creates jobs, the target and the
+> contact become required again — that is the point at which 3d starts.
+>
+> One thing did ship that this section does not describe, and it is the better idea: **the slot table is
+> deliberately visible in the reply, and doubles as the recovery mechanism.** `_flight_draft_from_reply`
+> (`:1689`, called from `_flight_turn` at `:1765`) reads the slots back out of the rendered table
+> (`_FL_TBL_O` / `_FL_TBL_D` / `_FL_TBL_DEP` / `_FL_TBL_RET`, `:1631-1634`) when the in-memory draft is
+> lost to a pipe reload. The comment at `:1628-1632` states the
+> principle: *"State the user can see is state that survives, which is the opposite of the HTML-comment
+> approach `_marks()` records as having failed."*
 
 - **Airports**: a curated city/alias → IATA table **inline in `auto_assistant.py`**, including metro
   codes (YTO, NYC, LON, PAR). Deliberately *not* a `pipes/shared/` sidecar: `deploy_pipe.py`'s
@@ -689,22 +906,25 @@ Optional: adults, cabin, max stops.
 - **Target**: `under|below|less than|at most|max $N`, `$N or less`, `budget of N`. Required — if
   absent, ask. (The user chose this over a baseline heuristic.)
 - **State carrier**: `self._flight_ask[cid] = {"t": ts, "slots": {...}, "rounds": n}` in `__init__`
-  beside `self._phone_ask` (`:459`), with the same LRU cap and `PARK_TTL_S` expiry. **Not** an HTML
-  comment — `_marks()` (`:1354-1365`) records that OpenWebUI escapes those wherever they appear and
-  printed a wall of base64 under every answer.
+  beside `self._phone_ask` (`:484`), with the same LRU cap and `PARK_TTL_S` expiry. **Not** an HTML
+  comment — `_marks()` (`:2027-2037`) records that OpenWebUI escapes those wherever they appear and
+  printed a wall of base64 under every answer. *(Shipped as `self._flight_draft`, not
+  `self._flight_ask`, with its own `FLIGHT_DRAFT_TTL_S = 3600` (`:314`) rather than `PARK_TTL_S`, and
+  the turn budget is `FLIGHT_MAX_TURNS = 6` (`:315`) rather than the 3 rounds named below.)*
 - **The form**: one message listing *everything* understood and *everything* missing, then re-parse
   the free-text reply and merge. Cap at 3 rounds, then bail with a plain sentence rather than looping.
 
 ### 3d. Contact gating
 
-Reuses `_contact` (:1153), `_alert_email` (:1177), `_save_phone` (:1181), `_phone_prompt` (:1328),
-`_alert_setup_block` (:1287) unchanged. Rules for flights:
+Reuses `_contact` (:1825), `_alert_email` (:1849), `_save_phone` (:1853), `_phone_prompt` (:2000),
+`_alert_setup_block` (:1959) unchanged. **Not started** — nothing on the flight path collects a
+contact, because nothing on it schedules anything. The rules for flights, when it is:
 
 - Email is derived from `webui.db` and is almost always present; phone is asked for.
-- The existing gate (`:5151`) fires **before** anything is scheduled — keep that ordering exactly: its
-  comment is the reason ("a monitor that runs, fires, and texts nobody — the user believing they are
-  covered").
-- `_PHONE_DECLINE` (`:1092`) → **email-only is allowed** and the confirmation says so plainly. A
+- The existing gate (`:6013-6017`) fires **before** anything is scheduled — keep that ordering exactly:
+  its comment is the reason ("a monitor that runs, fires, and texts nobody — the user believing they
+  are covered").
+- `_PHONE_DECLINE` (`:1123`) → **email-only is allowed** and the confirmation says so plainly. A
   flight watch that emails is a working flight watch; refusing to create one because the user does not
   want texts would be worse than the thing the gate exists to prevent.
 - No email *and* no phone → refuse to schedule and say why.
@@ -715,8 +935,12 @@ The chat-facing Hermes has **no terminal tool**, so the pipe cannot ask it to ru
 uses the shared alerts volume instead — the same pipe↔host channel that already carries contacts:
 
 1. Pipe `POST /api/jobs` — a **one-shot** job (brief rule 7's shape) whose prompt runs
-   `flight_watch.py --once --result-out /volume1/docker/openwebui/config/alerts/flight_results/<state>.json`,
+   `flight_watch.py --result-out /volume1/docker/openwebui/config/alerts/flight_results/<state>.json`,
    then `POST /api/jobs/{id}/run` to fire it immediately.
+   *(Corrected 2026-08-08: this said `--once --result-out`. `--once` does not exist in
+   `flight_watch.py` and never did — `run()` is a single pass, so the flag has nothing to mean, and a
+   prompt carrying it would have exited on argparse instead of running. `--result-out` is real,
+   `scripts/flight_watch.py:856`.)*
 2. Pipe polls `/app/backend/data/alerts/flight_results/<state>.json` (same directory, container side)
    for up to ~90 s, streaming a status line so the turn never looks hung.
 3. Renders the fares with their sources, then offers the watch: "want me to keep checking every 6h
@@ -739,24 +963,43 @@ writable), plus pruning of results older than a day.
 - `schedule` `"every 6h"` by default; **`repeat` bounded so the watch stops the day before
   departure** — brief rule 1's requirement, computed rather than left to a model.
 - `deliver: "local"`.
-- Then read back `GET /api/jobs?include_disabled=true` via `_jobs_list` (:4157) as ground truth and
-  `_stamp_owner([id], handle, src="flight_rest")` (:1245) — an unowned job is invisible to the person
+- Then read back `GET /api/jobs?include_disabled=true` via `_jobs_list` (:4829) as ground truth and
+  `_stamp_owner([id], handle, src="flight_rest")` (:1917) — an unowned job is invisible to the person
   who asked for it.
 - **Fallback**: any REST failure → `_hermes_stream` with a new brief rule **`5d-iv`** carrying the
   same command, so the feature degrades to today's behaviour instead of dying.
 
   **Corrected during implementation:** the rule is `5d-iv`, not `5f`. `5e` is already taken
-  ("the extractor also reports its OWN failures", `:3264`), and the comment at `:3173-3174` already
+  ("the extractor also reports its OWN failures", `:3936`), and the comment at `:3845-3848` already
   reserves the number for exactly this work — *"iv = the next one (a fare extractor is the expected
-  claimant) … allocate the number here first."*
+  claimant) … allocate the number here first."* Nothing has claimed it yet:
+  `grep -n '5d-iv' pipes/auto_assistant.py` returns no matches, and the brief's nearest neighbours are
+  `5d-i.` (`:3899`) and `5e.` (`:3936`). *(Line numbers re-derived 2026-08-08: this note cited the
+  reservation as `:3173-3174` and `5e` as `:3264`; `:3173` is now ComfyUI OOM handling.)*
 
 ### 3g. Instrumentation
 
-New `_route_metric` (:2637) rows, tier 0 for deterministic hits: `flight.search`, `flight.watch`,
+New `_route_metric` (:3309) rows, tier 0 for deterministic hits: `flight.search`, `flight.watch`,
 `flight.slotfill`, `flight.deny`, with rule ids `flight_slash`, `flight_strong`, `flight_classifier`,
 `flight_form_reply`, `flight_deny`. Add to `tests/route_metrics.py` the invariants that a
 `flight.watch` row is always accompanied by a created job id, and that no `flight.*` row's request
 text contains `### Task`.
+
+**Corrected 2026-08-08 — 3g shipped under different names, and the invariants did not ship at all.**
+The routes actually emitted are **`flight.answer`** (`:1785`), **`flight.slots`** (`:1795`) and
+**`flight.abandoned`** (`:1772`, `:1792`), with rule ids `flight_strong`, `flight_form_complete`,
+`flight_form_reply`, `flight_abandon` and `flight_max_turns`. There is no `flight.search`,
+`flight.watch`, `flight.slotfill` or `flight.deny` row, and no `flight_slash` rule id at all.
+`flight_classifier` exists but never reaches a row: `_is_flight_request` returns
+`(3, "flight_classifier")` (`:1387`), and `pipe()` (`:5968`) unpacks that rule and then discards it,
+because `_flight_turn` writes its own — so a hint-tier hit is recorded as tier 1 `flight_strong`. The
+consequence is narrow but real: the metrics cannot tell a deterministic hit from a `gemma3:1b` one, which
+is the number that would justify keeping the classifier tier. The renaming is not cosmetic either: the
+plan's names assumed a watch gets created, and nothing on
+this path creates one, so **`flight.watch` has no referent** and the "always accompanied by a created
+job id" invariant would be unfalsifiable. Tier is `0` on a resumed turn and `1` on a first hit, not
+always 0. `grep -n flight tests/route_metrics.py` returns nothing, so neither invariant exists yet; the
+`### Task` one is still worth adding and is independent of job creation.
 
 ---
 
@@ -766,34 +1009,47 @@ Suites are standalone scripts (`python3 tests/test_x.py`, `sys.exit(main())`), f
 clocks injected. Note the existing convention the new pipe suites must follow: they load
 `pipes/live/auto_assistant.py` (the *deployed* bytes) by default and accept a path argument, so a pipe
 suite is run either after `deploy_pipe.py` or with `pipes/auto_assistant.py` passed explicitly.
-`tests/test_bgtask_intent.py:213-220` already asserts four flight phrasings classify as `fare`; those
-stay passing because `_KIND_RULES` is untouched.
+`tests/test_bgtask_intent.py:216-222` already asserts four flight phrasings classify as `fare`; those
+stay passing because `_KIND_RULES` is untouched (verified 2026-08-08 — the loop is at `:218-222` under
+the live-miss comment at `:216-217`; this cited `:213-220`).
 
 | New/changed | What it pins |
 |---|---|
-| `tests/test_flight_intent.py` | The ≥60-case corpus; deny-list beats strong; classifier failure ⇒ `False`; existing `test_bgtask_intent.py` negatives still don't route here |
-| `tests/test_flight_slots.py` | Date/IATA/target parsing incl. metro codes and past dates; **the precision model** — `exact` / `range` / `month` classification per phrasing, next-occurrence month rollover, `March out back in April`, return-month defaulting to depart-month, partly-elapsed month narrowing, seasons and bare years still asking; the conditional trip-length question fires only for a round trip in month mode with no duration; the 3-round form state machine; TTL expiry; **city→IATA resolved only in the pipe** |
-| `tests/test_flight_watch.py` | Saved HTML/JSON per usable site; teaser rejection; **currency mismatch rejected**; sanity band; owner-independent quorum; flap cooldown with an injected clock and the `None`-not-`0` default; honest-failure escalation and back-off |
+| `tests/test_flight_intent.py` **— SHIPPED in 03c46da; measured 2026-08-08 at 115 checks, ALL PASS** | The ≥60-case corpus (shipped as **30 positives + 38 negatives** = 68, each negative naming the deny arm it exercises — this cell said 34 positives until 2026-08-08; measured, `len(YES)` is 30); deny-list beats strong; classifier failure ⇒ `False`; existing `test_bgtask_intent.py` negatives still don't route here. Also absorbed the slots row below: date, IATA, target and precision parsing, positional origin/destination, the Dec→Jan rollover, seasons and named holidays that must ASK, and that the Google Flights link is built from slots rather than typed by a model |
+| `tests/test_flight_probe.py` **— SHIPPED, 62 checks** | Delegating harness for `scripts/flight_probe.py --selftest`: the pure `verdict()` decision table, the five 2026-08-07 misclassifications pinned by mechanism, `parse_keep_only`'s inline-comment trap, browser-tier learning order |
+| ~~`tests/test_flight_slots.py`~~ **— not built, and no longer planned as a separate suite.** Its coverage sits inside `test_flight_intent.py` | Date/IATA/target parsing incl. metro codes and past dates; **the precision model** — `exact` / `range` / `month` classification per phrasing, next-occurrence month rollover, `March out back in April`, return-month defaulting to depart-month, partly-elapsed month narrowing, seasons and bare years still asking; the conditional trip-length question fires only for a round trip in month mode with no duration; the 3-round form state machine; TTL expiry; **city→IATA resolved only in the pipe** |
+| `tests/test_flight_watch.py` **— SHIPPED, 73 checks**, but as a *delegating harness* that calls `scripts/flight_watch.py --selftest`; it adds no coverage of its own, and there are no saved-HTML fixtures because no site is readable | Saved HTML/JSON per usable site; teaser rejection; **currency mismatch rejected**; sanity band; owner-independent quorum; flap cooldown with an injected clock and the `None`-not-`0` default; honest-failure escalation and back-off |
 | `tests/test_flight_flex.py` (new) | **The Phase 1e ladder.** Rung selection per `date_flex` value; rung 2 **skipped** when `--trip-days` is absent; the tuple rule — a month-mode page whose fares carry no dates yields **nothing**, and a fixture of the 97-price shape produces no value rather than a minimum; extracted dates outside the requested window discarded; `date_basis` confidence ceilings, and specifically that a lone `assumed_month_bounds` reading **logs and does not text**; the word "cheapest" is unreachable on rung 4; quorum across two sites that found *different* weeks agrees on magnitude while the reported tuple stays one site's; dedupe on `(value, dates)` — same value + moved dates logs and does not re-text, same dates + lower value fires; **`depart_found`/`ret_found` present in every emitted flex payload** and rendered in SMS, email and LOG; `book_url` built from the found dates and absent from the SMS; date strings dot-free |
 | `tests/test_flight_registry.py` | Registry schema; **set equality against the 19 requested domains**; every `usable*` site has an `extract` block; templates contain the required placeholders; `date_flex` in the closed vocabulary, and a `whole_month` site has a `month_url_template` containing `{depart_ym}` while a `calendar` site has a `calendar` selector block. Drift-test precedent: `test_web_search.py:346-360` |
 | `tests/test_flight_create.py` | REST body shape; name ≤200 ASCII; prompt ≤5000; a local copy of `_CRON_THREAT_PATTERNS` passes; `repeat` bounded to departure |
 | `tests/test_price_search.py` | Fares still refused there, with the reworded advice |
-| `tests/route_metrics.py` | The new `flight.*` invariants |
-| `docs/FLIGHT_FARES.md` (new) | Phase 0 answers, the per-site table, what was refuted, the maintenance-subscription framing |
-| `docs/HERMES_AGENT.md` | "Fares are refused, not attempted" → qualified: refused *from a search result*, attempted *from an itinerary URL*; add brief rule 5f |
+| `tests/route_metrics.py` | The new `flight.*` invariants — **not added**; `grep -n flight tests/route_metrics.py` returns nothing, and per the 3g correction the `flight.watch`-implies-a-job-id invariant has no referent to pin |
+| ~~`docs/FLIGHT_FARES.md`~~ → **shipped as `docs/FLIGHT_RECON.md`** (that filename never existed); Phase 0 answers went to `docs/flight-recon/stack.json` instead | The per-site table, what was refuted, the maintenance-subscription framing — all present in `FLIGHT_RECON.md`. The Phase 0 cron-tick Playwright check (item 3) is recorded nowhere |
+| `docs/HERMES_AGENT.md` | "Fares are refused, not attempted" → qualified: refused *from a search result*, attempted *from an itinerary URL*; add brief rule **`5d-iv`** — *corrected 2026-08-08: this row said `5f`, contradicting the "Corrected during implementation" note in 3f above. `5e` is taken (`pipes/auto_assistant.py:3936`) and `:3845-3848` reserves `5d-iv` for exactly this* |
 | `docs/TRACKING_ENHANCEMENT.md` | Resolve open item 2; note item 3 (flap cooldown) is now closed for the fare path |
-| `docs/QA_TEST_PLAN.md` | Register the new suites, and fix the existing gap — `test_price_search.py` is missing from that table |
+| `docs/QA_TEST_PLAN.md` | ~~Register the new suites, and fix the existing gap — `test_price_search.py` is missing from that table~~ **DONE 2026-08-08.** `test_price_search.py` is registered and carries its own note *"(Was missing from this table; the suite predates the omission.)"*; `test_flight_intent.py` (115 checks), `test_flight_probe.py` (62) and `test_flight_watch.py` (73) are all registered with their counts. Outstanding registration work is only the suites that do not exist yet: `test_flight_flex.py`, `test_flight_registry.py`, `test_flight_create.py` |
 
 ### End-to-end verification
 
-1. `python3 tests/test_flight_*.py` — all green offline.
-2. `python3 scripts/flight_watch.py --selftest` and one `--once` run against the canonical itinerary
-   on the host.
+1. `python3 tests/test_flight_*.py` — all green offline. *(Measured 2026-08-08: `test_flight_intent.py`
+   115, `test_flight_probe.py` 62, `test_flight_watch.py` 73 — ALL PASS. Pass the tracked pipe
+   explicitly, `python3 tests/test_flight_intent.py pipes/auto_assistant.py`, or the intent suite reads
+   the gitignored `pipes/live/` copy, which is currently 8 lines behind.)*
+2. `python3 scripts/flight_watch.py --selftest` and one run against the canonical itinerary on the
+   host — `--origin YYZ --dest YVR --depart 2026-09-15 --return 2026-09-22 --state <name> --below N`.
+   The script enforces `--origin`, `--dest`, one of `--depart`/`--depart-month`/`--depart-range`, and
+   `--state` unless `--print-urls` is passed (`scripts/flight_watch.py:864-870`); `--below` is a design
+   requirement, not an argparse one. *(Corrected 2026-08-08: this said "one `--once` run". There is no
+   `--once` flag; `run()` is already a single pass. Following the step as written produced an argparse
+   error, not a run. `--print-urls` is the cheaper first move — it prints the URL and `date_basis` each
+   site would be asked for, then exits without fetching.)*
 3. `python3 scripts/deploy_pipe.py` to push the pipe, then `python3 tests/test_deployed.py`.
 4. In OpenWebUI: **"find me flights from Toronto to Vancouver Sep 15 back Sep 22 under $600"** → the
    form fills, the one-shot answers in chat, the watch offer appears.
 5. Partial ask: **"watch flights to Vancouver"** → the form asks for origin, dates and target, and
-   nothing is scheduled until it has them.
+   nothing is scheduled until it has them. *(As shipped it asks for origin and dates only — the target
+   is optional while the terminal action is a link, per the 3c correction. Nothing is scheduled either
+   way, because nothing schedules.)*
 5b. **Month ask: "watch flights from Toronto to Tokyo in March under $900"** → no date question is
    asked; the form asks only for trip length and the target if missing; the confirmation says "all of
    March 2027 (flexible)" and names which rung each site will use. Force a run and confirm the SMS,
@@ -817,9 +1073,9 @@ stay passing because `_KIND_RULES` is untouched.
 | **Most of the 19 sites will block headless automation.** Kayak/Skyscanner especially. | The Phase 1d gate decides go/no-go on measured evidence rather than hope; verdicts are recorded so nobody re-derives them. Zero usable sites ⇒ report, don't ship. |
 | A fare is read but is not bookable — the exact 2026-08-07 failure, repeated. | Itinerary is in the URL (structural), plus five independent validation rules, plus owner-independent cross-site agreement, plus the source named in every alert. |
 | Currency confusion: a USD fare against a CAD target. | `currency` is a registry field; unknown currency is a hard reject. |
-| Playwright unreachable from a cron tick. | Explicit `/usr/bin/python3` in both the job prompt and the subprocess call, **and** Phase 0 check 3 proves it before any code is written. Missing Playwright exits 3 loudly. |
+| Playwright unreachable from a cron tick. | Explicit `/usr/bin/python3` in both the job prompt and the subprocess call, **and** Phase 0 check 3 proves it before any code is written. Missing Playwright exits 3 loudly. **Corrected 2026-08-08: check 3 never ran, and the code was written anyway** — `flight_probe.py` and `flight_watch.py` both exist. What `docs/flight-recon/stack.json` records is a host-side import, not a cron tick. The mitigation is therefore one third short of what this row claims, and the gap only stayed harmless because the gate stopped the watcher before any cron job was created. |
 | A hung page holds a cron tick or leaks Chromium. | `try/finally` close, parent-side `timeout` + `kill()`, ≤120 s browser budget against the 180 s tool ceiling. |
-| A false flight route evicts the chat tenant (~23 s, `ROUTING_ROADMAP.md:10`). | Deterministic REST creation means the *common* path never loads the agent at all — strictly better than today. Detection is default-deny with a deny-list checked first and a 60-case corpus. |
+| A false flight route evicts the chat tenant (~22.7 s measured, `ROUTING_ROADMAP.md:10-11`). | Deterministic REST creation means the *common* path never loads the agent at all — strictly better than today. Detection is default-deny with a deny-list checked first and a 60-case corpus. **Shipped stronger than planned:** the corpus is **68 cases** (30 positives, 38 negatives, each negative naming the arm it exercises — this cell said 72/34 until 2026-08-08; measured, `len(YES)` is 30 and `len(NO)` is 38), and the terminal action loads no model at all — no REST call either, just a constructed URL. This row cited "~23 s"; the measurement is 22.7 s. |
 | 19 sites × frequent polling looks like abuse. | Default `every 6h` (not 15m), early-exit at two agreeing sites, one request per site per run, `repeat` bounded to departure. |
 | Site markup drifts and the watcher goes quiet. | `fare_unreadable` alerts once and backs off rather than failing silently; every run logs which sites were tried and what each said. |
 | **Month mode gives up the URL-binding guarantee** that justified the whole feature — a whole-month page legitimately shows dozens of itineraries, which is the exact shape that produced `$358.72`. | The tuple rule: fare + its own two dates extracted from one element, both inside the requested window, or the page yields nothing. Binding moves from the URL to the element rather than being dropped. Pinned by a 97-price fixture asserting **no value**, not a minimum. |

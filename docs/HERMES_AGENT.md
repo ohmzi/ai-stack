@@ -10,11 +10,11 @@ bounded, GPU-safe scheduled job, executed by a local agent and reported back int
 | Runtime | [NousResearch/hermes-agent](https://github.com/NousResearch/hermes-agent) **v0.19.0**, pinned at commit `b6729ba9`, installed at `~/.hermes` (uv venv, MIT). Do not run `hermes update` casually — upstream merges ~660 PRs between patch releases; re-verify with the tests below after any update. |
 | Model | `hermes-genesis:agent` — a second Ollama tag of the SAME weights as the chat model (`ollama create` from `apex-compact` + `PARAMETER num_ctx 65536`; shares blobs, ~0 extra disk). Exists because hermes hard-requires a 64 K context window, and raising the global `OLLAMA_CONTEXT_LENGTH=32768` would tax every OpenWebUI chat turn instead. |
 | Service | `hermes-gateway` systemd **user** service (linger enabled). Hosts the cron scheduler and the API server on `127.0.0.1:8642` (key in `~/.hermes/.env`, a copy staged at `/volume1/docker/openwebui/config/hermes_api_key` so the pipe can read it in-container). |
-| GPU guard | `hermes/plugins/gpuguard/` in this repo, **symlinked** to `~/.hermes/plugins/gpuguard/` (config `cron.provider: gpuguard`). A cron scheduler provider that defers ticks while **either** ComfyUI's `/queue` shows work **or** Ollama's `/api/ps` shows a big model that isn't ours. Due jobs are never lost, only deferred to the next 60 s tick. Covered by `tests/test_gpuguard.py` (26 checks). **Caveat:** a hand-run `hermes cron tick` bypasses the provider; the gateway path — the only unattended path — is guarded. |
+| GPU guard | `hermes/plugins/gpuguard/` in this repo, **symlinked** to `~/.hermes/plugins/gpuguard/` (config `cron.provider: gpuguard`). A cron scheduler provider that defers ticks while **either** ComfyUI's `/queue` shows work **or** Ollama's `/api/ps` shows a big model that isn't ours. Due jobs are never lost, only deferred to the next 60 s tick. Covered by `tests/test_gpuguard.py` (24 checks). **Caveat:** a hand-run `hermes cron tick` bypasses the provider; the gateway path — the only unattended path — is guarded. |
 | ↳ why Ollama too | Added 2026-07-31. The cron tag runs at `num_ctx 65536` and the pipe's chat tenant at 32768; Ollama keys runners by model+options, so those are two **distinct** ~17 GB runners that cannot co-reside on a 24 GB card. A tick firing mid-conversation evicted the chat model and the user's next turn paid a cold reload — **measured at 22.7 s**. Co-residency is unreachable without taxing every chat turn, so the fix is scheduling. `/api/ps` answers "is a big model *resident*", not "*generating*" — with `OLLAMA_KEEP_ALIVE=60s` those differ by at most one tick, which is the accepted trade. Helpers are excluded by footprint (measured: tenant 16.70 GiB vs `gemma4:e2b` 1.81, `gemma3:1b` 0.92, `bge-m3` 0.62 — threshold 10 GiB), because OWUI runs title/tag generation and the route classifier constantly and "any model loaded ⇒ defer" would starve cron permanently. Our own `hermes-genesis:agent` never defers: resident means a job just ran, and reusing that warm runner is the best case. |
 | ↳ starvation escape | Continuous chat keeps the tenant resident indefinitely, so the gate cannot be stateless. `HERMES_GPUGUARD_MAX_DEFER_S` (default 900) force-dispatches when **only Ollama** blocks — three cadence periods of the tightest 5-minute monitor. `HERMES_GPUGUARD_HARD_DEFER_S` (default 3600) force-dispatches regardless, releasing a wedged queue. The two tiers deliberately do **not** share a threshold: forcing past a resident-idle tenant costs one recoverable eviction, but forcing past a *running render* OOMs a job that may be twenty minutes in — the exact failure this plugin exists to prevent. |
-| Delivery | **Deterministic since 2026-07-30**: jobs run NO delivery commands — they end their response with `LOG: <summary>` (always) and `ALERT(<user>): <msg>` (only when the user's condition holds). `scripts/hermes_delivery.py` (user timer, 1 min) parses each new output under `~/.hermes/cron/output/<job>/` and does the delivery itself: LOG → background-tasks channel webhook, ALERT → `send_alert()` → text (carrier email-to-SMS gateway) + email, both proven live 2026-07-30. Recipients validated against `^[a-z0-9_-]+$`, 3 alerts/run cap, per-leg retry (a failed push never re-posts the channel log). Born from two live failures: an agent-authored job that invented `send_webhook_post()` helpers and delivered nothing, then an agent that *claimed* deliveries which never happened. The LLM writes text; infrastructure delivers. Covered by `tests/test_hermes_delivery.py` (65 checks). |
-| Entry point | The `auto_assistant` pipe routes background-task intent (`tests/test_bgtask_intent.py`, 30 checks, default-deny) to `POST 127.0.0.1:8642/v1/chat/completions` — an agent runtime, not an LLM proxy. The agent creates/manages its own cron jobs via its `cronjob` tool and streams confirmation back into the same chat. **No second model row in the picker; the single-pipe architecture holds.** |
+| Delivery | **Deterministic since 2026-07-30**: jobs run NO delivery commands — they end their response with `LOG: <summary>` (always) and `ALERT(<user>): <msg>` (only when the user's condition holds). `scripts/hermes_delivery.py` (user timer, 1 min) parses each new output under `~/.hermes/cron/output/<job>/` and does the delivery itself: LOG → background-tasks channel webhook, ALERT → `send_alert()` → text (carrier email-to-SMS gateway) + email, both proven live 2026-07-30. Recipients validated against `^[a-z0-9_-]+$`, 3 alerts/run cap, per-leg retry (a failed push never re-posts the channel log). Born from two live failures: an agent-authored job that invented `send_webhook_post()` helpers and delivered nothing, then an agent that *claimed* deliveries which never happened. The LLM writes text; infrastructure delivers. Covered by `tests/test_hermes_delivery.py` (70 checks). |
+| Entry point | The `auto_assistant` pipe routes background-task intent (`tests/test_bgtask_intent.py`, 124 checks — 25 positive, 39 negative — default-deny) to `POST 127.0.0.1:8642/v1/chat/completions` — an agent runtime, not an LLM proxy. The agent creates/manages its own cron jobs via its `cronjob` tool and streams confirmation back into the same chat. **No second model row in the picker; the single-pipe architecture holds.** |
 
 ## Config decisions that are deliberate
 
@@ -34,9 +34,16 @@ bounded, GPU-safe scheduled job, executed by a local agent and reported back int
 ## Using it
 
 In OpenWebUI, just ask: *"monitor the price of X … check every 6 hours for 2 weeks"* /
-*"list my background tasks"* / *"cancel the price monitor"* — or prefix with `/task` to force the
-route. Results appear in the **background-tasks** channel. From a terminal: `hermes cron list`,
-`hermes cron remove <id>`, `journalctl --user -u hermes-gateway -f`.
+*"list my background tasks"* / *"cancel the price monitor"* — or press the **Task** button, one of the
+three mutually-exclusive mode buttons the frontend fork adds to the chat input, which routes the turn
+here without any wording being interpreted. (`/task` as a prefix still works.) From a terminal:
+`hermes cron list`, `hermes cron remove <id>`, `journalctl --user -u hermes-gateway -f`.
+
+Results appear in the **background-tasks** channel, and the fork puts a **Background tasks** shortcut
+in the sidebar's *top* nav group so it is reachable without scrolling past every other channel. It
+resolves the channel **by name**, not by a pinned uuid — so it works on any install, and it renders
+nothing at all when the channel is absent rather than dead-linking. It is also gated on channels
+being enabled and the user having channel permission.
 
 ### One-shot research — `/research` (added 2026-07-31)
 
@@ -201,6 +208,31 @@ request and a **robot wall to a spoofed Chrome User-Agent**. Do not "fix" the fe
 python3 scripts/price_watch.py --selftest     # runs both live reference pages
 ```
 
+### The no-URL recipe — `price_search.py` (brief rule 5d-ii)
+
+`price_watch.py` is **URL-in only**, and the brief tells the agent to run it verbatim. So *"search
+online for the Google Fitbit Air, alert me under $150"* left the agent with no vetted recipe, and
+live it improvised: it described a search-and-scrape job it never actually created, and the
+scheduler diff caught it (*"Verification failed"*). The fix was not a smarter agent but a boring
+one-liner it could schedule.
+
+`scripts/price_search.py` answers exactly one question — *which URL should `price_watch` watch for
+this query?* — and then **imports and reuses `price_watch` for everything after resolution**:
+extraction, thresholds, dampening, failure streaks, recovery, and the LOG/ALERT protocol. There is
+one extraction path in this repo, not two.
+
+Search is rationed, because the SearXNG roster is fragile: ~60 queries in 10 minutes got the engines
+CAPTCHA'd for an hour (measured — it is also why `search_canary.py` polls only every 30 min). So the
+chosen URL is **cached: one search per monitor lifetime** in the steady state. It re-searches only
+when the page dies (gone/blocked) or stops yielding a value, never more than once per run, and never
+more often than `SEARCH_COOLDOWN_S`. Past `NOT_FOUND_ALERT_AFTER` the wait escalates deliberately:
+once the user has been *told* nothing was found, searching harder buys nothing — an every-5-minute
+monitor that never resolved spent 144 queries a day across the whole roster (job `99cdcb68d1e1`,
+measured).
+
+Covered by `tests/test_price_search.py` (109 checks). It also owns the fare refusal described below,
+which is the one `--kind` it will not resolve.
+
 ### A page offering many prices has no price of its own (2026-08-07)
 
 `candidates()` assumed a page describes one thing and took the first machine-readable price in
@@ -218,7 +250,8 @@ Measured before the threshold was chosen, which is the only reason the number is
 | books.toscrape product page | 2 (with and without tax) |
 | amazon.ca product page | 0 high (only the `low` offer-listing reading) |
 
-So `LISTING_MIN_PRICES = 5`: above it, `candidates()` returns nothing and records why, and the run
+So `LISTING_MIN_PRICES = 5`: the gate is `>=`, so it trips AT five distinct machine-readable
+prices, not above five — `candidates()` returns nothing and records why, and the run
 takes the same path an unreadable page takes — honest LOG every run, one `no_value` alert after
 three, `--selector` to pin an element. This protects **product** watches, on a path people use.
 
@@ -272,7 +305,7 @@ production jobs established it:
 
 A fare only exists behind an airline's search form, for one itinerary on one date, and nothing
 static carries one. So `price_search.py --kind fare` refuses at its first run: one LOG line saying
-it cannot work and why, one `fare_unsupported` alert, no search spent, exit 0 — because a
+it cannot work and why, one `fare_needs_itinerary` alert, no search spent, exit 0 — because a
 configuration limit is not an infrastructure error, and a run that raises has no LOG line at all.
 It refuses **loudly and once** rather than emitting `not_found` forever, so a monitor that cannot
 work says so instead of looking busy.
@@ -282,10 +315,31 @@ Making this work at all would need a headless browser reading one specific itine
 `python3` is the hermes venv 3.11, where the import fails. Anything built here must spell the
 interpreter out.
 
+**Superseded as the user-facing path (2026-08-08, commit `03c46da`).** Everything above still
+describes what happens if a fare job is *created* — the refusal, its kind, its LOG line — but a
+flight ask no longer gets that far. `FLIGHT_ROUTE` claims the turn in `pipe()` **before**
+`_is_bg_task_request`, so the agent is never delegated to and no job exists to refuse. The reason is
+that the refusal, however honest, was still the wrong shape of answer: the user asked where to find a
+cheap flight and got a monitor telling them it could not work.
+
+What happens instead: deny arms run first (figurative, past-tense and meta flight talk stays in
+chat), then origin/destination/dates are parsed **deterministically** and collected over a short form
+if incomplete, and the turn ends in a Google Flights deep link built from those slots. A season
+("sometime in the fall") or a named holiday is not a date and is asked about rather than guessed, and
+no number is ever supplied by a model. This also closed a worse hole: 7 of 8 realistic flight
+phrasings previously reached the plain chat model, which has no fare data and answers with an
+invented price.
+
+The recon behind the refusal is unchanged and is what justifies both decisions — 19 sites measured
+2026-08-07, 11 blocking automated clients, 6 with no fetchable URL, 2 deal feeds, **0 readable**. See
+[FLIGHT_RECON.md](FLIGHT_RECON.md), and `tests/test_flight_intent.py` (115 checks) for the routing.
+
 ### The brief is checked, not just stated (2026-08-08)
 
-`_HERMES_BRIEF` is instructions to a 20B local model, and on 2026-08-07 it broke three of them in
-one job. Two flight jobs — `676e970c59ad` and `4df0ab5bed14`, both created from the same ask — went
+`_HERMES_BRIEF` is instructions to a local MoE — `hermes-genesis:agent`, the same weights as the chat
+tenant, ~3 B active of 34.7 B — and on 2026-08-07 it broke three of them in one job. (This said
+"a 20B local model" until 2026-08-08. No 20 B model has ever been on this box; the figure was
+invented and then repeated into three files.) Two flight jobs — `676e970c59ad` and `4df0ab5bed14`, both created from the same ask — went
 to the scheduler with:
 
 - **`deliver: origin`** instead of the `local` rule 5 demands. The only origin on this host is the
@@ -326,6 +380,15 @@ announcing it every time is the pipe narrating its own internals. A repair that 
 speaks, whatever its code, and quotes hermes's own reason. The `repaired` count on the `hermes`
 metric row counts every defect either way, so silence never costs visibility.
 
+> **This was false when written, and is now true (fixed 2026-08-08).** `repaired` was computed
+> *inside* `if shape:`, and `_enforce_job_shape` returns `""` whenever every repair was silent — so a
+> job whose only defect was `deliver` sent its PATCH and recorded `repaired: 0`. That is the single
+> most common violation on this host (hermes defaults an omitted `deliver` to origin, which is why
+> the brief has to fight it), meaning the column under-reported exactly where the reply was already
+> quiet, which is the one place the metric was the *only* remaining signal. The count is now taken
+> before the repair and is not gated on whether the repair had anything to say. Pinned by a
+> dedicated case in `tests/test_hermes_delegation.py` that fails against the pre-fix code.
+
 **Only three checks, and the boundary is the point.** Each is decidable from the stored record with
 no opinion, and each had already shipped a broken job. Whether *"every 6 hours, forever"* is the
 duration the user asked for is a judgement, and a validator that guessed would be the fabrication it
@@ -341,8 +404,12 @@ Repairs are mechanical only:
   something arbitrary is worse than one flagged for the user to cancel.
 - A PATCH that does not land can never read as one that did — the whole attempt folds into the
   unrepairable list and quotes hermes's own reason.
+- **The protocol block is only appended if it fits.** `_JOB_PROMPT_MAX = 5000` is hermes's own
+  `api_server._MAX_PROMPT_LENGTH`, and a PATCH past it is a 400 — so a prompt with no room keeps its
+  defect and is *reported* rather than silently truncated to make space. The mirror limit is
+  `_JOB_PROMPT_MIN = 24`, below which a markup cut has left no instruction worth keeping.
 
-Covered by `tests/test_job_shape.py` (91 checks, stubbed scheduler), which pins the real 2026-08-07
+Covered by `tests/test_job_shape.py` (97 checks, stubbed scheduler), which pins the real 2026-08-07
 job record verbatim rather than a paraphrase of it. The `hermes` metric row carries a `repaired`
 count, so how often the model ignores its brief is now measurable instead of anecdotal.
 
@@ -448,9 +515,14 @@ Vertical Cat Scratchers for Indoor Cats" becomes something a person recognises o
 is remembered in the monitor's state, so a later *failure* alert can still say what it was watching.
 No model is involved: a generated product name is a fabrication with extra steps.
 
-Kinds: `price_drop` `price_rise` `back_in_stock` `out_of_stock` `fare` `inventory` `availability`
-`threshold` `change`, plus the problem kinds `unreachable` `blocked` `no_value` `not_found`
-`fare_unsupported` and the closing `recovered`. An **unknown kind renders generically rather than
+Kinds — **17**, and this list was missing two of them until 2026-08-08: `price_drop` `price_rise`
+`back_in_stock` `out_of_stock` `fare` `inventory` `availability` `threshold` `change`, plus the
+problem kinds `unreachable` `blocked` `no_value` `not_found` `fare_unsupported` `fare_unreadable`
+`fare_needs_itinerary` and the closing `recovered`. The two fare problem kinds are deliberately
+distinct and the distinction is *the reader's next action*: `fare_unsupported` means no site can be
+read and there is nothing the user can do, `fare_unreadable` means this particular page did not
+parse, and `fare_needs_itinerary` means the request is missing an origin/destination/date and the
+user can fix it by saying one. An **unknown kind renders generically rather than
 raising** — a future job type reaches the user before anyone updates the file.
 
 `back_in_stock`, `out_of_stock`, `inventory` and `availability` need `--mode stock` (above); passing
@@ -463,8 +535,12 @@ extent of the model's involvement: it labels a category, once, and never supplie
 
 Decisions worth keeping:
 
-- **The monitor name leads the email; the item name leads the text.** With several jobs running,
-  *what* got cheap is the first question.
+- **The item name leads BOTH surfaces.** With several jobs running, *what* got cheap is the first
+  question — so the SMS opens on the item and the subject opens on the kind then the item
+  (`Price drop: Zakkart 2-Pack Cat Scratching Board is 46.99, under your 50 target`). The monitor
+  name appears in **neither**; it is only a fallback when there is no item at all. Corrected
+  2026-08-08 — this bullet used to say the monitor name led the email, which was the pre-templates
+  behaviour and had already been replaced when it was written.
 - **Confidence is printed on every run, including good ones** — if it only appeared on doubtful
   readings, its absence would need interpreting, and an omission would be indistinguishable from a
   bug. The text shows `(unconfirmed)`; the email explains *why* in full, because a caveat on a lock
@@ -498,30 +574,18 @@ already proves the monitor works.
 Status alone cannot decide this: a dead amazon.ca product returns **HTTP 500**, not 404. So 4xx and
 an unresolvable host are permanent; everything else gets more patience.
 
-### What an alert actually says
+### Two more transport decisions
 
-| surface | shape |
-|---|---|
-| text | `amazon B0DP6D3TRB price: 46.99, under your 50.00 target (unconfirmed) Link in email.` |
-| subject | `amazon B0DP6D3TRB price: 46.99, under your 50.00 target (unconfirmed - read from the offer listing, not the main price)` |
-| body | the message with its link intact, monitor, job id, fire time, and where the text went |
+*This heading used to be a second `### What an alert actually says`, and it described the
+**pre-`alert_templates.py`** surfaces — `amazon B0DP6D3TRB price: 46.99, …`, with the monitor name
+leading and the source ID spelled into the subject. That format was replaced by the section above,
+which contradicted it outright, so two sections with the same title told a reader opposite things
+depending on which one they scrolled to first. Removed 2026-08-08; the two bullets below were the
+only content unique to it, and both are still true.*
 
-Decisions worth keeping:
-
-- **The monitor name leads.** With several jobs running, *which one fired* is the first question, and
-  it has to be answered before the reader stops looking.
-- **Confidence is printed on every run, including good ones.** If it only appeared on doubtful
-  readings, its absence would need interpreting — and an omission would be indistinguishable from a
-  bug that stopped emitting it.
-- **The source ID is translated.** `amazon-offer-listing` is precise and means nothing to a person
-  who will never open the source. The email says "read from the offer listing, not the main price";
-  the text says `(unconfirmed)`, because a caveat on a lock screen gets one glance and the
-  measurement must not be pushed into truncation to make room for it.
-- **Degradation has a fixed order.** Over 140 characters, the monitor name is shortened before the
-  measurement, and the pointer to the email is never dropped — it is the only thing telling a
-  first-time user where the link went.
-- **Everything is folded to ASCII.** A carrier gateway is a mail bridge with no promise of UTF-8; a
-  mangled em dash undoes the link-stripping work by making the text look broken anyway.
+- **Everything is folded to ASCII** (`_SMS_ASCII` / `_ascii()` in `alert_templates.py`). A carrier
+  gateway is a mail bridge with no promise of UTF-8; a mangled em dash undoes the link-stripping work
+  by making the text look broken anyway.
 - **The ledger records the body that was SENT.** It used to record the original alert text, so a
   text mangled in transit looked flawless in the one place an operator would check.
 
@@ -555,8 +619,22 @@ overrides the OpenWebUI lookup.
 > of this doc pointed here, which is why that matters. Check which one is live before editing:
 
 ```bash
-python3 -c "import json,os;p=os.path.expanduser('~/.hermes/alert_contacts.json');print(open(p).read())"
+python3 -c "
+import json, os
+for p in ('/volume1/docker/openwebui/config/alerts/contacts.json',
+          os.path.expanduser('~/.hermes/alert_contacts.json')):
+    try:
+        d = json.load(open(p)); print(f'WINS -> {p}: {sorted(d)}'); break
+    except Exception as e: print(f'skip    {p}: {type(e).__name__}')
+else: print('neither readable; falling back to the OpenWebUI user table')
+"
 ```
+
+It walks the same two paths in the same order as `load_contacts()` and stops at the first readable
+one, so what it prints *is* what would be used. Until 2026-08-08 the command here read only the
+`~/.hermes` fallback — the file the paragraph above had just finished explaining never wins — so the
+one command offered for "check which is live" could not answer that question, and answering it wrong
+is worse than not offering it. Verified on this box: the shared file wins.
 
 ### Un-substituted alert templates are never delivered
 

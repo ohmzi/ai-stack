@@ -14,9 +14,17 @@ python3 tests/eval/run_eval.py --only CT02,CO04    # specific cases
 python3 tests/eval/run_eval.py --only CO01 --repeat 6   # is a case broken, or just flaky?
 ```
 
-> **All cases run on the single 🪄 Assistant entry.** The manifold collapsed from three entries to
+> **All cases run on the single Ω Assistant entry.** The manifold collapsed from three entries to
 > one on 2026-07-26 — see `CAPABILITY_UPGRADE_PLAN.md`. Model choice is the pipe's job, so the suite
 > tests exactly what a user experiences: type a question, get the right model.
+>
+> **Renamed, recorded 2026-08-08.** This line said "🪄 Assistant" until today. That is still the name
+> `pipes()` returns in source — `pipes/auto_assistant.py:506` is literally
+> `return [{"id": "auto", "name": "🪄 Assistant"}]` — but the workspace row overrides it, so the
+> picker shows **Ω Assistant**. The evidence to trust here is `tests/test_deployed.py`, which reads
+> the installed function's displayed name and passes on "README.md names auto_assistant as
+> 'Ω Assistant'"; `tests/test_deployed.py:36` lists "a workspace rename (🪄 Assistant -> Ω Assistant)"
+> among the drifts that suite was written to catch. Reading the pipe source alone gets this wrong.
 
 Cases live in `tests/eval/cases.json` — **data, not code**. Add a case by adding an object; the
 runner needs no changes. Every run writes `tests/eval/results/run-<timestamp>.json`.
@@ -73,9 +81,13 @@ self-preference, format, and calibration drift. Mitigations applied:
   > **This control was silently off until 2026-07-29.** `cases.json` declared
   > `"judge": "gemma4:e2b"`, but the runner read `models["vision"]` — which the consolidation had
   > pointed at the model under test. So every judge-graded case was self-graded, and the runner's own
-  > warning fired on every run and was read past. Fixed at `run_eval.py:338`
-  > (`a.judge or models.get("judge") or models["vision"]`). Any result file with
+  > warning fired on every run and was read past. Fixed at `run_eval.py:418`
+  > (`judge_model = a.judge or models.get("judge") or models["vision"]`). Any result file with
   > `"judge": "hermes-genesis:apex-compact"` predates the fix and is self-graded.
+  >
+  > This citation read `run_eval.py:338` until 2026-08-08. The expression never changed; the file grew
+  > under it, and `:338` now lands 80 lines away inside the trajectory route-detection block — a
+  > reader checking the claim would have found unrelated code and no fix.
 - **Binary verdicts.** Every criterion yields PASS/FAIL, never a 1–10 score. Numeric scales drift
   between runs and models; a binary decision against a written criterion does not.
 - **Blind grading.** The judge sees the answer and the criterion. It is never told which model
@@ -151,10 +163,12 @@ self-preference, format, and calibration drift. Mitigations applied:
 
 ### 1.5 The deploy check, and why a green suite was not enough
 
-Every other test in this repo imports `pipes/live/auto_assistant.py` from disk. OpenWebUI does not:
-it executes a copy of the source stored in its own SQLite `function` table, reachable only by pasting
-into Workspace → Functions. So a change can be written, tested, reviewed and committed while the
-running server continues to serve the previous build.
+Every pipe test in this repo loads its pipe from disk — 22 of the 38 suites under `tests/` load
+`pipes/live/auto_assistant.py` (21 by that literal path, plus `tests/test_contention.py:42`, which
+assembles the same path with `os.path.join`). OpenWebUI does not: it executes a copy of the source
+stored in its own SQLite `function` table, reachable only by pasting into Workspace → Functions. So a
+change can be written, tested, reviewed and committed while the running server continues to serve the
+previous build.
 
 That happened on 2026-07-28. The `_gpu_revoked` fix was committed; the UI kept the old copy; the
 whole suite passed against a file the server had never loaded. A clean `git status` next to a green
@@ -174,13 +188,50 @@ live copy — an entire committed feature the server had never seen — while th
 The pairs are now **derived** from the same `SOURCES` map the DB check uses, so a new pipe cannot be
 half-covered: there is no second list to forget.
 
+> **Narrowed 2026-08-08.** This section opened with "Every **other** test in this repo imports
+> `pipes/live/auto_assistant.py` from disk", which overstated the reach of the argument above by
+> about a third. Measured today: `ls tests/test_*.py | wc -l` = **38** suites; `grep -l pipes/live
+> tests/*.py` = 22 files, 21 of them suites (the 22nd is the `tests/qa_live.py` harness), plus
+> `test_contention.py` → **22 suites load `pipes/live/`**. Two more load the *tracked* sources
+> directly and so cannot drift at all: `tests/test_continuation.py:20-23`
+> (`pipes/shared/media_session.py`, `pipes/image_krea.py`, `pipes/photoreal.py`,
+> `pipes/auto_assistant.py`) and `tests/test_identity_drift.py:62` (`--pipe` defaults to
+> `pipes/photoreal.py`). The remaining **14 load no pipe at all** — ten drive `scripts/`, one the
+> hermes `gpuguard` plugin (`tests/test_gpuguard.py:28`), one `compose/` config
+> (`tests/test_web_search.py`), and two a running service over HTTP (`tests/test_branding.py:50`,
+> `tests/test_retrieval_quality.py:53`). Deploy drift in the pipes cannot reach those 14, so their
+> green run says nothing either way about what the server is serving — which is the opposite of what
+> the old sentence implied.
+
 ### 1.6 Measuring the media pipeline instead of arguing about it
 
-`_metric()` in the pipe appends one JSON line per finished media job — render seconds, QA seconds,
-how many correction rounds ran, and what the verifier complained about.
+`_metric()` in the pipe appends one JSON line per instrumented event. When that event is a finished
+media job the line carries render seconds, QA seconds, how many correction rounds ran, and what the
+verifier complained about.
+
+> **Corrected 2026-08-08.** This read "`_metric()` in the pipe appends one JSON line per finished
+> media job", full stop. It has outgrown that. `grep -c '_metric(' pipes/auto_assistant.py` = **77**
+> call sites emitting **13 distinct `job` kinds** — `image`, `edit`, `t2i`, `generate`, `plan_shots`,
+> `enhance_edit` and `verify` for media, and `route`, `confirm`, `classifier`, `hermes`, `owner`,
+> `manage` for bookkeeping — including one `job="route"` row on **every** routed turn via
+> `_route_metric()` (`pipes/auto_assistant.py:3309-3323`). The pipe's own docstring at
+> `pipes/auto_assistant.py:3294` still says "one JSON line describing a finished media job", so this
+> doc inherited a stale description rather than inventing one; both are now wrong about the file.
+>
+> **What that costs a reader.** `tests/media_metrics.py` treats every kind as a render, so the
+> bookkeeping rows come back as dead jobs. Over the 313 rows on disk today it prints
+> `route (170 jobs, 170 failed)`, `confirm (27 jobs, 27 failed)`, `hermes (20 jobs, 20 failed)`,
+> `owner (11 jobs, 11 failed)`, `manage (4 jobs, 4 failed)` and `verify (1 jobs, 1 failed)` —
+> **233 phantom failures** — because those rows carry no `ok` and no `render_s`. Only the `image`
+> (29 jobs, 0 failed), `edit` (32/0), `photo_t2i` (16/0) and `photo_edit` (3/0) sections mean
+> anything. Read the non-media kinds with `tests/route_metrics.py`, which is written for them.
 
 ```bash
-python3 tests/media_metrics.py            # p50/p90 per job type, correction rate and its cost
+python3 tests/media_metrics.py     # p50/p90 per job type, correction rate and its cost.
+                                   #   Trust the image/edit/photo_* sections only — see above.
+python3 tests/route_metrics.py     # the route/confirm/classifier/hermes rows: which rule fired,
+                                   #   the live decline rate, classifier timeouts, delegation
+                                   #   verdicts. Exits 1 on an invariant violation.
 ```
 
 This exists because image latency here is bimodal and the split was invisible. The same V01 prompt
@@ -200,11 +251,37 @@ process. No test asserted that, and no symptom named it; the log simply had the 
 sitting in it. Instrumentation that records the *request* alongside the timing is the reason
 that was a ten-minute diagnosis instead of a week of guessing.
 
-That failure mode now has a standing check — any `### Task` row is a regression:
+That failure mode now has a standing check. Any `### Task` row written **after** the 2026-08-02 fix
+is a regression:
 
 ```bash
-grep -c '### Task' /volume1/docker/openwebui/config/media_metrics.jsonl   # must be 0
+python3 -c "
+import json
+p='/volume1/docker/openwebui/config/media_metrics.jsonl'
+n=sum(1 for l in open(p) if l.strip() and '### Task' in json.dumps(d:=json.loads(l))
+      and d.get('ts','') > '2026-08-03')
+print(n)"     # must be 0 — measured 0 on 2026-08-08
 ```
+
+> **Superseded 2026-08-08.** The check published here was
+> `grep -c '### Task' /volume1/docker/openwebui/config/media_metrics.jsonl   # must be 0`.
+> **It returned 40, and it could never have returned 0.** Those 40 rows are the evidence of the
+> *fixed* bug, not of a live one: 21 `job=image` and 19 `job=edit`, spanning 2026-07-31T15:16:53Z to
+> 2026-08-02T17:30:23Z, with none after. The file is append-only and never rotated —
+> `pipes/auto_assistant.py:3304` opens it in `"a"` mode and the only other reference to it in the
+> repo is a copy in `scripts/stack_backup.sh:75` — and it kept being written long after the fix (its
+> own newest row is 2026-08-07T21:27:22Z, out of 313 rows total) without producing one new `### Task`
+> row. So the single standing check this plan published was permanently red on a dead bug. The cost is
+> exactly the one §5 guideline 1 was written for — see the CO04 note at the end of §3.1, *"a wrong
+> expectation in an eval suite is worse than no test at all, since it trains you to ignore a red
+> result"*: an operator either concludes the regression is live, or learns that the one check here is
+> the one to ignore. The 40 pre-fix rows stay in the log by design — they *are* the diagnosis
+> described above.
+
+`tests/route_metrics.py:161-162` enforces the same invariant programmatically, on `job=route` rows,
+and exits 1 on any violation. Its exit status is not a proxy for the check above, though: it also
+covers other invariant classes, and on 2026-08-08 it exits 1 on four `task.manage` rows with no
+`strategy`/`op` — read its `INVARIANT VIOLATIONS` block, not its return code.
 
 `image_krea` was writing no metrics at all until then, so its share of that waste was
 invisible; it emits rows now.
@@ -287,12 +364,77 @@ Some checks are standalone harnesses rather than `cases.json` cases:
 | `tests/test_memory_routing.py` | Adaptive Memory reaches the model but never the router: the `"User Memories ("` anchor is identical in the vendored filter and the pipe, and neither synthetic nor the box's real stored memories can steer routing |
 | `tests/test_gpuguard.py` | Hermes cron defers while ComfyUI renders **or** a non-cron big model is resident in Ollama; small helpers and our own warm tag never defer; both starvation-escape tiers; fails open on either probe (see `HERMES_AGENT.md`) |
 | `tests/test_hermes_delivery.py` | LOG/ALERT parsing contract: prompt-section lines ignored, missing LOG falls back visibly, recipients validated, alert flood capped |
-| `tests/test_alert_transports.py` | SMS/email transports: E.164 refused locally, resolution precedence, partial-success semantics, Twilio request shape (all offline) |
+| `tests/test_alert_transports.py` | SMS/email transports: E.164 refused locally, resolution precedence, partial-success semantics, Twilio request shape. 122 of its 130 checks are offline; the other 8 call `mail_domain_status`, which shells out to `dig`, so they need a working resolver and FAIL rather than skip without one. *(This row said "all offline" until 2026-08-08, which is why nobody expected the resolver dependency.)* |
 | `tests/test_price_search.py` | The no-URL discovery path: one search per monitor lifetime, cooldown and roster-outage backoff, scored picking, accessory penalties — and that a fare is refused with **no search spent and no number ever emitted**, now naming the missing itinerary rather than claiming a fare cannot be watched. *(Was missing from this table; the suite predates the omission.)* |
-| `tests/test_flight_intent.py` | Flight routing and slot parsing, 115 checks, injected clock: 34 phrasings that must reach the flight path (7 of 8 previously reached the chat model, which invents fares) and 38 that must not, each negative naming the deny arm it exercises; positional origin/destination resolution (`from A to B`, bare `A to B`, IATA pairs) after fragment matching got it wrong twice; the Dec→Jan year rollover; season and named-holiday asks that must ASK rather than guess; and that the Google Flights link is built from slots, never typed by a model |
+| `tests/test_flight_intent.py` | Flight routing and slot parsing, 115 checks, injected clock: 30 phrasings that must reach the flight path (7 of 8 previously reached the chat model, which invents fares) and 38 that must not, each negative naming the deny arm it exercises; positional origin/destination resolution (`from A to B`, bare `A to B`, IATA pairs) after fragment matching got it wrong twice; the Dec→Jan year rollover; season and named-holiday asks that must ASK rather than guess; and that the Google Flights link is built from slots, never typed by a model. *(This row said "34 phrasings" until 2026-08-08; `len(YES)` is 30 and the run prints 30 checks in that section. The 38 negatives and the 115 total are exact.)* |
 | `tests/test_job_shape.py` | The three parts of `_HERMES_BRIEF` a machine can hold the agent to, checked on the job record it just created (97 checks, stubbed scheduler): `deliver` is exactly `local`, the prompt carries a `LOG:` instruction, and the prompt is free of leaked tool-call markup — all three pinned against the job hermes actually stored on 2026-08-07, and the markup arm carries seven prose negatives (`<price>`, `x < parameter y`) so a job that merely discusses markup is never truncated. Repairs are mechanical only: markup is cut before the protocol block is appended (order is load-bearing), a vetted-extractor job is never appended to, a prompt that is *only* markup is reported rather than truncated to a stub, a delivery rewire is silent but a failed one always speaks, and a PATCH that does not land can never read as one that did |
 | `tests/test_flight_probe.py` | Harness for `scripts/flight_probe.py --selftest` (62 checks): the pure `verdict()` decision table over recorded measurements, the five 2026-08-07 misclassifications pinned by mechanism, a wall vocabulary deliberately broader than `pw.fetch`'s <20 KB sniff, `parse_keep_only`'s inline-comment trap, and the browser-tier learning order |
 | `tests/test_flight_watch.py` | Harness for `scripts/flight_watch.py --selftest` (73 checks): the four-rung date-flex ladder, the tuple rule (a month-mode fare is invalid without its own dates), owner-independent quorum, `date_basis` confidence ceilings, dot-free SMS labels, and that rung 4 cannot say "cheapest" |
+
+The rows below were **absent from this table until 2026-08-08**, including the largest suite in the
+repo. Seventeen suites had been written, were passing, and were invisible to anyone reading this
+plan to find out what is covered — the same omission class as the `test_price_search.py` row above,
+at eleven times the scale. Counted as its own gap in §4.
+
+| Harness | Tests for |
+|---|---|
+| `tests/test_manage_path.py` | **201 checks — the largest suite here.** Job management answered from `/api/jobs` instead of delegated: listing and changing tasks without a ~22.7 s chat-tenant eviction, and the phrasings ("what are you tracking for me?") that used to reach the CHAT model, which answered with a confidently invented list of monitors the user never created. Offline, HTTP stubbed: table render including the empty/unreachable/paused/completed rows, marker round-trip and staleness, the ordered resolution ladder, ambiguity that never acts, marker injection via a job name, the two-turn delete gate including no-client and changed-under-us — and the bulk set ("delete all of them", "cancel a and b"), which asks **once**, naming every job, and deletes nothing when declined |
+| `tests/test_media_intent.py` | Default-deny on media: ordinary conversation that merely *mentions* a picture or video must not start a GPU render (40 checks, 20 positive / 20 negative). Exists because every prior positive case was an explicit imperative and every negative avoided media vocabulary — a systematic blind spot |
+| `tests/test_task_mode.py` | The **Task** control means what it says: while it is on the turn goes to the agent, no wording is consulted. Replaces intent-sniffing that failed in both directions at once. **45 checks.** Routing is fully stubbed — scheduler, agent, chat model and GPU handoff — "so a turn that escapes to any of them is a loud failure rather than a real call" (`tests/test_task_mode.py:26-27`). It then adds a live `webui.db` section: the filter is installed, active, *and* attached to the assistant, **or the control never appears** — the exact failure commit `1217eb3` fixed. Defaults to `pipes/live/auto_assistant.py` (`:33`), which is what also makes it a deployment check; pass the tracked source when a routing change is at stake |
+| `tests/test_task_ownership.py` | One user's background tasks are not another user's business. hermes records no owner and `GET /api/jobs` returns every job on the host, so ownership is stamped and filtered pipe-side |
+| `tests/test_autoroute.py` | Automatic coder routing on the auto entry, tested adversarially because it is a new predicate deciding what a message "is" — media requests must always win, even when phrased with programming words |
+| `tests/test_router.py` | The RAG router-poisoning bug, reproduced and verified against the real `Pipe` class. Routing runs for real; only generation/chat entry points are stubbed. Includes a control run with the strip DISABLED that proves the hazard is real |
+| `tests/test_manifold.py` | Manifold entries (auto / knowledge / coder): knowledge and coder are chat-only so no media regex can reach a render; system messages survive on them (the auto guard strips them, which silently discarded memory injection); and coder serializes under the same `_GEN_LOCK` as the renderers |
+| `tests/test_admission.py` | The GPU lock survives a client disconnect and is never why chat looks hung — `_locked_stream` used to acquire outside its `try:`, so a cancellation between acquire and try leaked the lock forever |
+| `tests/test_confirm_gate.py` | The confirmation gate bounds wasted renders and must never be why a render fails to happen. Exists because media routing's residual false-positive rate is ~35% and no regex drives that to zero — a wrong render evicts the 18 GB chat tenant and holds the card for minutes |
+| `tests/test_structured_parse.py` | Verifier verdicts and shot plans are never parsed by accident. Both parsers decided real outcomes from the SHAPE of an LLM reply and failed in the direction that hides the failure — `_verify_image` scored a pass as the ABSENCE of a substring |
+| `tests/test_photoreal_edit.py` | A reference-image edit must not come back as a different person — the workflow the pipe *would* submit, checking the three img2img defects that returned a stranger in the same pose |
+| `tests/test_edit_tiers.py` | The instruction-edit speed tier never silently disables a negative prompt. Pins the 2026-08-01 re-measurement that reversed the Lightning LoRA decision: the full 20-step/cfg-4 path is the one that drifts (1 seed in 3 recomposed the frame) |
+| `tests/test_watchdog.py` | The watchdog alerts on state TRANSITIONS — once down, once recovered, never per tick. Both wrong directions (288 texts a day, or zero) look fine in a single manual run |
+| `tests/test_backup.py` | The backup refuses to run when its disk is not mounted. `[ -d "$(dirname "$DEST")" ]` passed against the mountpoint on the ROOT filesystem, so it "succeeded" writing nowhere |
+| `tests/test_branding.py` | The skin is actually SERVED and survives a restart. A `docker restart` silently reverted it while every obvious check still passed — `GET /static/custom.css` returned HTTP 200 and ZERO BYTES. *Needs OpenWebUI reachable; skips cleanly when it is not.* |
+| `tests/test_contention.py` | What a chat turn actually costs while a video render holds the card — the number three deferred decisions were waiting on. *Opt-in: `--live`, ~5 min, can OOM the render by design.* |
+| `tests/test_identity_drift.py` | The end-to-end counterpart to `test_photoreal_edit.py`: actually submits the edit and scores whether the face came back as the same person, on a synthetic fixed-seed subject. *Needs ComfyUI.* |
+
+**Measured 2026-08-08, against the tracked sources** (not `pipes/live/`): **1998 checks across 30
+offline suites that print a count**, plus `test_manifold.py` and `test_router.py`, which pass but
+print no count — 32 offline suites in total. **29 of the 30 are green.** `test_deployed.py` is red on
+1 of its 33 checks, by design: the pipe was edited after the last deploy, so `pipes/live/` is behind.
+Passing it the tracked source cannot clear that — comparing the two *is* what the suite does (§1.5).
+There is no aggregate runner; each suite is its own program:
+
+```bash
+python3 tests/test_manage_path.py           # one suite
+for t in tests/test_*.py; do python3 "$t"; done    # all of them, sequentially
+```
+
+**`pytest` cannot run any of this.** Every suite ends in `sys.exit(main())` at module scope, so
+`python3 -m pytest tests/` dies during *collection* — `INTERNALERROR … SystemExit: 0`, "no tests
+collected". That is by design (each file is runnable standalone against an arbitrary pipe path), but
+it means a habit of reaching for `pytest` reports zero problems and zero tests, indistinguishably.
+
+**Nineteen suites — half of them — take a pipe path argument and default to `pipes/live/`**, the
+gitignored deployed copy: 17 carry the literal
+`PIPE_PATH = sys.argv[1] if len(sys.argv) > 1 else ".../pipes/live/auto_assistant.py"`, plus
+`test_autoroute.py` (`argv[0]` form) and `test_contention.py` (`os.path.join(ROOT, "pipes", "live", …)`).
+Nothing in their output says which file they read.
+
+Both directions of the trap were observed on 2026-08-08. Stale-copy staleness let suites **pass**
+against code 858 lines behind the repo; later the same day, a suite for *undeployed* code **failed**
+against it — `python3 tests/test_hermes_delegation.py` bare reports 1 failure of 70 that the tracked
+source does not. A green run and a red run can both be reporting on the wrong file. Pass the tracked
+source when you want to test what you just wrote:
+
+```bash
+python3 tests/test_job_shape.py         pipes/auto_assistant.py
+python3 tests/test_hermes_delegation.py pipes/auto_assistant.py
+```
+
+Six suites need a live service and **fail rather than skip** without it, so a red run is not
+automatically a regression: `test_websearch.py` (SearXNG), `test_alert_transports.py`'s 8 resolver
+checks (`dig`), `test_identity_drift.py` (ComfyUI), `test_retrieval_quality.py` (OpenWebUI — and it
+dies on an unhandled `URLError` traceback rather than degrading, unlike `test_branding.py`, which
+reports "nothing to check" and exits clean).
 
 ### 2.1 The trap cases are the point
 
@@ -353,17 +495,40 @@ Independently confirmed the same day — the edit changed only the mug and left 
 coder — deterministic, documented, and the answer is still about coffee. SK03 does the same for a
 question about a function signature. Both cost a model load, not a wrong answer.
 
-**Two outcome failures, and one entry that is not what it looks like:**
+**The two outcome failures are RE02 and CT04. A third entry below is not what it looks like:**
 
 - **RE02** — the bat-and-ball CRT item. Fails at 0.8 and 0.45 alike; see the superseded note in §3.1.
-- **SK03** — calibration, asking for the signature of a function that does not exist. Single-run FAIL
-  here; measured **2/3 and 3/3** on repeats. Flaky, not broken.
 - **CT04** — recorded FAIL, but measured **6/6 with `--repeat 6`** immediately afterwards. The
   baseline caught a genuine one-off. Its `known_issue` says so, because a spurious FAIL in a baseline
   is worse than no baseline: it would mask a future real regression as `FAIL -> FAIL`.
+- **SK03** — calibration, asking for the signature of a function that does not exist. Its failure in
+  this baseline is on **trajectory**, not outcome, and it is deterministic: **0/3** on each of the
+  three 2026-07-29 repeat runs and **0/6** on the 2026-07-31 and 2026-08-01 repeats, always to the
+  coder, because a fabricated function signature reads as a code question. Its *outcome* **passed**
+  here — `out_ok: true`, 1/1, "the answer correctly states that the function does not exist in the
+  public API" — and outcome is the flaky axis: **3/3, 3/3 and 2/3** on 2026-07-29, then 5/6 and 4/6
+  on the later repeats.
 
-That last point is the honest weakness of a single-run baseline on a stochastic system, and it is
-why every `known_issue` in `cases.json` records a *measured rate* rather than a verdict.
+  > **Corrected 2026-08-08.** SK03 was listed above as one of the outcome failures, worded
+  > "Single-run FAIL here; measured **2/3 and 3/3** on repeats. Flaky, not broken." The rates are
+  > real 2026-07-29 outcome measurements and are kept. The **axis** was wrong. `baseline.json`
+  > records SK03 as `traj_ok: false, out_ok: true`, and recomputing that file gives `out_ok: false`
+  > for exactly RE02 and CT04 — which is what this run's own **outcome 28/30** above already said.
+  > Listing SK03 here made the heading claim three outcome failures against a score that admits two,
+  > and it hid the one axis SK03 fails on *every single time*: a reader chasing a flaky calibration
+  > case would never have found a deterministic misroute.
+  >
+  > One knock-on, recorded rather than fixed: §1.8 says all six skill cases "already passed **6/6**
+  > without it". That does not hold for SK03. The only two six-repeat runs on disk record its outcome
+  > at **5/6** (`run-20260731T220224Z`) and **4/6** (`run-20260801T005458Z`), no result file records
+  > SK03 at 6/6 on outcome, and `cases.json` carries the 5/6 and 4/6 as its `known_issue`. Which run
+  > §1.8's figure came from is not recorded, so it is unverified against the result files rather than
+  > disproved — but it should not be quoted as the calibration case's pass rate.
+
+**CT04** is the honest weakness of a single-run baseline on a stochastic system, and it is why every
+`known_issue` in `cases.json` records a *measured rate* rather than a verdict. (This read "that last
+point" until 2026-08-08, when SK03 was moved below CT04 to put it on the right axis — the reference
+would have pointed at the wrong case.)
 
 ---
 
@@ -371,6 +536,11 @@ why every `known_issue` in `cases.json` records a *measured rate* rather than a 
 
 Full tier, 32 cases. **Trajectory 31/32. Outcome 23/24 graded.** Wall clock ~15 min.
 (Saved as `tests/eval/baseline.json`; the one outcome failure is RE02.)
+
+> **Note added 2026-08-08.** That parenthetical is no longer where this run lives. `--save-baseline`
+> overwrote the file on 2026-07-29, so `tests/eval/baseline.json` now carries
+> `"when": "20260729T124321Z"` and 38 results — the §3 baseline, not this one. The numbers in this
+> section are kept as the historical record; the file they were saved in is gone.
 
 | Category | Result | Note |
 |---|---|---|
@@ -460,18 +630,47 @@ it trains you to ignore a red result.*
   lives in middleware — `function_calling: legacy`, knowledge-base attachment, the web-search
   *button*, citation rendering, Adaptive Memory as an inlet filter — still needs the browser
   checklist in `CAPABILITY_UPGRADE_PLAN.md`. What the suite *can* assert is that the code the UI
-  runs is the code under test: the `function` rows in `webui.db` are byte-identical to
-  `pipes/live/*.py` (compare SHA-256), so a green suite is a statement about production behaviour,
-  not about a drifted copy. Re-check that after every edit — editing the file does **not** update
-  the installed Function.
+  runs is the code under test: `tests/test_deployed.py` checks **both links** — every tracked
+  `pipes/*.py` against its `pipes/live/` copy, and every `pipes/live/*.py` against the `function`
+  row in `webui.db` — so a green suite is a statement about production behaviour, not about a
+  drifted copy. Re-check that after every edit; editing the file does **not** update the installed
+  Function. Until 2026-08-08 only the second link was checked for four of the five pipes, and the
+  suite reported ALL PASS while `pipes/auto_assistant.py` ran 696 lines ahead of what was deployed.
 - **Web search is covered outside the suite.** `tests/test_websearch.py` runs a live SearXNG query,
   injects the results the way OpenWebUI does, and asserts the answer is grounded in them *and* keeps
   its `[id]` citation markers. It lives outside `cases.json` because it needs a live HTTP round trip
   before the case can be built. Search failure is silent — the assistant answers from training data
   instead of erroring — so this is the one capability with no natural alarm.
 - **STT and TTS are not covered** (audio in/out is a browser concern).
-- **`_GEN_LOCK` contention is not covered.** Verifying that a coder request serialises behind a
-  running render needs two concurrent sessions; it remains a manual test.
+- **This register was itself a gap, and part of it still is.** Until 2026-08-08 the harness table
+  above listed 21 of the 38 suites under `tests/`; 17 were written, passing and invisible to anyone
+  reading this plan to find out what is covered — including the largest suite in the repo
+  (`test_manage_path.py`, 201 checks) and the only two covering the frontend fork and the rebrand
+  (`test_task_mode.py`, `test_branding.py`). They are listed now. What is still unregistered is the
+  analysis side: `tests/bench_models.py` (head-to-head model bench — can one tenant take coding,
+  uncensored chat and vision), `tests/identity_metrics.py` (face-embedding cosine distance for edit
+  drift, via OpenCV YuNet/SFace, no GPU) and `tests/qa_live.py` (live end-to-end QA against real
+  Ollama, judge-graded). Those are not suites — they print numbers, not PASS/FAIL — which is why
+  nothing here breaks when they rot, and why no one notices if they do.
+- **`_GEN_LOCK` contention is measured, not gated.** Narrowed on 2026-08-08 — this bullet used to
+  say the whole area "remains a manual test", and two suites had already taken most of it.
+  `tests/test_manifold.py` proves in-process that the coder entry holds the same `_GEN_LOCK` the
+  renderers use, that `knowledge` does not, and that it is released on early disconnect;
+  `tests/test_admission.py` proves the lock survives a client disconnect. What is genuinely
+  uncovered is a *gate*: `tests/test_contention.py --live` runs the two-concurrent-session case for
+  real but "asserts process safety only and writes numbers" — render completed, every chat turn
+  produced a first token, card released afterwards. Nothing fails when a turn gets slower, because
+  no threshold has been argued for.
+
+  The numbers exist, so the gap is a missing threshold and not a missing measurement.
+  `tests/eval/results/contention-20260801T064558Z.json` records one median-class render against
+  concurrent chat: contended TTFT **10.03 s cold / 0.51 s warm** against **5.52 / 0.29** idle — a
+  worst-case **1.8×**, not minutes; the chat tenant partially spills (`size_vram/size` = **0.407**);
+  and the render itself finished in **191.1 s against the 186.7 s median**, peaking at 23 401 MiB with
+  no OOM. `docs/UPGRADE_ROADMAP.md` §4 ("the bounded wait is now CLOSED as a recorded negative") reads that run as closing the bounded-wait decision as a
+  recorded negative, with the caveat kept honestly there: **TTFT was measured, sustained tok/s under
+  spill was not.** That is the number to take next if a long mid-render reply ever feels unusable —
+  and it is also what any future threshold would have to be argued from.
 - **VQA grading is coarse** — see the vision-model caveat in §1.3.
 - **No calibration set.** Judge verdicts have not been checked against human ratings. For a
   personal stack that is proportionate; treat `judge` results as weaker evidence than `execute` or

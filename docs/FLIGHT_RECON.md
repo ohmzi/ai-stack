@@ -3,13 +3,23 @@
 Measured 2026-08-07 against the live web, plain tier, `YYZ→YVR 2026-09-15/2026-09-22`, from this
 host's IP. Instrument: `scripts/flight_probe.py`. Raw record:
 `docs/flight-recon/20260807T184200Z/probe.json`, with the served bodies under `pages/` (gitignored).
+The two browser-tier runs have their own records, cited in the browser-tier section below.
 
 **Headline: zero of nineteen sites can currently be read on the plain tier, and the plan's Phase 1d
 gate says stop rather than ship.** This file exists so nobody re-derives that, and so the parts that
 are *not* yet settled are visibly distinguished from the parts that are.
 
 Written in `TRACKING_ENHANCEMENT.md`'s spirit: most of the value here is negative results, and the
-cost of re-deriving them is 57 requests to 19 hostile commercial hosts from a residential IP.
+cost of re-deriving them is 33 requests to the 11 hostile commercial hosts that have a fetchable URL
+(51 requests across all three recorded runs), from a residential IP.
+
+**Corrected 2026-08-08.** This read "57 requests to 19 hostile commercial hosts". No recorded run
+made 57 requests and only 11 hosts were ever contacted: the plain run that produced the table below
+records `requests_made` 33 (three per fetched site — robots.txt, primary, control — across the 11
+sites carrying a `url_template`), and the two browser runs record 15 and 3. 57 is 19 × 3, the
+hypothetical cost if every site had a fetchable URL: the eight sites that have none — six
+`no_deeplink`, two `unusable_role` — were never requested at all, which the `no_deeplink` note below
+insists on for its six. Quoting 57 charges the reader for traffic that never happened.
 
 ## The result
 
@@ -35,7 +45,12 @@ to prevent:
   made to either. That is fingerprinting, not throttling. One Expedia backend, two hosts.
 - **cheapoair.ca and onetravel.com** are one Fareportal engine, and neither has a deep link.
 
-Ten blocks are about six operators.
+Eleven blocks are about seven operators: booking_holdings (kayak, momondo, cheapflights, priceline),
+expedia_group (orbitz, travelocity), google, skiplagged, skyscanner, trip_com_group, edreams_odigeo.
+
+**Corrected 2026-08-08.** This line read "Ten blocks are about six operators", which was the right
+count until skyscanner.ca flipped `js_only → blocked` (the flip recorded below). It then contradicted
+this doc's own result table above, which already listed eleven blocked sites including skyscanner.ca.
 
 ### The distinctions that matter more than the counts
 
@@ -53,10 +68,24 @@ FlightHub appears to POST and return a session URL, kiwi.com routes by city slug
 Recording these as `blocked` would be a fabrication: they may block, they may not, and no request was
 made. Chrome recon is what turns them into measurements.
 
-**google.com is blocked but its deep link is CORRECT.** It served a 512 KB challenge containing
-"captcha" — and it was the only site in the roster that **echoed the requested dates back**. So the
-`?q=` URL form reached the right itinerary and only the client was rejected. That makes it the best
-browser-tier candidate, not the worst.
+**google.com is blocked but its deep link is CORRECT.** It served a 1.2 MB body (1,203,013 bytes)
+containing "captcha" — and it **echoed the requested dates back**. So the `?q=` URL form reached the
+right itinerary and only the client was rejected. That makes it the best browser-tier candidate, not
+the worst. It was not alone in echoing: skiplagged.com's Cloudflare interstitial reflected the
+requested path too, dates included. In both cases the dates appear inside a reflected URL on a
+wrapper page — google's saved body is `/travel/flights/unsupported`, skiplagged's is a
+`__cf_chl_tk` challenge — so the echo proves the URL grammar, not that an itinerary page was served.
+
+**Corrected 2026-08-08.** This entry read "a 512 KB challenge" and "the only site in the roster that
+**echoed the requested dates back**". Both were wrong. 512 KB is not a measurement: it is
+`flight_probe.py`'s `MAX_SAVE_BYTES = 512_000` (scripts/flight_probe.py:83), applied by the saver at
+:866, which is why the body on disk is exactly 512,196 bytes while the recorded `bytes` for the same
+fetch is 1,203,013. The registry note for google.com carried the same 512 KB figure when this was
+found. And skiplagged.com's record echoes all four slots (origin, dest, depart, ret), identical to
+google.com; orbitz.com and travelocity.ca echoed `origin` only. Publishing a save cap as a served
+size also broke the comparison the browser table below is making: plain was already 1.2 MB, so
+"512 KB → 2 MB" read as growth where the measurement shows a body that was large before Chromium
+ever ran.
 
 **edreams.com could never have worked on this tier** regardless of its 403: its itinerary lives in a
 URL *hash fragment*, which is never sent to the server.
@@ -67,11 +96,20 @@ now behind a bot wall, so that specific failure is no longer even reachable by t
 
 ## The browser tier: a wall served to urllib is served to headless Chromium too
 
-Measured 2026-08-07, `--tier browser`, same itinerary. Six sites reached before the run aborted:
+Measured 2026-08-07, `--tier browser`, same itinerary. Raw records, both tracked in git:
+`docs/flight-recon/20260807T185945Z/probe.json` (the run that aborted, 6 sites walked, 15 requests)
+and `docs/flight-recon/20260807T190939Z/probe.json` (the skyscanner.ca run, 1 site, 3 requests).
+Every browser-tier number below, and the 8240-byte PerimeterX challenge that closed skyscanner.ca
+above, come from those two files. Until 2026-08-08 this doc named only the plain-tier record, so the
+numbers a reader was asked to trust could not be reached from any path it gave.
+
+Five sites were fetched before the run aborted (a sixth, kiwi.com, was walked past unfetched for want
+of a deep link — the run's `probed` is 6 because the skipped entry is still appended to the results,
+while `requests_made` is 15 = 5 fetched sites × 3):
 
 | site | plain | browser | change |
 |---|---|---|---|
-| google.com | captcha, 512 KB | captcha, hit the 2 MB cap | none |
+| google.com | captcha, 1.2 MB | captcha, hit the renderer's 2 MB truncation cap | none |
 | skiplagged.com | 403, 5.6 KB | 200, 27 KB, still "enable javascript and cookies" | none |
 | kayak.com | "What is a bot?", 305 KB | **same wall**, 379 KB | none |
 | momondo.ca | "What is a bot?", 267 KB | **same wall**, 337 KB | none |
@@ -80,6 +118,13 @@ Measured 2026-08-07, `--tier browser`, same itinerary. Six sites reached before 
 The bodies grew because JavaScript ran; the wall is what it rendered. **Headless Chromium with a
 truthful UA and a persistent profile did not get past a single one of them**, which was the
 prediction and is now the measurement.
+
+One row is a cap rather than a size: google.com's browser `bytes` is exactly 2,000,000, which is
+`flight_render.py`'s `--max-bytes` default (scripts/flight_render.py:82, "truncate returned HTML",
+applied at :166-170). The served body was at least that and is not measured. That cap is a *different*
+number from the probe's 512 KB `MAX_SAVE_BYTES` save cap, and the earlier version of this table
+conflated them — it printed the save cap as google's plain-tier size and called the render cap "the
+2 MB cap", which made a 1.2 MB → ≥2 MB row look like a 512 KB → 2 MB one.
 
 ### The run aborted before reaching the site it existed to test
 
@@ -91,8 +136,17 @@ answers already on file.
 Fixed in the instrument rather than worked around: the browser tier now sorts by *what is still
 unknown* (`js_only` first, `blocked` last), skips anything already measured `blocked` unless
 `--retry-blocked` is passed, and skips `no_deeplink`/`unusable_role` outright since there is nothing
-to fetch. Against the current registry a browser run now touches **exactly one site**, which is
-asserted by a test so the next measured verdict cannot silently re-bury it.
+to fetch. Against the current registry a browser run now touches **nothing** — every site with a
+fetchable URL is measured `blocked`, so without `--retry-blocked` the browser tier has no work left.
+A test asserts exactly that (`scripts/flight_probe.py:1105`, reached by
+`python3 tests/test_flight_probe.py`, which prints *"PASS  a browser run would now fetch NOTHING —
+every reachable site is blocked (got [])"*), so the next measured verdict cannot silently re-bury it.
+
+**Corrected 2026-08-08.** The two sentences above read "a browser run now touches **exactly one
+site**, which is asserted by a test". That was true only while skyscanner.ca still carried `js_only`;
+the flip to `blocked` recorded above took the count from one to zero, and the assertion in the
+instrument has read `_fetchable == []` since. A doc claiming one site where the code asserts zero
+sends the next operator looking for a browser run that has nothing to do.
 
 The general lesson, and it is the same one as the misclassifications below: **a probe's job is to
 reduce what is unknown, so its budget belongs to open questions, not to confirmed ones.**
@@ -131,9 +185,17 @@ IP does not work, and eleven of them refuse an automated client outright.**
    and the network tab) is the only way to learn their URL grammar and whether their frontends call
    a JSON endpoint. A JSON endpoint would beat DOM scraping on every axis and need no browser at
    all. `flightsfinder.com` and `airwander.com` are small and plausibly the least defended hosts in
-   the roster. **This is the only remaining free path, and it is a real one** — but note that four of
-   the six are Fareportal/FlightHub OTAs, so the independent-source count it could yield is closer to
-   three than six.
+   the roster. **This is the only remaining free path, and it is a real one** — but note that three
+   of the six are Fareportal/FlightHub storefronts (cheapoair.ca and onetravel.com are one engine and
+   count once in a quorum), so the six sites are five independent owners, not six: kiwi, fareportal,
+   flighthub_group, airwander, flightsfinder.
+
+   **Corrected 2026-08-08.** This read "four of the six are Fareportal/FlightHub OTAs, so the
+   independent-source count it could yield is closer to three than six". Both numbers were wrong
+   against the registry: fareportal owns two of the six and flighthub_group one, and the six span
+   five distinct owners. The ceiling a fully successful Chrome recon could yield is five independent
+   sources, not three — understating it argues the only remaining free path down on a bad count.
+
 2. **A keyed fare API.** Amadeus, Duffel and Kiwi's partner API all expose real bookable fares under
    terms that permit automation, several with free tiers. This is the answer that actually works, and
    it is a *different design* rather than a fix to this one: `flight_watch.py`'s registry, ladder,

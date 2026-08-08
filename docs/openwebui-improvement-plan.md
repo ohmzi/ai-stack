@@ -8,6 +8,30 @@ Living execution plan for the **41 findings** from the 139-agent review of the O
 
 ## How code is deployed here (important)
 
+> **Superseded 2026-08-08.** The numbered steps below were the 2026-07-24 working model and all
+> three of their load-bearing claims are now false: `pipes/live/` is not the source of truth, you
+> do not edit in it, and no container restart is involved. Current flow:
+>
+> 1. Edit the **tracked** `pipes/<function_id>.py`. That file is the source of truth.
+> 2. `python3 scripts/deploy_pipe.py <function_id>`. It refuses a file OpenWebUI's
+>    `replace_imports()` would rewrite, imports the file in-container as a preflight, copies the
+>    row it is about to overwrite into `.deploy-backups/<id>.<stamp>.py`, writes `function.content`,
+>    re-reads the row to verify the stored bytes, then refreshes `pipes/live/<function_id>.py`.
+> 3. `python3 tests/test_deployed.py` — every installed function's DB row must be byte-identical to
+>    its source, and every `pipes/live/` copy byte-identical to its tracked twin.
+>
+> **No `docker restart`.** `scripts/deploy_pipe.py:16-19` records why: OpenWebUI's
+> `get_function_module_from_cache` (`open_webui/utils/plugin.py`) re-reads the row on every request
+> and reloads the module whenever the content differs from what it cached, so the new code is live
+> on the next message.
+>
+> **`pipes/live/` is an artifact of deploying, not a place to edit.** It is gitignored
+> (`.gitignore:3`), so an edit made there is invisible to `git status`, and `deploy()` overwrites it
+> with a `shutil.copyfile` from the tracked file on the next deploy — the edit is destroyed with no
+> diff to explain where it went.
+
+_Original 2026-07-24 text, kept as the record of what the procedure was:_
+
 The **live pipe code lives in the OpenWebUI SQLite DB** (`function.content`), *not* the on-disk `~/ai-stack/pipes/*.py` files — those were a stale Jul-19 copy from before the dolphin swap. Working model:
 
 1. Authoritative deployed code was exported to `~/ai-stack/pipes/live/<function_id>.py` (this is now the source of truth).
@@ -15,10 +39,18 @@ The **live pipe code lives in the OpenWebUI SQLite DB** (`function.content`), *n
 3. Push `content` back into the DB `function` row, and update the `config`/`model` tables for config items.
 4. `docker restart open-webui` to reload, then check logs for load errors and run routing unit tests.
 
+(The "stale Jul-19 copy" that made `live/` the export target is also gone: the disk copies were
+re-synced on 2026-07-24 — see the change log — and the direction has since reversed. The tracked
+file is what is ahead when the two disagree, because it is where edits are made.)
+
 ### Safety / rollback
 - DB backup: `~/ai-stack/pipes/backup-2026-07-24/webui.db.bak` and in-container `/app/backend/data/webui.db.bak-2026-07-24`.
 - Disk-pipe backup: `~/ai-stack/pipes/backup-2026-07-24/*.py`.
 - Rollback: stop container → restore `webui.db.bak-2026-07-24` → start.
+- **Added 2026-08-08 — per-pipe rollback:** `python3 scripts/deploy_pipe.py <function_id> --rollback`
+  writes the newest `.deploy-backups/<function_id>.*.py` back into the `function` row and verifies
+  the restore. That is the granular undo for one bad deploy; the whole-DB restore above is still
+  the only undo for the config/model-table edits.
 
 ---
 
@@ -268,7 +300,22 @@ _1 findings (0 major). Status: ✅ complete._
 - [x] **Deploy:** write every edited pipe's `content` back to the DB, update config/model rows.
 - [x] **Verify:** `docker restart open-webui`; confirm all 5 active functions load with no errors in logs.
 - [x] **Test:** run routing unit tests (`_wants_edit`, `_is_image_request`, `_is_video_request`, model-split) against representative prompts.
-- [ ] Sync `live/` → disk pipe filenames so the on-disk copy is no longer stale.
+- [x] Sync `live/` → disk pipe filenames so the on-disk copy is no longer stale.
+    - **Ticked 2026-08-08.** It was already done and this box was simply never checked, which is why
+      this doc read "41 / 41 complete" and "✅ 1/1" above an open item. The content half is in the
+      change log below (2026-07-24: "Disk `~/ai-stack/pipes/*.py` re-synced to the deployed code");
+      the filename half landed when the `uncensored` pipe id was renamed to `photoreal`.
+    - It can no longer silently drift: `scripts/deploy_pipe.py` performs the copy as part of every
+      deploy, and `tests/test_deployed.py`'s `twin_pairs()` asserts it, deriving the pairs from
+      `SOURCES` so adding a pipe gets it checked with nothing else to update. Before 2026-08-08 only
+      one pair (`pipes/photoreal.py`) was written down, which is how `pipes/auto_assistant.py` ran
+      696 lines ahead of its live copy — a whole committed feature the server had never seen — while
+      that suite reported 29 checks and ALL PASS.
+    - The check is doing its job right now rather than reporting green: `python3
+      tests/test_deployed.py` today returns 33 checks, 1 FAILURE —
+      `pipes/auto_assistant.py → pipes/live/auto_assistant.py repo=58e181d7 (377220B)
+      deployed=3338fd8d (376465B)`. That is an undeployed edit made after the last deploy, not this
+      box reopening; the fix is `python3 scripts/deploy_pipe.py auto_assistant`.
 
 ### Finding detail
 

@@ -20,8 +20,14 @@
 > **Correction to this document:** the Infinity image is `michaelf34/infinity`, not `michaelfeil/…`
 > as written below. Tag `0.0.77-cpu`, 0.75 GB.
 >
-> Still open from Wave 1: the confirmation gate before renders, task-model revert to `gemma3:1b`,
-> and the `keep_alive:0` audit.
+> Still open from Wave 1 **as of 2026-07-26**: the confirmation gate before renders, task-model
+> revert to `gemma3:1b`, and the `keep_alive:0` audit.
+>
+> **Two of those three closed since (noted 2026-08-08).** The confirmation gate shipped 2026-07-31
+> (§1.2) and the task-model revert 2026-08-01 (§1.4 *Task-model cleanup* — note this doc carries two
+> sections numbered 1.4). Only the `keep_alive:0` audit is still open
+> today: every `keep_alive` in `pipes/auto_assistant.py` is still `0` and there is no `"120s"`
+> anywhere in the file.
 
 
 _Created 2026-07-26. **Supersedes the "what's left" / open-decision sections of
@@ -231,6 +237,17 @@ live-fatal bug where OWUI's code-interpreter prompt routed **every** message to 
 three unit suites pass against the current file (15/15 router, 24/24 manifold, 39/39 autoroute) and
 the smoke eval is 10/11 trajectory + 4/4 outcome with a real Krea image and a real Wan video rendered.
 
+> **Counts refreshed 2026-08-08.** All three suites still pass, but two of the figures above have
+> been overtaken — the suites grew. Run against the tracked `pipes/auto_assistant.py` today:
+> `tests/test_router.py` **15 cases A–O, ALL PASS**; `tests/test_manifold.py` **30 `[PASS]` checks,
+> ALL PASS** (it prints no total, so this is a count of its `[PASS]` lines);
+> `tests/test_autoroute.py` **40 checks, ALL PASS**. So `24/24 manifold` and `39/39 autoroute` are
+> stale. The dated 2026-07-26 verification block in §0.6 records `28/28 manifold · 40/40 autoroute`
+> and stays as written — it is a record of that day, not a current count; this note is the current
+> count. All three suites take a pipe path and **default to the gitignored `pipes/live/` copy**,
+> which is behind the tracked pipe again today, so pass the tracked path whenever a count is at
+> stake.
+
 What is genuinely weak is not the plumbing, it is three things. **First, the model roster is one
 model too big and two models too many**: the Qwen3.6-35B-A3B "coder" was verified this week to be a
 working vision-language model (126.8 tok/s on a real image, `capabilities: [tools, thinking,
@@ -259,6 +276,42 @@ who does not exist yet.
 | Phase 9 — QA | ◐ automated done | Full tier not re-run since `2db5e25`/`5fba13b`. 6 of 13 browser items never exercised |
 | Media (VIDEO_QUALITY_ROADMAP) | ✅ most accurate doc | Tier 1 all six live; Tier 2 items 7/8/13 live; 9–12, 14 not started, exactly as its header says |
 | `MODELS.md` | ❌ least accurate | Still describes a three-model stack; omits the Qwen3.6 coder entirely; quotes `gemma4:e2b` at ~1.9 GB (real: 3307 MiB) |
+
+> **Five rows above corrected 2026-08-08.** The rows are left standing because the column header
+> promises a live comparison and the table is what §1 asserted when it was written; each correction
+> is dated beside its original rather than replacing it.
+>
+> - **Phase 2b — coder autorouting.** "39/39" is stale — `tests/test_autoroute.py` prints
+>   **40 checks, ALL PASS** today. See the count note above.
+> - **Phase 0 — driver.** "Plan line 94 (*prevention still outstanding*) is stale" is itself now
+>   fixed: that passage in `docs/CAPABILITY_UPGRADE_PLAN.md` reads
+>   `~~The prevention step below is still outstanding~~ **Done 2026-08-01:**` and records the CDI
+>   attach (`--device nvidia.com/gpu=all` in `compose/openwebui/run.sh` and
+>   `compose/comfyui/run.sh`).
+> - **Phase 1 — router poisoning.** "All md5s quoted in the plan are stale" is half-fixed: two of the
+>   three quoted `function.content` hashes in `docs/CAPABILITY_UPGRADE_PLAN.md` now read
+>   `md5 <stale — see note>` instead of a hash, while the Phase-9 deploy entry still quotes a live one
+>   (`5c5212ec…`). And **`DB == disk == pipes/live/` no longer holds** — `pipes/live/` is a gitignored
+>   copy of what is deployed, and it is behind the tracked `pipes/auto_assistant.py` again because the
+>   pipe was edited after the last deploy. That is the drift `tests/test_deployed.py` exists to catch,
+>   and it is why every count in this doc has to say which file it was measured against.
+> - **Phase 7 — retrieval.** "quality broken … with `reranking_model=""`" is fixed, and was fixed
+>   the same week §1 was written: `infinity-rerank` (`michaelf34/infinity:0.0.77-cpu`,
+>   `BAAI/bge-reranker-v2-m3`, `--device cpu`, `127.0.0.1:7997`) runs in the live request path
+>   (`compose/docker-compose.yml:143-176`), with OWUI on `rag.reranking_engine="external"` →
+>   `http://localhost:7997/rerank`. See the SHIPPED-2026-07-26 row at the top of this doc, and
+>   §3.1, which is superseded by it. `top_k=20` and hybrid-on are unchanged.
+> - **`MODELS.md`.** All three charges in that row are now false. It was rewritten for the five-model
+>   roster (commit `d447ed9`, 2026-08-01, "docs: correct what the docs were confidently wrong about"
+>   — **not** `f87d47b`, which this note claimed until 2026-08-08; that commit touched `MODELS.md` by
+>   only +39/-1 and added just the "a task model that isn't visible" section. The measured-VRAM framing
+>   came earlier still, in `9d46164`, 2026-07-26): it opens "As of 2026-08-01 the box runs FIVE models",
+>   tabulates every slot, quotes `gemma4:e2b` at 3307 MiB, and records the Qwen3.6 coder tag as
+>   *deleted* 2026-07-26 rather than omitting it. Its one surviving stale figure — an idle baseline of
+>   "1023–1070 MiB … ComfyUI 444 MiB + the Open WebUI CUDA embedder 360 MiB", which contradicted the
+>   SHIPPED-2026-07-26 embeddings row at the top of this doc — was itself corrected on **2026-08-08**
+>   to **~630 MiB**, with the old figure kept beside it under a supersession note. So the `❌ least
+>   accurate` verdict no longer holds against anything.
 
 **The single architectural fact that reprices everything below:** the coder is a VLM. Collapsing
 chat + vision + code onto it gives one 18372 MiB tenant plus `gemma3:1b` at 1313 MiB, ~20.3 GB
@@ -335,8 +388,8 @@ Stages 4-6 of the plan and unstarted. Measure first: on these numbers Qwen may c
 | Original item | Real status today | Verdict |
 |---|---|---|
 | **Decision 9 — whisper to CPU** | Unapplied and **impossible as specified** (`audio.py` reads the global `DEVICE_TYPE` from `USE_CUDA_DOCKER`; no `WHISPER_DEVICE` override) | **OBSOLETE AS WRITTEN.** Its real goal was the 360 MiB embedder. `rag.embedding_engine="ollama"` frees that 360 MiB with no container recreate and no side effect on whisper (`routers/retrieval.py:145` only builds a local SentenceTransformer when the engine is `""`). Take that instead. The whisper-device question then only matters if you start using the mic — see Wave 2 |
-| **Coder ↔ task-model eviction** | Unmitigated; `task.model.default = task.model.external = gemma4:e2b` | **STILL WORTH DOING, cheaply.** Revert to `gemma3:1b`. `gemma4:e2b` occupies 3307 MiB but Ollama reserves 7.5 GiB plus a 1970 MiB floor — 9.4 GiB effective for a 3.2 GiB model, caused by the 7.16 GB MatFormer container on disk. It is the only model here that co-resides with **nothing**. `gemma3:1b` (1313 MiB) co-resides with the coder at 20715/24576 |
-| **Phase 7 reranker (deferred, not cancelled)** | Nothing installed | **STILL VALID BUT GATED.** The new `RerankCompressor` finding makes it more important than the plan thought — hybrid search currently buys recall and zero ranking. But there are **zero persistent knowledge bases** and 585 embeddings across 3 transient `web-search-*` collections. Ingest documents first, then buy the 0.3 GB reranker. Wave 3 |
+| **Coder ↔ task-model eviction** | ~~Unmitigated; `task.model.default = task.model.external = gemma4:e2b`~~ → **SHIPPED 2026-08-01.** Both keys read `"gemma3:1b"` in the live DB (`docs/openwebui-config-snapshot.md`) | **DONE 2026-08-01.** Reverted to `gemma3:1b`. `gemma4:e2b` occupies 3307 MiB but Ollama reserves 7.5 GiB plus a 1970 MiB floor — 9.4 GiB effective for a 3.2 GiB model, caused by the 7.16 GB MatFormer container on disk. It is the only model here that co-resides with **nothing**. `gemma3:1b` (1313 MiB) co-resides with the coder at 20715/24576. The symptom that forced it: e2b was measured **evicting the 16.70 GiB chat tenant on every title generation**, so a new chat cost the user a full 18 GB reload on their next turn (`docs/MODELS.md`, Task model row). `gemma4:e2b` is kept on disk as the cross-family eval judge, out of the request path. **One correction to the verdict:** the `gemma3:1b` row is hidden, and `get_task_model_id` ignores a task model that is not in `models`, so titles are actually answered by the chat's own 34.7 B tenant. The eviction is gone by fallback rather than by the small model running — see §1.4 *Task-model cleanup* |
+| **Phase 7 reranker (deferred, not cancelled)** | ~~Nothing installed~~ → **SHIPPED 2026-07-26.** `infinity-rerank` runs in the live request path: `michaelf34/infinity:0.0.77-cpu`, `--model-id BAAI/bge-reranker-v2-m3 --device cpu`, `127.0.0.1:7997` (`compose/docker-compose.yml:143-176`), with OWUI on `rag.reranking_engine="external"` → `http://localhost:7997/rerank`. **0 VRAM** | **DONE 2026-07-26, and the gate below was dropped rather than met.** ~~STILL VALID BUT GATED … Ingest documents first, then buy the 0.3 GB reranker. Wave 3~~ The `RerankCompressor` reading recorded in the SHIPPED block at the top of this doc reclassified it from a quality add-on to a **bug fix**, and putting it on CPU made it cost 0 VRAM, so waiting for documents bought nothing. The "0.3 GB" was never spent either: that was a GPU-resident figure for §3.1's `gte-reranker-modernbert-base`, and what shipped instead is a 0.75 GB CPU image holding **zero** VRAM. `top_k_reranker` went 3 → 5 in the same change |
 | **Internal tool loop / native FC (Phase 2 shape B)** | Never built | **KILL FOR NOW.** Three research passes recommend it as if it were a config change. It is not: `function_calling: "legacy"` is what currently delivers web search with working citations, model knowledge, folder files and the code-interpreter XML path, and `pipe()` never declares `__tools__` and drops `body['tools']` on the floor (`auto_assistant.py:1486-1488`). Flipping the mode is an immediate, verified regression in exchange for tools you would still have to build a loop for. See §5 |
 | **Phase 3 — PaddleOCR-VL + FastAPI shim** | Skipped by decision 4, never revisited | **CANCEL.** Tika + Tesseract handled the real `.doc`/`.msg`/scanned-PDF cases. Revisit only if a real document fails |
 | **Browser checklist items 1–13** | 6 never exercised (KB ingest, citations-from-KB, memory round-trip, mic, lock contention, `ollama ps` observation) | **REWRITE.** Item 1 ("confirm three entries exist") is obsolete. Items 4/5/7/8 are blocked on there being a document or a memory to test. Item 11 (lock contention) is worth scripting — Wave 2 |
@@ -382,6 +435,32 @@ deliberately-wrong render (ask for "two people", render one) and confirm it stil
 ---
 
 #### 1.2 Media predicates default-deny + a confirmation gate + regression tests
+
+> **Mostly shipped — one bullet is still open, noted 2026-08-08.** This item does not get a blanket
+> DONE banner, because bullet 3 landed only halfway and a blanket banner would hide the half that
+> did not. The three bullets landed on three different dates:
+>
+> - **Default-deny predicates + the `/img`,`/vid` escape hatch — 2026-07-26**, recorded in the
+>   SHIPPED block at the top of this doc. `_MEDIA_SLASH_IMG` / `_MEDIA_SLASH_VID`
+>   (`pipes/auto_assistant.py:828-829`) are checked in `_is_video_request` (`:858`) and
+>   `_is_image_request` (`:2500`), under the comment that they exist "so the default-deny predicates
+>   below can be strict: anything they reject can still be forced with two keystrokes".
+> - **The confirmation gate — 2026-07-31.** `_confirm_render()` (`:5586`) emits
+>   `{"type": "confirmation", …}` at `:5608` and `pipe()` takes `__event_call__`. It fails **open**
+>   on every path that is not an explicit "no" — no client attached, socket disconnected,
+>   unsupported client, malformed answer, exception — which is the "must default to proceed when
+>   `__event_call__` is `None`" requirement below, and it *counts* the fail-open rather than
+>   swallowing it. `python3 tests/test_confirm_gate.py` → **28 checks, ALL PASS** (run 2026-08-08).
+> - **The regression gate — half done.** The 20 conversational negatives landed as their own suite
+>   rather than inside `tests/test_router.py`: `python3 tests/test_media_intent.py` → **40 checks
+>   (20 positive, 20 negative), ALL PASS** (run 2026-08-08). The **4 `_CODE_STRONG` false positives
+>   are still ungated.** Grep across `tests/` and `tests/eval/cases.json` finds no
+>   "makefile" / "shed" / "flight was cancelled" case, and the predicate — now at
+>   `pipes/auto_assistant.py:604-614`, not the `:354` / `:405-409` cited below — still matches both
+>   worked examples: `fix …{0,60}makefile` catches the first, `\b[A-Za-z]*(?:Error|Exception)\b\s*:`
+>   the second. **What that costs:** typing "Error: my flight was cancelled" still routes straight to
+>   the 18 GB coder with no classifier check, so an ordinary complaint pays a cold 18 GB load and
+>   comes back answered as a bug report.
 
 **What.** Three changes, shipped together:
 - Delete the bare-noun fallbacks at `auto_assistant.py:354` (`\b(video|animation|footage|moving image|make it move)\b`) and `:405-409` (`\b(draw|sketch|paint|illustrate)\b`, `<noun> of`). Require an imperative generation verb within ~25 chars of a media noun — the pattern already exists at `:344` and `:396`. Add `/img` and `/vid` prefixes as the escape hatch.
@@ -476,6 +555,45 @@ is unacceptable on any, keep it behind an opt-in keyword instead of making it th
 
 #### 1.4 Task-model cleanup
 
+> **Two of the three bullets are done — but the first shipped as a config change whose *effect* is
+> not what it reads as. The `keep_alive` audit is not done, and its line numbers are stale. Noted
+> 2026-08-08.**
+>
+> - **`task.model.default` / `task.model.external` → `gemma3:1b` — DONE 2026-08-01.** Both keys read
+>   `"gemma3:1b"` in `docs/openwebui-config-snapshot.md`, which is re-read from the live DB, and the
+>   **Task model** row of `docs/MODELS.md` records the slot as `gemma3:1b`. The measured reason
+>   turned out to be sharper than the VRAM arithmetic below: `gemma4:e2b` was **evicting the
+>   16.70 GiB chat tenant outright on every title generation** — recorded in both `docs/MODELS.md`
+>   and `docs/openwebui-improvement-plan.md`'s F30 entry — so opening a new chat charged the user a
+>   full 18 GB reload on their next turn. `gemma3:1b` co-resides at 21298/24576 measured.
+>
+>   **But do not read this as "`gemma3:1b` now generates the titles."** The parenthetical below —
+>   "its hidden `is_active=0` row still exists" — is the trap, not a convenience:
+>   `get_task_model_id` (`utils/task.py`) honours the configured id only `if task_model in models`,
+>   and a hidden row is not in `models`. So the setting falls through to `default_model_id`, i.e. the
+>   chat's own model, and title/tag/RAG-query prompts are answered by `auto_assistant` on the 34.7 B
+>   tenant. **Hiding the row and setting it as the task model are mutually exclusive in 0.10.2**
+>   (`docs/openwebui-config-snapshot.md`, "No task model is in effect"). The eviction this item
+>   existed to kill *is* dead — nothing loads a second tenant at all now — but by fallback, not by
+>   the mechanism written below, and the cost moved rather than vanishing: every title generation is
+>   now a 34.7 B call, contained only by the `__task__` guard at `pipes/auto_assistant.py:5707`,
+>   which is what stops those prompts triggering real GPU renders of `### Task:` boilerplate. To
+>   actually get a 1 B doing titles, that row has to be made **visible**.
+>
+>   (Line numbers in the sibling docs are deliberately omitted: they were being edited the same day
+>   this note was written, and a stale line cite is worse than none.)
+> - **`ollama rm gemma4:e2b-it-qat` — DONE 2026-07-26**, in the same sweep §0.6 records above.
+>   `ollama list` today returns five tags and no `e2b-it-qat`: `hermes-genesis:agent`,
+>   `hermes-genesis:apex-compact`, `bge-m3:latest`, `gemma4:e2b`, `gemma3:1b`.
+> - **The `keep_alive` audit is still open.** `grep -n keep_alive pipes/auto_assistant.py` returns
+>   **ten** sites today — `:896, 2736, 2889, 2919, 2976, 3026, 3198, 3222, 3661, 4770` — not the
+>   seven listed below, and **every one is still `0`**. There is no `"120s"` anywhere in the file.
+>   Two of the ten are deliberate unloads and must stay `0`: `:3026` inside `_free_vram()`, and
+>   `:4770`, the targeted release of the chat tenant before a hermes handoff. **What it still
+>   costs:** a media job that calls three helpers on the 18.3 GB tenant pays its ~23 s cold load
+>   three times over — the same number §2.4's DONE banner uses to kill the structured-output latency
+>   case.
+
 **What.** Three independent changes:
 - `task.model.default` and `task.model.external` → `gemma3:1b` (its hidden `is_active=0` row still exists). Reverses commit `619a85c`.
 - `ollama rm gemma4:e2b-it-qat` (4.34 GB, wired into nothing).
@@ -499,6 +617,9 @@ The `keep_alive` change must not touch pre-render helpers or a 14–18 GB tenant
 when Krea/Wan allocates; `_free_vram()` is the existing safety net and stays.
 **Verify.** Open a new chat, `curl localhost:11434/api/ps` after the title generates — expect
 `gemma3:1b`, not `gemma4:e2b`, and the coder still resident. Time a coder turn immediately after.
+**Amended 2026-08-08:** this check will *not* show `gemma3:1b`, because the hidden row makes the
+setting fall through to the chat model — expect the coder alone, and read that as the pass. See the
+banner above.
 **Rollback.** Config revert (two keys) + one commit.
 
 ---
@@ -543,6 +664,37 @@ exceed bge-m3's window.
 
 #### 1.6 Make the VRAM guards honest
 
+> **Split 2026-08-08: the environment pinning and the photoreal guard shipped; the guards are still
+> not honest.**
+>
+> **Shipped.**
+> - **The photoreal `/interrupt` is guarded** (`pipes/photoreal.py:332-343`). The queued job is
+>   deleted by its own `prompt_id`, and `/interrupt` fires only when the *running* entry is ours
+>   (`any(len(e) > 1 and e[1] == pid for e in running)`). The comment now records what the bare
+>   interrupt would have killed: "an Assistant video 20 minutes in, most likely, since that is the
+>   longest thing on this box." The "**live bug**" sentence in the Why below is therefore struck.
+> - **`UVICORN_WORKERS=1` is explicit** (`compose/openwebui/run.sh:65`), with the per-worker-lock
+>   rationale in the adjacent comment. It no longer relies on `start.sh`'s default.
+> - **`WHISPER_VAD_FILTER=true` and `WHISPER_LANGUAGE=en` are set** (`compose/openwebui/run.sh:70-71`).
+>   The "currently free to hallucinate text over silence" sentence in the Why below is struck.
+> - **`WEBUI_SECRET_KEY` is explicit**, generated once under `umask 177` into
+>   `/volume1/docker/openwebui/secret.env` and passed with `--env-file`
+>   (`compose/openwebui/run.sh:37-43, 54`) rather than left implicit.
+>
+> **Still open — and this is the half the item was named for.**
+> - `_comfy_idle()` (`pipes/auto_assistant.py:2796-2803`) still documents "Fail-open: on error assume
+>   idle" and returns `True` on exception. `_comfy_free()` (`:2831-2846`) inherits it and adds one of
+>   its own: it returns `True` when `_vram_free_gib()` is `None`. A hung ComfyUI is still
+>   indistinguishable from an idle one.
+> - `_free_vram()`'s bool is still discarded at **all ten** call sites — `:3155, 3357, 3396, 3415,
+>   3448, 3714, 3739, 3812, 3824, 5530` — so its docstring's promise that "callers can surface 'GPU
+>   busy' rather than blindly OOM" is still unkept. **What that costs:** when an in-flight chat turn
+>   pins the tenant, the render is submitted anyway and the operator sees a CUDA OOM out of ComfyUI
+>   instead of "GPU busy".
+> - `--disable-smart-memory` is still undocumented as correctness-critical. It is passed at
+>   `compose/comfyui/run.sh:38` with no comment beside it, in a file whose other non-obvious flags do
+>   carry one.
+
 **What.**
 - `_comfy_idle()` / `_comfy_free()` (`auto_assistant.py:668-675, 677-684, 697-700`) currently `return True` on exception — a hung ComfyUI is indistinguishable from an idle one. Make them fail **closed**, paired with a short retry rather than an immediate hard refusal.
 - `_free_vram()` returns a bool its own docstring says exists "so callers can surface GPU busy rather than blindly OOM". **Not one of its 10 call sites** (`:871, 1002, 1022, 1037, 1058, 1308, 1333, 1406, 1418, 1594`) checks it. Honour it.
@@ -551,9 +703,12 @@ exceed bge-m3's window.
 - Same container recreate: `WEBUI_SECRET_KEY` set explicitly, `WHISPER_VAD_FILTER=true`, `WHISPER_LANGUAGE=en`.
 
 **Why.** A safety mechanism whose return value everyone ignores is worse than no safety mechanism,
-because it reads as covered. The photoreal `/interrupt` is a **live bug**, not a hypothetical.
-`WHISPER_VAD_FILTER` defaults to `False`, so whisper is currently free to hallucinate text over
-silence — the classic "Thank you for watching" failure — the moment the mic is ever used.
+because it reads as covered. ~~The photoreal `/interrupt` is a **live bug**, not a hypothetical.~~
+~~`WHISPER_VAD_FILTER` defaults to `False`, so whisper is currently free to hallucinate text over
+silence — the classic "Thank you for watching" failure — the moment the mic is ever used.~~
+Both struck 2026-08-08 — see the banner above. The VAD sentence is kept legible rather than deleted
+because it is the reason the env var was set. The unstruck opening sentence — a guard whose return
+value everyone ignores reads as covered — still stands, and is now the whole of this item's Why.
 
 **Cost.** 0 VRAM, 0 disk. One container recreate (bundle all env changes into it).
 **Effort.** Half a day.
@@ -587,6 +742,43 @@ down" instead of a 19 GB model load. `docker inspect open-webui` shows all four 
 ---
 
 #### 1.8 Doc hygiene + the exit gate
+
+> **Most of this list is closed — checked item by item 2026-08-08.** Line numbers are deliberately
+> omitted below: the sibling docs this item points at were being edited the same day, and every
+> line number quoted here moved while this note was being written. Cite the passage, not the line.
+>
+> - The stale "prevention still outstanding" line in `CAPABILITY_UPGRADE_PLAN.md` — **done
+>   2026-08-01**. It reads `~~The prevention step below is still outstanding~~ **Done 2026-08-01:**`
+>   and records the CDI attach.
+> - Rewrite `MODELS.md` — **done**, commit `d447ed9`, 2026-08-01 (corrected 2026-08-08: this said
+>   `f87d47b`, which only added the task-model-visibility section, +39/-1): five-model roster, every slot
+>   tabulated, `gemma4:e2b` at 3307 MiB, plus a "⚠️ Never budget from `/api/ps`" box. Its last stale
+>   figure, the idle baseline, was corrected 2026-08-08 — see the note under §1's table.
+> - Delete `pipes/live/video.py` — **done**. `pipes/live/` now holds `animate_scail`,
+>   `auto_assistant`, `flux_image`, `image_krea`, `photoreal` only.
+> - `known_issue` on RE02 — **done**. `tests/eval/cases.json:179` carries it, ending
+>   "UPGRADE_ROADMAP.md:493 asked for this field."
+> - **"Tick the five unchecked boxes in `openwebui-improvement-plan.md` Phase 5" — closed
+>   2026-08-08.** Four of the five were ticked between 2026-07-25 and 2026-08-01, so "five" was true
+>   when written and had become a miscount by the time this note was started: `grep -c '^- \[ \]'`
+>   over that file returned exactly **one** remaining box. That last one was ticked the same day, and
+>   the file now has **zero** unchecked boxes. It was never a doc-hygiene tick anyway — it was the
+>   `live/`→disk sync, which is now enforced mechanically by `tests/test_deployed.py`'s
+>   `twin_pairs()`. That is a better gate than a checkbox: a stale `pipes/live/` copy is exactly what
+>   that suite was written to catch after it "reported 29 checks and ALL PASS" against a file the
+>   server had never seen.
+>
+> **What this item did NOT close, and is still open:**
+> - The Phase 3 trap table in `CAPABILITY_UPGRADE_PLAN.md` still prints
+>   `rag.mineru_api_url = http://localhost:8000` and
+>   `rag.paddleocr_vl_base_url = http://localhost:8080` in its **"Live value"** column — the occupied
+>   ports. §1 of this doc says both were already defused to the discard port `:9`. The two cannot
+>   both be current; whichever is right, one of them is publishing a wrong live value, and that is
+>   the fix this bullet still owes.
+> - `CAPABILITY_UPGRADE_PLAN.md`'s Phase-9 deploy entry still quotes a live `function.content` md5
+>   (`5c5212ec…`). The two earlier hashes have already been replaced with `md5 <stale — see note>`,
+>   which is the pattern this one should follow: a quoted hash in a doc goes stale the next time the
+>   pipe is deployed, and this file has three deploys' worth of evidence for that.
 
 **What.** Fix `CAPABILITY_UPGRADE_PLAN.md` line 94 (stale), its Phase 3 trap table (3 of 5 rows
 wrong), all quoted `function.content` md5s, Phase 6's "scoped to knowledge/coder" (now `auto`), and
@@ -640,10 +832,31 @@ smoke eval; time a chat turn (expect ~2.4× the tok/s).
 
 #### 2.2 Per-request `num_ctx`, not a global context cut
 
-**What.** `auto_assistant.py:1486-1488` currently posts `{"model", "messages", "stream", "think"}`
+> **DONE — shipped essentially as specified, noted 2026-08-08.**
+>
+> `_fit_ctx()` (`pipes/auto_assistant.py:5330-5341`) sizes `num_ctx` from the summed message length
+> at a deliberately pessimistic 3.2 chars/token, **rounds UP only**, never goes below
+> `CTX_FLOOR = 16384` and never above `CTX_MAX = 32768` (`:231-232`). Its docstring gives the same
+> reason this item does: Ollama runs with `--context-shift`, so an undersized window does not error —
+> it silently evicts the front of the conversation and the model answers a question it can no longer
+> see. It is passed on the live chat POST at `:5417-5421`.
+>
+> **The premise below is false on two counts, not one.** The call no longer posts four keys with no
+> options: it posts `"options": {**self._sampling(guard_text), "num_ctx": self._fit_ctx(messages)}`,
+> and per-route sampling now exists too — `CHAT_OPTIONS` / `CODER_OPTIONS` (`:235-236`), keyed on the
+> guard rather than the model tag because chat, code and vision all resolve to one tag now.
+> `tests/eval/cases.json:279` records the consequence: "CODER_OPTIONS in the pipe now pins the coder
+> route to temperature 0.15."
+>
+> **Still live guidance, and the reason this item is not deleted:** do **not** set
+> `OLLAMA_CONTEXT_LENGTH=8192` globally. That half was never about the pipe.
+
+**What.** ~~`auto_assistant.py:1486-1488` currently posts `{"model", "messages", "stream", "think"}`
 with **no options at all**, so every chat turn allocates the full 32768-token KV from
-`OLLAMA_CONTEXT_LENGTH`. Compute `num_ctx` per turn from actual message length, rounded up to
-16384/32768, and pass it in `options`. **Do not** set `OLLAMA_CONTEXT_LENGTH=8192` globally.
+`OLLAMA_CONTEXT_LENGTH`.~~ (Struck 2026-08-08 — false on both counts; see the banner above. Kept
+legible because it is the premise the shipped fix was reasoned from.) Compute `num_ctx` per turn from
+actual message length, rounded up to 16384/32768, and pass it in `options`. **Do not** set
+`OLLAMA_CONTEXT_LENGTH=8192` globally.
 
 **Why.** Measured: 32k vs 8k costs 327 MiB on the coder, 100 MiB on `gemma3:1b` — and **zero**
 throughput at every context length (coder 123.4–124.9 tok/s flat across 4k/8k/16k/32k). Note the
@@ -783,7 +996,8 @@ syntax was never the problem here.
 **Effort.** Two hours.
 **Risk.** Over-constraining degrades generative helpers by forcing early closure. Apply to
 classification/extraction only; leave the enhancer and shot planner alone.
-**Verify.** `tests/test_autoroute.py` still 39/39; time the classifier before and after.
+**Verify.** `tests/test_autoroute.py` still 39/39 (**40 checks as of 2026-08-08** — the suite grew;
+see the count note in §1); time the classifier before and after.
 **Rollback.** Remove the `format` key.
 
 ---
@@ -849,7 +1063,26 @@ encoder rejects audio over 400 s unless `-long-audio` is enabled.
 
 ---
 
-#### 3.1 A reranker — **after there are documents to rerank**
+#### 3.1 A reranker — ~~after there are documents to rerank~~ **SUPERSEDED 2026-07-26**
+
+> **Superseded 2026-07-26; note added 2026-08-08.** A reranker is installed and in the live request
+> path — `infinity-rerank`, `michaelf34/infinity:0.0.77-cpu` serving `BAAI/bge-reranker-v2-m3` with
+> `--device cpu` on `127.0.0.1:7997`, with OWUI on `rag.reranking_engine="external"` →
+> `http://localhost:7997/rerank` (`compose/docker-compose.yml:143-176`). So the `reranking_model=""`
+> bug this item was written to fix **is fixed**, and the precondition below was **dropped rather than
+> met**: the `RerankCompressor` reading at the top of this doc reclassified reranking as a bug fix
+> rather than a quality add-on, and 0 VRAM on CPU made the trade cheap enough not to wait for a
+> document. `tests/test_retrieval_quality.py` scores real stored chunks through the running reranker
+> and picked `rag.relevance_threshold = 0.05` from those numbers.
+>
+> **What survives is a replacement question, not an addition.** If
+> `Alibaba-NLP/gte-reranker-modernbert-base` is still wanted, the change is to **replace** the
+> Infinity reranker, and the trade runs the other way from the one argued below: it moves ranking off
+> a CPU service that costs **0 VRAM** and onto the GPU at ~0.30 GB permanently resident, on a card
+> that also holds an 18.4 GB tenant. The number a replacement has to beat is measured, not
+> estimated: the running reranker is **0.26 s/doc, linear — 5.2 s for 20 docs** on real stored chunks
+> (mean 818 chars). Measure before swapping; the 83.00% vs 62.67% Hit@1 figures below are from a
+> single secondary source and are against *no* reranker, not against this one.
 
 **What.** Pre-seed `Alibaba-NLP/gte-reranker-modernbert-base` into
 `/app/backend/data/cache/embedding/models`, set `rag.reranking_model` accordingly and
@@ -1046,6 +1279,10 @@ Phase 3's Tika/OCR work ever pays off. Today: 0 knowledge bases, 0 documents ing
 are images or video.
 *Recommendation: ingest one real document in Wave 1 (a PDF and a `.doc`) as a test, then decide.* If
 the answer is no, delete the reranker item and the Phase 3 browser checklist entries permanently.
+**Note 2026-08-08:** the reranker no longer waits on this answer — one shipped 2026-07-26 (see §3.1's
+supersession note) because the `RerankCompressor` reading reclassified it as a bug fix and CPU made it
+cost 0 VRAM. The question still gates the rest of the list, and the "delete the reranker item"
+instruction above is now void.
 
 **3. Are you going to use the mic?**
 Gates all of 2.7. Browser checklist item 10 has never been done in seven days of use.
@@ -1108,14 +1345,23 @@ That *is* unconditional with respect to function-calling mode — the legacy/nat
 
 **But "enable MCP" does not mean what it sounds like on this deployment.** `auto_assistant.auto` is
 pinned `function_calling: "legacy"`, and in that mode middleware **executes** tool-server tools
-*before* the pipe runs: the **task model (`gemma4:e2b`) selects them** (`middleware.py:1130-1152`),
-invokes them (`:1206`), and injects the results as prose into the last user message (`:2807-2808`).
+*before* the pipe runs: the **task model selects them** (`middleware.py:1130-1152`), invokes them
+(`:1206`), and injects the results as prose into the last user message (`:2807-2808`).
 The pipe never receives `__tools__` — `functions.py:194` filters `extra_params` by signature and
 `pipe()` does not declare it. Routing is unaffected, since it reads `user_prompt` captured before
 that injection, but the chat path sees the prose.
 
-So adopting MCP here would hand tool selection to a 3 GB task model and deliver results as text,
-which is a materially different thing from the pipe calling tools.
+So adopting MCP here would hand tool selection to the task model and deliver results as text, which
+is a materially different thing from the pipe calling tools.
+
+> **Corrected 2026-08-08 — the selector is not "a 3 GB task model" any more, and it is not a 1 B
+> either.** `gemma4:e2b` was reverted out of `task.model.default`/`task.model.external` on 2026-08-01
+> in favour of `gemma3:1b`, but that row is hidden and `get_task_model_id` honours a configured task
+> model only `if task_model in models` — so the id falls through to the chat's own model
+> (`docs/openwebui-config-snapshot.md`, "No task model is in effect"). Tool selection under legacy FC
+> would therefore land on **`auto_assistant`'s own 34.7 B tenant**, not on a small model. That does
+> not rescue the objection: selection still happens outside `pipe()`, the results still arrive as
+> prose, and the pipe still never receives `__tools__`. It only changes which model is doing it.
 
 **Why no server was installed.** Nothing available adds capability this stack lacks — it already
 has web search (SearXNG), RAG, memory, and hermes for agentic work — and none of the running

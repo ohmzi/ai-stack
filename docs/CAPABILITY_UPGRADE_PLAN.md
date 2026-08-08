@@ -3,7 +3,13 @@
 _Created 2026-07-25. Target: make the stack a genuinely versatile offline assistant (documents, OCR,
 search, speech, memory, tools, coding) without breaking the VRAM-budget-first design._
 
-**Progress: 8.5 / 9 phases**
+**Progress: ~~8.5 / 9 phases~~ — restated 2026-08-08.** The fraction never matched the table: ten
+phases are listed below (0 through 9), not nine. And phase 8 has since closed, so the arithmetic
+would now read as complete when it is not. What is actually still open: **phase 5's STT half** — the
+mic has never been pressed on this box (`docs/UPGRADE_ROADMAP.md:255`) — and **phase 9's browser
+checklist**, 6 of whose 13 items have never been exercised at all
+(`docs/UPGRADE_ROADMAP.md:342`). Phase 6 is installed and attached but has never injected a memory:
+the `memory` table holds 0 rows (`docs/UPGRADE_ROADMAP.md:256`).
 
 | Phase | Scope | Status |
 |---|---|---|
@@ -13,18 +19,34 @@ search, speech, memory, tools, coding) without breaking the VRAM-budget-first de
 | 3 | Documents & OCR | ✅ Tika live on :9998, OCR verified |
 | 4 | Web search (SearXNG) | ✅ live on :8888, JSON verified |
 | 5 | Speech | ◐ TTS live on :8081; **STT blocked — see below** |
-| 6 | Memory (Adaptive Memory **v4.4.1**) | ✅ installed, scoped to knowledge/coder |
+| 6 | Memory (Adaptive Memory **v4.4.1**) | ✅ installed, attached to `auto` (the only entry) — see "Decision 5 reversed", below |
 | 7 | Retrieval quality | ✅ top_k=20 + hybrid on (reranker deferred) |
-| 8 | Coding model (Qwen3.6-35B-A3B) | ◐ pulled + wired; **co-residency problem, see below** |
+| 8 | Coding model (~~Qwen3.6-35B-A3B~~ → `hermes-genesis:apex-compact`) | ✅ wired; the co-residency problem below was **dissolved, not solved** — see item 2 |
 | 9 | Full QA sweep | ◐ automated done; browser checklist for you |
 
-### ⚠️ Two items need a decision before they can be finished
+### ⚠️ One item closed 2026-08-01; one reframed and deferred to Wave 2
 
 **1. STT device — the chosen fix is not achievable as specified.** Decision 9 was "force whisper to
 CPU without disabling CUDA for the embedder". That is **impossible in 0.10.2**: `audio.py:222` reads
 the *global* `DEVICE_TYPE`, which `env.py:45-56` derives solely from `USE_CUDA_DOCKER`. The same
 global drives the embedding model (`retrieval.py:151,207`). There is no `WHISPER_DEVICE` override.
 So the real options are:
+
+> **Superseded 2026-07-26 — the embedder half of this trade no longer exists.** Retrieval was moved
+> to the Ollama engine that week: `rag.embedding_engine = "ollama"` against `bge-m3:latest`, recorded
+> from a live-DB read at `docs/openwebui-config-snapshot.md:34` and described as the current path in
+> `README.md:93-94`. Open WebUI therefore builds **no local SentenceTransformer at all**
+> (`routers/retrieval.py:145` only constructs one when the engine is `""`, per
+> `docs/UPGRADE_ROADMAP.md:337`), so `USE_CUDA_DOCKER` no longer governs where embeddings run and the
+> **Embedder column of the table below, and its "frees 360 MiB" payoff, no longer describe this box**
+> — the 360 MiB was collected by the engine switch instead, with no container recreate and no whisper
+> side effect (`docs/UPGRADE_ROADMAP.md:10, 520-523`). The table is kept for the record because it is
+> still the correct account of the `DEVICE_TYPE` coupling itself.
+>
+> What is left is only *where whisper runs*, and that is deferred rather than decided: the mic has
+> never been pressed once on this box, so the question has no measured cost yet
+> (`docs/UPGRADE_ROADMAP.md:255`). See `docs/UPGRADE_ROADMAP.md:337` and its §2.7 ("STT — only if you
+> start using the mic", line 831).
 
 | Option | Whisper | Embedder | Note |
 |---|---|---|---|
@@ -36,8 +58,9 @@ So the real options are:
 CPU embedding on 24 cores is a non-issue for a personal KB). It needs open-webui recreated, which is
 why it was not done unilaterally.
 
-**2. The coder evicts the task model — measured, not theoretical.** Phase 8 assumed the coder and
-`gemma4:e2b` stay co-resident. **They do not.** Tested in both load orders:
+**2. The coder evicts the task model — measured, not theoretical.** ✅ **Closed 2026-08-01 — see the
+dated note at the end of this item.** Phase 8 assumed the coder and `gemma4:e2b` stay co-resident.
+**They do not.** Tested in both load orders:
 
 | Combination | Result |
 |---|---|
@@ -60,6 +83,30 @@ So in real use the eviction costs ~6 s on the first coder message after a new ch
 broken. This moves from "must fix" to "fix if it bothers you". Options if it does: switch the task
 model back to `gemma3:1b` (co-resides — reverses commit `619a85c`), disable
 `task.title.enable`/`task.tags.enable`, or take a smaller coder quant.
+
+> **Closed 2026-08-01 — both halves of this item are gone.** The first option above was taken: the
+> task model was reverted from `gemma4:e2b` to `gemma3:1b` (`docs/MODELS.md:14`, which records e2b as
+> "measured EVICTING the 16.70 GiB tenant on every title generation"), and the live-DB read at
+> `docs/openwebui-config-snapshot.md:72-73` shows `task.model.default` and `task.model.external` both
+> set to `gemma3:1b`. So no new chat loads `gemma4:e2b` any more. And there is no separate coder
+> tenant left to evict: `hf.co/unsloth/Qwen3.6-35B-A3B-GGUF:UD-IQ4_XS` was deleted on 2026-07-26
+> (`docs/MODELS.md:26-27`) and **one** model now serves chat, code and vision —
+> `pipes/auto_assistant.py:456, 461, 466` set `chat_model`, `vision_model` and `coder_model` to the
+> same tag, `hermes-genesis:apex-compact`. `docs/UPGRADE_ROADMAP.md:258` records Phase 8 as "done,
+> premise obsolete".
+>
+> **The follow-on it exposed costs more than the eviction it replaced.** Setting a task model is not
+> the same as having one. The `gemma3:1b` `model` row is **hidden**, and `get_task_model_id`
+> (`utils/task.py:21`) only honours the setting `if task_model in models` — a hidden row is not in
+> `models`. So the id falls through to `default_model_id`, i.e. the chat's own model, and titles, tags
+> and RAG-query prompts are answered by `auto_assistant` on the 34.7 B tenant instead of a 1 B one
+> (`docs/openwebui-config-snapshot.md:82-93`). Hiding a model and using it as the task model are
+> mutually exclusive in 0.10.2. That fallback is what the `__task__` guard at
+> `pipes/auto_assistant.py:5707` exists to contain — without it these prompts triggered real GPU
+> renders of `### Task:` boilerplate. Consequence for the checklist below: browser check 12 ("run
+> `ollama ps`, **PASS = `gemma4:e2b` appears**") now asserts the wrong model *and* the wrong
+> mechanism, and check 13's ~6 s pause no longer has the second tenant that caused it — the title
+> prompt runs on the chat model itself, so there is nothing for it to evict.
 
 > **Verification status.** Findings below come from a 6-agent research sweep against primary sources
 > (running container source, GitHub, HuggingFace/Ollama APIs). The 2-agent adversarial verification
@@ -309,7 +356,7 @@ which would waste an 18 GB load). The original prompt is kept.
 
 ### Tests
 
-`tests/test_autoroute.py` — **39 checks, all passing**, including: 8 STRONG cases that must route
+`tests/test_autoroute.py` — **40 checks, all passing** (39 when this was written), including: 8 STRONG cases that must route
 without consulting the classifier, 5 plain cases that must not consult it either, media-wins cases
 phrased with programming words, an attached image beating the coder, RAG- and memory-injected text
 failing to pull the route, and classifier-unreachable degrading to chat.
@@ -489,7 +536,15 @@ turbo/int8 1399 MiB, turbo/fp16 2391 MiB. **Stay on int8** — fp16 costs more V
 slower for turbo. `base` transcribes correctly punctuated text; there is no quality cliff.
 
 ⚠️ `audio.py:222` places whisper on **CUDA** when `DEVICE_TYPE=cuda`. Investigate forcing CPU
-(24 idle cores) without disabling CUDA for the embedder.
+(24 idle cores) ~~without disabling CUDA for the embedder~~.
+
+**Superseded 2026-07-26 — the "without disabling CUDA for the embedder" half of this is moot.**
+Embeddings left the Open WebUI CUDA device that week (`rag.embedding_engine = "ollama"` against
+`bge-m3:latest`, `docs/openwebui-config-snapshot.md:34`), so `DEVICE_TYPE` now decides only where
+whisper runs and there is nothing else to protect. Do not re-derive the old trade-off — see the
+superseded note under item 1 at the top of this document. The whisper-device question itself is
+deferred, not answered: the mic has never been pressed on this box
+(`docs/UPGRADE_ROADMAP.md:255`), so it has no measured cost.
 
 **Wildcard — ✅ capability confirmed.** `/api/show` on `gemma4:e2b` returns
 `capabilities: ['completion', 'vision', 'audio', 'tools', 'thinking']` with
@@ -556,6 +611,24 @@ reading *"asked for a picture of their dog"* could make an ordinary question sta
    before any regex runs. It exists because making the filter global is a *single toggle in the UI*
    and the resulting failure would be silent and expensive.
 
+> **Mitigation 1 superseded 2026-07-26 — the filter is now on `auto`, and the two entries it was
+> scoped to no longer exist.** Decision 5 was reversed the same week (see "Decision 5 reversed" in
+> Decisions, below): `adaptive_memory` was attached to `auto_assistant.auto` as well, and when
+> `pipes()` collapsed to the single `🪄 Assistant` entry the `knowledge` and `coder` **model rows were
+> deleted**. `docs/openwebui-config-snapshot.md:25`, re-read from the live database on 2026-08-02,
+> shows `auto_assistant.auto` carrying `meta.filterIds = ['adaptive_memory']` and it is the only
+> active `auto_assistant` row. So the filter now sits on the one entry that *does* route media.
+>
+> **What that cost:** mitigation 2 stopped being a belt-and-braces guard against a UI toggle and
+> became the only thing between a stored memory and a GPU render. It is load-bearing, and it hangs on
+> one marker string being identical in two files that nothing links —
+> `filters/adaptive_memory.py`'s `MEMORY_CONTEXT_MARKER` and the pipe's `_INJECTED_MARKERS`. The
+> filter is vendored third-party code that is re-vendored on upgrade; if its header is ever reworded,
+> nothing fails loudly and routing quietly starts reading memories again. `tests/test_memory_routing.py`
+> exists to pin exactly that coupling (26 checks, all pass) on top of the router cases below.
+> Not yet exercised in production: `docs/UPGRADE_ROADMAP.md:256` records the `memory` table at
+> **0 rows**, so the filter is installed and attached but has never actually injected a memory.
+
 Tested (`tests/test_router.py`, cases G/H/I): memory block + question → chat; memory block + genuine
 image request → still renders; **memory block with no user text at all → chat**. That last case
 caught a real bug in the first version of the guard, which returned an empty string and then fell
@@ -580,7 +653,17 @@ memory is switched on and injecting into exactly the message `auto_assistant.py:
 the user has stored there is currently being silently discarded on every turn.
 
 *(Superseded by Phase 2: `keep_system=True` on the knowledge/coder entries means native memory now
-reaches those two entries as well. It remains dead on `auto`, which is intended per decision 5.)*
+reaches those two entries as well. ~~It remains dead on `auto`, which is intended per decision 5.~~)*
+
+*(**That last clause superseded 2026-07-26 as well.** `AUTO_KEEP_SYSTEM = True`
+(`pipes/auto_assistant.py:366`, passed at `:6065` and `:6075`) means `auto` takes the
+`keep_system` branch at `:5374`, which prepends the guard and keeps OpenWebUI's own system messages
+instead of filtering them out — so native memory is no longer discarded on `auto` either. Decision 5,
+which made the strip intentional, was reversed; and since `pipes()` collapsed to one entry, `auto` is
+the only entry there is. One caveat from the same code path: the pipe then **merges** every system
+message into exactly one at `:5392-5396`, because `hermes-genesis:apex-compact` fails the whole
+request with HTTP 400 — *"Unable to generate parser for this template"* — on two, measured
+(`:5381-5390`).)*
 
 </details>
 
@@ -689,7 +772,21 @@ Target lifecycle: regex router (0 cost) → task model for decomposition/query-g
 
 ## Phase 9 — QA plan
 
-Each phase ships only when its tests pass. Run `scratchpad/test_router.py` after **any** pipe edit.
+Each phase ships only when its tests pass. Run ~~`scratchpad/test_router.py`~~
+`python3 tests/test_router.py` after **any** pipe edit.
+
+> **Path corrected 2026-08-08.** There is no `scratchpad/` directory in this repo (`ls scratchpad` →
+> "No such file or directory"), so this standing instruction named a file an operator cannot run —
+> and the reflex on a missing test file is to skip it. The suite is `tests/test_router.py`, the same
+> path Phase 1's status line above already cites; re-run today it covers 15 cases A–O plus two control
+> blocks, ALL PASS. The past-tense mention of `scratchpad/test_router.py` in Phase 1 is left alone —
+> that is a true record of where the pre-fix reproduction was originally written.
+>
+> The pipe-edit gate has since grown. All suites are standalone (`python3 tests/<file>.py`, **not**
+> pytest): `tests/test_router.py` (injection-vs-routing), `tests/test_manifold.py` (entry resolution
+> and `_GEN_LOCK`), `tests/test_autoroute.py` (40 checks, chat-vs-code) and `tests/test_media_intent.py`
+> (40 checks, 20 of them negative). After a deploy, add `python3 tests/test_deployed.py` (33 checks),
+> which is the only check that fails when the paste step is skipped.
 
 **Per-component — RUN 2026-07-25:**
 
@@ -753,6 +850,26 @@ Everything shell-drivable is now automated and passing. The OWUI **HTTP API requ
 session** (`auth.enable_api_keys=false`, and extracting the session-signing secret to mint a token was
 correctly refused), so these need you. Exact prompts and exact pass criteria:
 
+> **⚠️ Read this before running the list — the entries it names are gone (noted 2026-08-08).** The
+> checklist was written against the three-entry manifold. `pipes()` collapsed to a single entry the
+> same week (see "…and then the manifold collapsed to ONE entry", below), and the `knowledge` and
+> `coder` **model rows were deleted**. Three things in the list are therefore untrue as written:
+>
+> - **Item 1** ("confirm **three** entries exist: 🪄 Assistant, 📚 Knowledge, 💻 Coder"). The picker does
+>   still show three entries, but a different three — `Ω Assistant`, `Animate`, `Photoreal` — and that
+>   curation is intentional, not drift (`README.md:82-86`; `docs/openwebui-config-snapshot.md:25-40`,
+>   read from the live DB 2026-08-02). `Ω` is the workspace display override on the `model` row; the
+>   pipe's own fallback name is still `🪄 Assistant`.
+> - **Every "on 📚 Knowledge" / "on 💻 Coder" step** (items 5, 6, 7, 8, 11) must be run on the one
+>   Assistant entry instead. `_entry()` still resolves the retired ids, so a saved chat degrades
+>   sensibly, but there is no way to *select* them.
+> - **Item 8's parenthetical is now backwards.** Adaptive Memory is attached to `auto`, not scoped away
+>   from it — see the superseded note in Phase 6. Memory is the thing to test **on** the Assistant.
+>
+> The list is kept because the pass criteria themselves are still the right ones, and because
+> `docs/UPGRADE_ROADMAP.md:342` tracks the rewrite (6 of the 13 items have never been exercised at
+> all). Do not treat a "FAIL" on items 1/5/6/7/8/11 as a regression until they are repointed.
+
 **Setup (30 s)**
 1. Open OWUI. In the model picker, confirm **three** entries exist: 🪄 Assistant, 📚 Knowledge, 💻 Coder.
 
@@ -808,8 +925,28 @@ correctly refused), so these need you. Exact prompts and exact pass criteria:
 14. Task-model check: new chat → title/tags generated by `gemma4:e2b`, **not** the 14.3 GB model.
 15. Re-run the full 17/17 routing regression from `openwebui-improvement-plan.md`.
 
-**Rollback.** DB backup before every deploy (`webui.db.bak-<name>`); `pipes/live/*.py` is the source
-of truth and must stay identical to `function.content` — verify with `python3 tests/test_deployed.py`, which compares sha256 and is wired into `run_eval.py` as a pre-flight (2026-08-01). Do NOT quote hashes in prose: every one written here has gone stale within days.
+**Rollback.** DB backup before every deploy (`webui.db.bak-<name>`); ~~`pipes/live/*.py` is the source
+of truth and~~ **the tracked `pipes/<id>.py` is the source of truth and `pipes/live/<id>.py` a
+gitignored mirror of the deployed bytes; both** must stay identical to `function.content` — verify with `python3 tests/test_deployed.py`, which compares sha256 and is wired into `run_eval.py` as a pre-flight (2026-08-01). Do NOT quote hashes in prose: every one written here has gone stale within days.
+
+> **Corrected 2026-08-08 — `pipes/live/` was never the source of truth, and calling it one is how a
+> deploy gets skipped.** `.gitignore:3` ignores `pipes/live/`, and `scripts/deploy_pipe.py:50-52`
+> calls the pair "(tracked source, live working copy) … The live copy is gitignored and exists so the
+> deployed bytes are inspectable without opening the database". There are **three** copies of every
+> pipe and the chain runs one way: the tracked `pipes/<id>.py` is the source of truth,
+> `pipes/live/<id>.py` is a gitignored mirror of the deployed bytes, and `function.content` — the row
+> OpenWebUI actually executes — must equal both. Verifying only the DB link is how
+> `pipes/auto_assistant.py` came to run 696 lines ahead of its live copy, a whole committed feature
+> the server had never seen, while this suite reported 29 checks and ALL PASS
+> (`tests/test_deployed.py:18-20`); it checks both links as of 2026-08-08.
+>
+> Corrected procedure: take a `webui.db` backup before a deploy session (that is a manual copy — the
+> deploy script does **not** touch the database file), then deploy with
+> `python3 scripts/deploy_pipe.py <id>`, which writes the **previous** row content plus its `meta` to
+> `.deploy-backups/<fid>.<stamp>.py` (`deploy_pipe.py:230-237`) and restores exactly that content with
+> `--rollback` (`:300-315`). So there are two different rollbacks: `--rollback` for one function's
+> content, and the whole-database copy — a separate nightly, `scripts/stack_backup.sh` — for
+> everything else. Then verify both links with `python3 tests/test_deployed.py` (33 checks).
 
 ---
 
@@ -879,7 +1016,7 @@ So `pipes()` now returns a single entry, `🪄 Assistant`:
 |---|---|
 | chat | default |
 | vision | automatic when the turn carries an image |
-| **code** | automatic via `_is_code_request` → Qwen3.6 coder under `_GEN_LOCK` |
+| **code** | automatic via `_is_code_request` → Qwen3.6 coder under `_GEN_LOCK` — **the tag changed 2026-07-26**: `coder_model` is now `hermes-genesis:apex-compact`, the same tenant as chat and vision (`pipes/auto_assistant.py:456, 461, 466`) |
 | images / video / edits | automatic via the media router |
 | web search | the toggle → SearXNG (legacy FC) |
 | documents, folders, citations | legacy FC |
@@ -915,11 +1052,27 @@ manifold, 39/39 autoroute all pass.
 - **Decision 8 means four large tags on disk (~59 GB of 363 GB free).** Only one large tenant is
   resident at a time under `_GEN_LOCK`, so this costs eviction churn and cold-load latency
   (`gemma4:e2b` alone measured **54.5 s** cold), not simultaneous VRAM.
+  **Superseded 2026-07-26 — that roster no longer exists.**
+  `hf.co/unsloth/Qwen3.6-35B-A3B-GGUF:UD-IQ4_XS` (18 GB), `dolphin-venice:24b` (14 GB),
+  `gemma4:31b` (19 GB) and `gemma4:e2b-it-qat` (4.3 GB) were deleted that day, ~55 GB reclaimed
+  (`docs/MODELS.md:26-29`), and `hermes-genesis:apex-compact` took over chat, code and vision.
+  `gemma4:e2b` stayed on disk but only as the eval judge, out of the request path
+  (`docs/MODELS.md:15`). The eviction-churn argument still holds, against a different pair:
+  `hermes-genesis:agent` is the same weights at `num_ctx 65536`, and Ollama keys runners by
+  model+options, so it is a **separate runner** that cannot co-reside with the 32768-ctx chat tenant —
+  a cron tick mid-conversation evicts chat and the next turn pays a cold reload **measured at 22.7 s**
+  (`docs/MODELS.md:18`). Its ~17 GB is the one figure on that page carried over rather than
+  re-measured, and `docs/MODELS.md:20-25` flags it as such — do not quote it as a measurement.
 - **Decision 7 defers the reranker, not cancels it.** Re-measure retrieval after `top_k=20` + hybrid;
   if quality is still short, Infinity + `bge-reranker-v2-m3` (~1.2 GB) is the next step — but with the
   coder resident the budget is ~23.2/24.35 GB, so it is genuinely tight.
 - **Decision 9 has an open sub-problem:** `audio.py:222` selects CUDA from `DEVICE_TYPE`. Forcing
   whisper to CPU must not also push the embedding model off the GPU.
+  **Superseded 2026-07-26:** there is no embedding model on that GPU left to push off. Retrieval runs
+  through `rag.embedding_engine = "ollama"` against `bge-m3:latest`
+  (`docs/openwebui-config-snapshot.md:34`), so Open WebUI constructs no local SentenceTransformer and
+  `DEVICE_TYPE` now decides only where whisper runs. The constraint that made this a sub-problem is
+  gone; see the superseded note under item 1 at the top of this document.
 
 ---
 
@@ -968,3 +1121,27 @@ manifold, 39/39 autoroute all pass.
     entries verified live through OWUI's own function loader.
   - **Phase 4 (partial) ◐** — `function_calling: "legacy"` set on both new model entries, so knowledge
     bases, folder files, web search and citations reach the model. SearXNG itself still to do.
+
+- **2026-08-08 (audit pass — corrections only, no new work)** — this document was checked claim by
+  claim against the code and the live-DB snapshot. Nothing was deleted; every stale passage is kept
+  with a dated superseded note beside it. What was found:
+  - **Phase 6 said the memory filter is scoped to `knowledge`/`coder`.** It is on `auto`, and those two
+    rows no longer exist. `_strip_injected_context()` therefore went from a spare guard to the only
+    thing between a stored memory and a GPU render.
+  - **Item 2 ("the coder evicts the task model") was closed 2026-08-01** by reverting the task model to
+    `gemma3:1b` and retiring the separate coder tag — but the replacement problem is that the
+    `gemma3:1b` row is hidden, so `get_task_model_id` ignores the setting and task prompts fall back to
+    the chat's own pipe.
+  - **Item 1's embedder column is obsolete** — embeddings moved to Ollama/`bge-m3` on 2026-07-26, so
+    `USE_CUDA_DOCKER` no longer governs them and the "frees 360 MiB" payoff was already collected by a
+    cheaper route. Only the whisper half is still open, and it is deferred: the mic has never been
+    pressed.
+  - **The Phase 9 gate named `scratchpad/test_router.py`,** a path that does not exist — a standing
+    instruction an operator could only skip. It is `tests/test_router.py`, and the gate is now four
+    suites plus `test_deployed.py` after a deploy.
+  - **Rollback called `pipes/live/*.py` "the source of truth".** It is gitignored working state; the
+    tracked file is the source and the DB row is what runs. Believing otherwise is documented as how a
+    committed feature ran 696 lines ahead of the server with a green suite.
+  - **The browser checklist still selects 📚 Knowledge and 💻 Coder,** which cannot be selected any more,
+    and item 12 still expects `gemma4:e2b` in `ollama ps`. Flagged in place; the rewrite is tracked in
+    `docs/UPGRADE_ROADMAP.md:342`.

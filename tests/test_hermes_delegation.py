@@ -252,6 +252,24 @@ def main():
           any(m.get("outcome") == "created" for m in drive.metrics), repr(drive.metrics)[:200])
     check("...with the alert-setup block still shown after it", "<alert-setup>" in out, out[-200:])
 
+    # A SILENT repair still has to be counted. `deliver` is the one defect fixed without saying so,
+    # and it is also the most common — hermes defaults an omitted deliver to origin on this host, so
+    # the brief has to fight it on a good fraction of all creations. The count was originally
+    # computed inside `if shape:`, and _enforce_job_shape returns "" when every repair was silent,
+    # so the single most frequent violation recorded repaired=0 while its PATCH demonstrably went
+    # out. That is the rate the column exists to measure, missing exactly where the reply is already
+    # quiet — which is why this is asserted separately from the loud case above rather than folded
+    # into it.
+    quiet = job("quiet")
+    quiet["deliver"] = "origin"          # the ONLY defect; prompt is well-formed
+    out = drive("scheduled it", [before, {**before, "quiet": quiet}])
+    check("a silent-only repair still PATCHes the job",
+          [c[:2] for c in drive.api] == [("PATCH", "/api/jobs/quiet")], repr(drive.api)[:200])
+    check("...fixing delivery alone", list(drive.api[0][2]) == ["deliver"], repr(drive.api[0][2]))
+    check("...and says nothing about it", "Repaired job" not in out, out[-200:])
+    check("...but is STILL counted, or the rate is unmeasurable",
+          any(m.get("repaired") == 1 for m in drive.metrics), repr(drive.metrics)[:200])
+
     out = drive("made two", [before, {**before, "n1": job("n1"), "n2": job("n2")}])
     check("more jobs than the agent described IS worth saying", "2 tasks were created" in out,
           out[-200:])

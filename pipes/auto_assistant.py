@@ -4858,7 +4858,8 @@ class Pipe:
 
     # ---------------------------------------------------------------- job shape enforcement
     #
-    # _HERMES_BRIEF is instructions to a 20B local model, and on 2026-08-07 it ignored three of them
+    # _HERMES_BRIEF is instructions to a local MoE (hermes-genesis:agent — the same weights as the
+    # chat tenant, ~3 B active of 34.7 B), and on 2026-08-07 it ignored three of them
     # at once. Two flight jobs (676e970c59ad, 4df0ab5bed14) were created with deliver='origin' —
     # whose only origin on this host is the api_server, which has no push channel, so EVERY run
     # ended in "Adapter send failed: API server uses HTTP request/response, not send()". Neither
@@ -5173,13 +5174,20 @@ class Pipe:
                                     # the three parts of the brief a machine can check, before the
                                     # first run rather than after it. to_thread per _hermes_api's
                                     # contract — this pipe serves every other chat on the box.
+                                    # Counted BEFORE the repair, and NOT gated on whether the repair
+                                    # had anything to say. A deliver-only defect is fixed silently
+                                    # (:4900), so gating this on `shape` recorded repaired=0 for the
+                                    # single most common violation there is — the exact rate the
+                                    # column exists to measure, missing precisely where the reply is
+                                    # already silent. Measured after the fact: the metric read 0
+                                    # while a PATCH had demonstrably gone out.
+                                    repaired = sum(len(self._job_defects(j)) for j in new_jobs)
                                     shape = await asyncio.to_thread(
                                         self._enforce_job_shape, new_jobs, uname)
                                     if shape:
                                         # A repaired creation is still a creation: 'created' stays
                                         # countable and malformation gets its own column, rather
                                         # than a new outcome class that silently shrinks the first.
-                                        repaired = sum(len(self._job_defects(j)) for j in new_jobs)
                                         yield shape
                                     yield self._alert_setup_block(uname)
                                 elif new_jobs is not None and self._changed_jobs(

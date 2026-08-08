@@ -12,9 +12,27 @@
 > fp16 is 28.6 GB, doesn't fit)**, audio (MMAudio/Foley), SeedVR2. Gotchas hit: torch 2.8 needs
 > torchaudio 2.8 (undefined symbol crash) and triton/inductor need **gcc in the container**.
 
-Current baseline: Wan 2.2 T2V A14B GGUF Q4 + Lightning Seko V2.0 (4 steps), 832x480x81f @16fps,
-~166 s/clip on the RTX 3090. All items below were adversarially verified against the actual
-container/stack (22 confirmed, 1 doubtful). Sources in the workflow transcript.
+Baseline as researched 2026-07-18 (superseded — see STATUS above): Wan 2.2 T2V A14B GGUF Q4 +
+Lightning Seko V2.0 (4 steps), 832x480x81f @16fps, ~166 s/clip on the RTX 3090. All items below
+were adversarially verified against the actual container/stack (22 confirmed, 1 doubtful). Sources
+in the workflow transcript.
+
+> **Superseded 2026-08-08.** That line was written before Tier 1 landed and reads present-tense.
+> The engine and the default resolution survive; the LoRA pair, the step count, the saved frame rate
+> and the wall time do not. What the pipe actually runs, measured in `pipes/auto_assistant.py`:
+> the **250928** Lightning pair (`Wan22_T2V_A14B_4step_HIGH_250928.safetensors` and
+> `Wan22_T2V_A14B_4step_LOW_250928.safetensors`, loaded at `:3550-3553` — the `4step` is part of the
+> upstream LoRA's name, not our step count), **6 steps** split 3+3 (`V_STEPS_14B = 6`, `:173`) with
+> the high expert alone on **cfg 3.0 and LoRA 0.8** (`V_HIGH_CFG = 3.0` `:174`,
+> `V_HIGH_LORA = 0.8` `:176`; the low stage stays cfg 1.0), still **832x480x81f** by default
+> (`V_W, V_H = 832, 480` `:168`; `V_LEN_14B = 81` `:171`),
+> **rendered at 16 fps and written at 32 fps** because RIFE 2x runs before the save
+> (`V_RIFE = 2` `:177`; `SaveWEBM fps = float(V_FPS_14B * V_RIFE)` `:3528-3530`), at the
+> **~180 s/clip** the STATUS block records. The Seko V2.0 pair is still on disk in
+> `/volume1/docker/comfyui/models/loras/wan2.2/` alongside the 250928 pair, but no node loads it.
+> Cost of leaving the old line present-tense: an operator tuning quality goes looking for a 4-step
+> config the pipe no longer has, and reads a normal 180 s render as a 14 s regression against a
+> number that stopped being the baseline in July.
 
 ## Tier 1 — free or near-free, do first
 
@@ -50,7 +68,9 @@ container/stack (22 confirmed, 1 doubtful). Sources in the workflow transcript.
    model_management.py). 2.8.0 fixes a 2.7.x cuBLASLt crash. Skip fp8_matrix_mult (Ada/Hopper only).
 9. **torch.compile on both experts** (after #8 + `git pull` ComfyUI-GGUF): +15-30% once warm;
    1-3 min recompile per restart/resolution-change; set TORCHINDUCTOR_CACHE_DIR to a volume.
-   Full stack estimate (1+8+9): 166 s → ~80-100 s at 480p.
+   Full stack estimate (1+8+9): 166 s → ~80-100 s at 480p. (That 166 s is the pre-Tier-1 researched
+   baseline superseded above. #1 and #8 have since shipped and the steady state is 180 s at 2.25× the
+   sampling work, so this projection has not been re-derived against what runs today.)
 10. **SageAttention 2.2 source-compile for sm_86** (needs CUDA toolkit in a build stage): extra
     10-20% over the installed Triton 1.0.6 build; the 8→5 min 720p number is sage 2.2.
 11. **Fix Lightning slow-motion with the 250928-dyno high-noise model** (full distilled model, GGUF
@@ -83,6 +103,24 @@ container/stack (22 confirmed, 1 doubtful). Sources in the workflow transcript.
 
 - Emit progress via `__event_emitter__` in the pipes ("Enhancing prompt… / Sampling 3/6… /
   Interpolating…") instead of a silent spinner for 3-8 minutes.
+  > **Partly done — superseded 2026-08-08.** The silent spinner is gone from the Assistant, Image
+  > and Photoreal pipes, so the bullet's premise is stale, not just its scope.
+  > `pipes/auto_assistant.py:5644`, `pipes/image_krea.py:667` and `pipes/photoreal.py:437` each
+  > define a `_tracked()` wrapper that emits a status line on start, re-emits it every 2 s with a
+  > live elapsed time (`_fmt_dur(time.monotonic() - start)`), then collapses via `_finish()` to a
+  > final line of the form `"<verb> in <duration> · <detail>"` — photoreal's detail names
+  > engine/tier/seed (`photoreal.py:456`). Two pieces are still missing:
+  >
+  > (a) **per-stage granularity**, i.e. the "Sampling 3/6 / Interpolating" part. Nothing reads
+  > per-step progress out of ComfyUI: the job loop polls only `/history/{prompt_id}` for completion
+  > (`auto_assistant.py:3119`), so the status line can report elapsed time but not which sampler
+  > step or node is running.
+  >
+  > (b) **any emitter at all in the Animate pipe.** `pipes/animate_scail.py:173` is
+  > `async def pipe(self, body: dict)` — no `__event_emitter__` parameter, and grep for
+  > `__event_emitter__`, `_status` or `_tracked` in that file returns nothing. An Animate request is
+  > still a literally silent wait: SCAIL_ANIMATE.md:28 measures ~3 min/clip at 448×768, 49 frames,
+  > 8 steps, and for all of it the user sees an unannotated spinner.
 - Keyword controls in the auto pipe: "720p"/"hq" → premium res, "quick video" → 5B fast path,
   "longer" → RIFLEx 121f.
 - Expose V_QUALITY / steps / resolution as OpenWebUI Valves so they're editable in the UI without

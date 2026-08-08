@@ -87,7 +87,9 @@ Per-pipe changes: routing guards (`"make this picture X"` is never a fresh rende
 `?` on an imperative edit and `"have them use chopsticks"` now edit instead of falling to
 chat), `_edit_context` strips injected memory/RAG blocks before truncating, `image_krea` no
 longer buckets chats under a shared `default` cache key and now writes `media_metrics` rows,
-and Photoreal gained the whole follow-up edit path.
+and Photoreal gained the whole follow-up edit path — the path, but not a failure branch for it:
+when recovery finds nothing it still falls through to a fresh t2i (see the behaviour contract and
+Known residuals).
 
 Versions: Assistant **0.6.0**, Image **1.4.0**, Photoreal **0.6.0**.
 
@@ -130,7 +132,32 @@ What a message does when an image is already on the table:
 | "create an image of a dog" / "another one" | Fresh generation, as always |
 | "animate this" / "make a video of it" | Wan 2.2 I2V — motion, not a restyle |
 | "what's in this picture?" / "thanks!" | Chat. No render. |
-| *(no recoverable image)* | Says so, and offers to generate instead of silently rendering the follow-up words |
+| *(no recoverable image)* | **Not uniform across the pipes.** Image says so; the Assistant falls through to chat; Photoreal still renders the follow-up words |
+
+> **Superseded 2026-08-08.** That last row originally read *"Says so, and offers to generate
+> instead of silently rendering the follow-up words"*, unscoped, i.e. as a contract all three pipes
+> honoured. Measured, only one does:
+>
+> - **Image** — `pipes/image_krea.py:715-719`. After its own recovery attempt fails it returns
+>   *"I can't find the picture this refers to — please attach it (or describe a new image and I'll
+>   generate it)."* This is the only such message in the three pipes.
+> - **Assistant** — reaches the same *outcome* by a different route and prints no message.
+>   `_is_image_request` returns False for `\b(this|that|it)\s+(image|picture|photo|pic|drawing|one)\b`
+>   (`pipes/auto_assistant.py:2490-2491`), and with nothing recoverable `img` is None at
+>   `:5846`, so the turn falls through to ordinary chat (`:5859` onward) rather than to a render.
+> - **Photoreal** — has no failure branch. `pipes/photoreal.py:490-491` tries
+>   `find_recent_image(msgs) or recall_image(cid)`; when both return None nothing checks for it,
+>   `editing = ref is not None` is False (`:493`), and `_generate` takes its `else` branch
+>   (`:387-389`), turning the follow-up words into an SDXL text-to-image prompt via `_enhance`.
+>   The only early return with a message (`:477-478`) requires *no text and no ref*, so a text-only
+>   follow-up never reaches it.
+>
+> What that costs on Photoreal: exactly root cause #4 again. "make this picture animated" with the
+> reference unrecoverable renders a fresh photo of the phrase, and because the pipe's SDXL negative
+> still bans `cartoon, anime, drawing, illustration` on the t2i path, the ask is unsatisfiable by
+> construction — the operator sees the original incident, an unrelated realistic stranger, with no
+> hint that recovery failed. No test pins the message for any pipe (`tests/test_continuation.py`
+> has no check for it), so nothing would have caught the divergence.
 
 ## Verified
 
@@ -150,14 +177,32 @@ What a message does when an image is already on the table:
 ## Monitoring
 
 ```bash
-grep -c '### Task' /volume1/docker/openwebui/config/media_metrics.jsonl   # must stay 0
+# '### Task' rows that arrived AFTER the 2026-08-02 fix — must stay 0. Prints 0 on 2026-08-08.
+python3 -c "
+import json
+p='/volume1/docker/openwebui/config/media_metrics.jsonl'
+n=sum(1 for l in open(p) if l.strip() and '### Task' in json.dumps(d:=json.loads(l)) and d.get('ts','')>'2026-08-03')
+print(n)"
 python3 tests/test_continuation.py                                        # 49 checks, no GPU
 ls /volume1/docker/openwebui/config/media_recent/ | wc -l                 # grows as images are made
 ```
 
-A non-zero `### Task` count means the guard regressed and background prompts are burning GPU
-again. An empty `media_recent/` after images have been generated means the sidecar did not
-deploy — `tests/test_deployed.py` catches that directly.
+A non-zero count means the guard regressed and background prompts are burning GPU again. An empty
+`media_recent/` after images have been generated means the sidecar did not deploy —
+`tests/test_deployed.py` catches that directly.
+
+> **Superseded 2026-08-08.** The check above replaces
+> `grep -c '### Task' /volume1/docker/openwebui/config/media_metrics.jsonl   # must stay 0`.
+> That command returns **40** and can never return 0. `media_session.metric()` opens the file in
+> `"a"` mode (`pipes/shared/media_session.py:372-381`) and nothing in the repo prunes it, so the
+> incident rows that prompted this fix are permanent: all 40 are timestamped 2026-07-31T15:16:53Z …
+> 2026-08-02T17:30:23Z — at or before the fix — out of 313 rows whose newest is
+> 2026-08-07T21:27:22Z. Zero `### Task` rows exist after 2026-08-02, so the guard is in fact
+> holding, and the published check reported the opposite of the truth: an operator running it would
+> read a permanent 40-row alarm and go hunting a regression that is not there. The replacement
+> filters by timestamp instead, and skips blank/partial trailing lines so a half-written append
+> cannot make the monitor itself raise. The `2026-08-03` cutoff is the day after the last incident
+> row.
 
 ## Known residuals
 
@@ -167,6 +212,17 @@ deploy — `tests/test_deployed.py` catches that directly.
   keeping the same seed across serial edits, or tightening `VERIFY_EDIT_SYS` to name the
   subject's species explicitly. A follow-up ("make the cat look more like a cat") now works,
   which it did not before.
+- **Photoreal has no "can't find the picture" branch.** When `find_recent_image()` and
+  `recall_image()` both come back empty, `pipes/photoreal.py:490-491` leaves `ref` as None and the
+  turn becomes a fresh SDXL text-to-image of the follow-up words (`:387-389`) — root cause #4
+  reproduced whenever both recovery routes come back empty, i.e. no image anywhere in the visible
+  history *and* no entry under that chat id in the persistent store. Reproduced 2026-08-08 by
+  driving `pipe()` with an unknown `chat_id` and a single `"make this picture animated"` message,
+  `media_session` importable: `_generate` was called with `prompt='make this picture animated'`,
+  `ref_b64=None`, and nothing was printed about the missing reference. Image guards this at
+  `pipes/image_krea.py:715-719`; the fix is that guard mirrored into Photoreal, plus a check in
+  `tests/test_continuation.py`, which currently asserts nothing about the message for any pipe.
+  Not adopted yet.
 - **The server-side half of the task fix is not done.** Giving `gemma3:1b` an active `model`
   row plus an access grant would let Open WebUI route tasks to it natively. The in-pipe guard
   makes this optional; doing both would be belt and braces.

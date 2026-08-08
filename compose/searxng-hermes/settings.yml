@@ -15,9 +15,15 @@
 #     grounded — and tests/test_websearch.py is the only thing that catches it. A test in
 #     tests/test_web_search.py pins that file's sha256 so it can only change deliberately.
 #  4. Engine rate limits are per SOURCE IP, not per container, so an engine on BOTH rosters has
-#     its budget spent by both consumers. The rosters are therefore kept almost disjoint: google,
-#     startpage, brave and qwant are hermes-only, so a monitor can never CAPTCHA an engine that
-#     chat depends on.
+#     its budget spent by both consumers. The rosters are therefore kept almost disjoint: google
+#     and brave are hermes-only, duckduckgo is chat-only.
+#     CORRECTED 2026-08-08 — this used to end "so a monitor can never CAPTCHA an engine that chat
+#     depends on", which is FALSE and was the one sentence anyone would rely on. Measured from the
+#     two rosters: chat runs duckduckgo, bing, mojeek, wikipedia, wikidata; this instance runs
+#     google, brave, mojeek, bing. **bing and mojeek are on BOTH**, and both containers egress from
+#     the same host, so a monitor CAN still burn those two for chat. "Almost disjoint" is the
+#     accurate claim; "never" was not. startpage and qwant were named as hermes-only and are not in
+#     this file's roster at all.
 #
 # Measured constraints this file respects (docs/CAPABILITY_UPGRADE_PLAN.md:427-458):
 #   ~50-60 queries per engine per 10 min CAPTCHA'd google/duckduckgo/startpage/brave together.
