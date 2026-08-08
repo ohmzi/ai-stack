@@ -12,7 +12,12 @@ test in this repo passed against a file the running server had never seen. A gre
 clean `git status` read as "shipped", and it was not.
 
 This test closes that gap: for every installed Function, the DB row must be byte-identical to its
-repo source. It is the one check that fails when the deploy step is skipped.
+repo source, and every `pipes/live/` copy must be byte-identical to the tracked file it came from.
+It is the one check that fails when the deploy step is skipped.
+
+BOTH links, since 2026-08-08. The second one was checked for exactly one pipe before that, which is
+how `pipes/auto_assistant.py` ran 696 lines ahead of its live copy — a whole committed feature the
+server had never seen — while this suite reported 29 checks and ALL PASS. See `twin_pairs()`.
 
 The database is read through a read-only URI while OpenWebUI is live. That is deliberate — a
 `sudo cp` of the main file would miss anything still sitting in the write-ahead log and could report
@@ -51,15 +56,39 @@ SOURCES = {
 # edited a pipe remembered to copy it across — which is the same convention that failed on
 # 2026-07-28 and is the reason this file exists.
 #
-# The shared module has the same shape: pipes cannot import a repo-relative file, so
+# These are the pairs that CANNOT be derived. Pipes cannot import a repo-relative file, so
 # identity_edit.py is copied into OpenWebUI's data volume and imported from there. If that
 # copy drifts, photoreal.py silently falls back to the old drifting SDXL path — it is written
 # to degrade rather than crash, which means nothing would surface it except this check.
-TWINS = {
-    "pipes/photoreal.py": "pipes/live/photoreal.py",
+EXTRA_TWINS = {
     "pipes/shared/identity_edit.py": "/volume1/docker/openwebui/config/identity_edit.py",
     "pipes/shared/media_session.py": "/volume1/docker/openwebui/config/media_session.py",
 }
+
+LIVE_PREFIX = "pipes/live/"
+
+
+def twin_pairs():
+    """{tracked source: deployed copy}, DERIVED from SOURCES rather than hand-listed.
+
+    Listing them was itself the gap. Until 2026-08-08 exactly one pipe pair was written down —
+    `pipes/photoreal.py` — so four of the five pipes had no repo-vs-live check at all, and the one
+    under heaviest development was among them. `pipes/auto_assistant.py` sat **696 lines ahead** of
+    its live copy through the whole flight-path commit while this suite reported 29/29 green,
+    because the DB row matched `pipes/live/` faithfully and nothing compared `pipes/live/` to the
+    tracked source. The deploy step being skipped is the one failure this file exists to catch, and
+    it caught it for one pipe out of five.
+
+    A second map a human has to remember is the same shape as the convention that failed on
+    2026-07-28. So the rule is mechanical instead: every SOURCES entry that points into
+    `pipes/live/` has a tracked twin at the same basename one directory up, and adding a pipe to
+    SOURCES now gets it checked with nothing else to update.
+    """
+    pairs = dict(EXTRA_TWINS)
+    for rel in SOURCES.values():
+        if rel.startswith(LIVE_PREFIX):
+            pairs.setdefault("pipes/" + rel[len(LIVE_PREFIX):], rel)
+    return pairs
 
 results = []
 
@@ -197,10 +226,15 @@ def main():
             print(f"  [ .. ] {rel} has no installed function called {fid!r} — not deployed")
 
     print("\n  tracked source → deployed copy")
-    for tracked, twin in TWINS.items():
+    for tracked, twin in sorted(twin_pairs().items()):
         tpath = os.path.join(ROOT, tracked)
         wpath = twin if os.path.isabs(twin) else os.path.join(ROOT, twin)
         if not os.path.exists(tpath):
+            # Said out loud rather than skipped. A deployed copy with no tracked source is code
+            # running on the box that git does not have — the same thing the unmapped-function
+            # branch above reports, and for the same reason. Not a failure: a pair can be listed
+            # before its source lands.
+            print(f"  [ .. ] {twin} has no tracked source at {tracked} — nothing in git to compare")
             continue
         tsrc = open(tpath).read()
         if not os.path.exists(wpath):

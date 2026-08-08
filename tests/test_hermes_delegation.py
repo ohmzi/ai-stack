@@ -119,8 +119,14 @@ def sse(text):
 
 
 def job(jid, sched="every 5m", enabled=True, state="active", repeat=None):
+    """A WELL-FORMED job record. deliver and prompt are here on purpose: the creation path now also
+    checks the shape of what the agent made (_enforce_job_shape), and a fixture missing those two
+    fields would make every scenario below a malformed-job scenario, burying the verdict each one is
+    actually about. Shape is exercised deliberately, further down, and exhaustively in
+    tests/test_job_shape.py."""
     return {"id": jid, "schedule_display": sched, "enabled": enabled,
-            "state": state, "repeat": repeat}
+            "state": state, "repeat": repeat, "deliver": "local",
+            "prompt": "Fetch the page and extract the price.\nLOG: <summary>"}
 
 
 OWNERS_DIR = tempfile.mkdtemp()
@@ -155,6 +161,16 @@ def drive(reply, snapshots, verify=True, status=200, brief=None, exc=None, post_
 
     p._hermes_jobs = fake_jobs
     p._hermes_key = lambda: "test-key"
+    # _enforce_job_shape PATCHes through the REAL _hermes_api, and _hermes_key above is stubbed —
+    # so without this every creation scenario would fire live HTTP at 127.0.0.1:8642 and try to
+    # repair job ids like "a". A test must never reach the running gateway.
+    drive.api = []
+
+    def fake_api(method, path, body=None, timeout=10):
+        drive.api.append((method, path, body))
+        return (200, {}, None)
+
+    p._hermes_api = fake_api
     drive.metrics = []
     p._metric = lambda **f: drive.metrics.append(f)
     p._alert_setup_block = lambda uname: "\n<alert-setup>"
@@ -213,6 +229,29 @@ def main():
           repr(drive.metrics)[:200])
     check("...and says nothing about it in the reply", "Verified scheduled" not in out, out[-160:])
     check("...but still shows how alerts will reach the user", "<alert-setup>" in out, out[-160:])
+    check("a well-formed creation is not PATCHed at all", drive.api == [], repr(drive.api)[:200])
+    check("...and reports no defects in the metrics",
+          all(m.get("repaired", 0) == 0 for m in drive.metrics), repr(drive.metrics)[:200])
+
+    # Shape enforcement, end to end through the stream. Exhaustive coverage is in
+    # tests/test_job_shape.py; what this pins is that the creation path REACHES it — on 2026-08-07
+    # the agent created two jobs that verified as existing and could never deliver.
+    malformed = job("bad")
+    malformed["deliver"] = "origin"
+    malformed["prompt"] = "Check flights to Astana.</parameter>\n<parameter=deliver>\norigin"
+    out = drive("scheduled it", [before, {**before, "bad": malformed}])
+    check("a malformed creation is repaired in one PATCH to that job",
+          [c[:2] for c in drive.api] == [("PATCH", "/api/jobs/bad")], repr(drive.api)[:200])
+    check("...fixing delivery and the prompt together",
+          set(drive.api[0][2]) == {"deliver", "prompt"}, repr(drive.api[0][2])[:160])
+    check("...telling the reader the prompt was rewritten", "Repaired job `bad`" in out, out[-300:])
+    check("...but not narrating the delivery rewire", "`local`" not in out, out[-300:])
+    check("...counted on the metric row so the rate is measurable",
+          any(m.get("repaired") == 3 for m in drive.metrics), repr(drive.metrics)[:200])
+    check("...and it is still a creation, not a new outcome class",
+          any(m.get("outcome") == "created" for m in drive.metrics), repr(drive.metrics)[:200])
+    check("...with the alert-setup block still shown after it", "<alert-setup>" in out, out[-200:])
+
     out = drive("made two", [before, {**before, "n1": job("n1"), "n2": job("n2")}])
     check("more jobs than the agent described IS worth saying", "2 tasks were created" in out,
           out[-200:])

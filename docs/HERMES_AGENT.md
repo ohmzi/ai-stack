@@ -282,6 +282,70 @@ Making this work at all would need a headless browser reading one specific itine
 `python3` is the hermes venv 3.11, where the import fails. Anything built here must spell the
 interpreter out.
 
+### The brief is checked, not just stated (2026-08-08)
+
+`_HERMES_BRIEF` is instructions to a 20B local model, and on 2026-08-07 it broke three of them in
+one job. Two flight jobs — `676e970c59ad` and `4df0ab5bed14`, both created from the same ask — went
+to the scheduler with:
+
+- **`deliver: origin`** instead of the `local` rule 5 demands. The only origin on this host is the
+  api_server, which has no push channel, so every run ended in
+  `Adapter send failed: API server uses HTTP request/response, not send()`. Worth knowing *why* rule 5
+  shouts about this: an **omitted** `deliver` does not default to `local` — hermes defaults it to
+  "origin-or-local" (`tools/cronjob_tools.py:316`), which on an api_server session resolves to
+  `origin`. The broken value is what you get for free, so the brief is the only thing standing
+  between a forgotten parameter and a job that delivers nowhere.
+- **no `LOG:` instruction** anywhere in the prompt, so `hermes_delivery.py` correctly refused to read
+  the prose as a measurement and posted `⚠️ RUN DID NOT FOLLOW THE OUTPUT PROTOCOL` three times.
+- **the model's own tool-call framing stored as part of the prompt** — the two jobs closed with
+  *different* tags (`</prompt>` and `</parameter>`), then `<parameter=deliver>` and `origin` on the
+  lines after, replayed on every run:
+
+```
+...report the cheapest option regardless.</parameter>
+<parameter=deliver>
+origin
+```
+
+The agent also hand-rolled a scraper against Google Flights, Skyscanner and Expedia in defiance of
+rules 6b and 5d-ii, pulled 1.8 MB of HTML into a 64 K context, and ran **6 m 59 s** per tick — against
+**11 s** for the vetted `price_watch.py` job `52f821a8d3a2` on the same host. Its "final response" was
+mid-thought narration (*"Let me write a clean, well-structured script directly with write_file"*)
+because it ran out of room before finishing. One earlier run died on
+`HTTP 400: Cannot have 2 or more assistant messages at the end of the list`.
+
+The delegation verifier already catches a job the agent *claimed* but never created. It had nothing to
+say about a job that exists and cannot work. So `_job_defects` / `_job_patch` / `_enforce_job_shape`
+(the pipe) now check the created record before its first run and repair it in one PATCH.
+
+**What it says, and what it doesn't.** The two prompt defects speak, because they change the text of
+the job the user asked for and a rewrite they cannot see is one they cannot correct. Rewiring
+`deliver` back to `local` is **silent** — it is a host default the brief has to fight rather than
+something the agent authored, it will need repairing on a good fraction of all creations, and
+announcing it every time is the pipe narrating its own internals. A repair that *fails* always
+speaks, whatever its code, and quotes hermes's own reason. The `repaired` count on the `hermes`
+metric row counts every defect either way, so silence never costs visibility.
+
+**Only three checks, and the boundary is the point.** Each is decidable from the stored record with
+no opinion, and each had already shipped a broken job. Whether *"every 6 hours, forever"* is the
+duration the user asked for is a judgement, and a validator that guessed would be the fabrication it
+exists to prevent — that one is reported in the reply and left alone.
+
+Repairs are mechanical only:
+
+- Markup is cut at its first character, **before** the protocol block is appended — the other order
+  appends past the cut and then deletes it. Order is load-bearing and pinned by a test.
+- A **vetted-extractor job is never appended to.** Its whole prompt is *"print this command's output
+  verbatim, add nothing"*; appending a protocol block would make the run add something.
+- A prompt that is **nothing but markup** is reported, not truncated to a stub. A scheduled job doing
+  something arbitrary is worse than one flagged for the user to cancel.
+- A PATCH that does not land can never read as one that did — the whole attempt folds into the
+  unrepairable list and quotes hermes's own reason.
+
+Covered by `tests/test_job_shape.py` (91 checks, stubbed scheduler), which pins the real 2026-08-07
+job record verbatim rather than a paraphrase of it. The `hermes` metric row carries a `repaired`
+count, so how often the model ignores its brief is now measurable instead of anecdotal.
+
 ### The sending account, and the prefix you cannot remove
 
 Every text arrives with the sending address written in front of it:

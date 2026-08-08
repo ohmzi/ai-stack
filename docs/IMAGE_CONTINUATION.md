@@ -70,7 +70,7 @@ that swapped the subjects entirely still satisfied its own instruction, so it pa
 
 New shared module **`pipes/shared/media_session.py`**, deployed to
 `/app/backend/data/media_session.py` by `scripts/deploy_pipe.py` (`SIDECARS`) and drift-checked
-by `tests/test_deployed.py` (`TWINS`). Every pipe imports it under try/except and degrades to
+by `tests/test_deployed.py` (`EXTRA_TWINS`). Every pipe imports it under try/except and degrades to
 its previous behaviour if the copy is missing.
 
 | Piece | What it does |

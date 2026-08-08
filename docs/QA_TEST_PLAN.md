@@ -167,6 +167,13 @@ python3 tests/test_deployed.py
 compares the SHA of each installed Function against its repo source and fails on any mismatch. Run it
 before believing a fix is live.
 
+It checks **both** links of the chain — tracked source → `pipes/live/` copy → DB row — because
+`pipes/live/` is gitignored and the second hop is a human remembering to copy a file across. Only one
+pipe pair was written down until 2026-08-08, so `pipes/auto_assistant.py` sat 696 lines ahead of its
+live copy — an entire committed feature the server had never seen — while this suite reported ALL PASS.
+The pairs are now **derived** from the same `SOURCES` map the DB check uses, so a new pipe cannot be
+half-covered: there is no second list to forget.
+
 ### 1.6 Measuring the media pipeline instead of arguing about it
 
 `_metric()` in the pipe appends one JSON line per finished media job — render seconds, QA seconds,
@@ -267,7 +274,7 @@ Some checks are standalone harnesses rather than `cases.json` cases:
 |---|---|
 | `tests/test_websearch.py` | Live SearXNG round trip, grounded answer, `[id]` citations preserved |
 | `tests/test_gpu_diagnosis.py` | A revoked GPU is reported as such, not as a wedged allocator (see `TROUBLESHOOTING.md`) |
-| `tests/test_deployed.py` | **OpenWebUI is running the code in this repo** — pipes *and* the shared sidecar modules (`identity_edit`, `media_session`) — see below |
+| `tests/test_deployed.py` | **OpenWebUI is running the code in this repo** — both links of the chain (tracked source → `pipes/live/` copy → DB row) for every pipe, *and* the shared sidecar modules (`identity_edit`, `media_session`). The twin pairs are derived from `SOURCES`, after a hand-written list covered one pipe out of five — see below |
 | `tests/test_continuation.py` | The follow-up-after-an-image contract (49 checks, no GPU): `### Task:`/`__task__` detection and that `pipe()` short-circuits on it in all three image pipes; reference recovery across every message shape OpenWebUI 0.10 sends (str content, list parts, and the `output` field a pipe reply actually lands in); the persistent per-chat store; style-conversion detection and its subject-agnostic instruction; and the routing guards — `"make this picture realistic"` is never a fresh render, `"can you make it brighter?"` and `"have them use chopsticks"` edit rather than falling to chat |
 | `tests/test_alert_templates.py` | Every alert kind renders a real sentence inside the SMS budget; degenerate payloads still deliver; page titles cannot inject markup |
 | `tests/test_alert_setup.py` | The alert setup gate: phone asked for before scheduling, parked request survives the turn, E.164 rule identical on both sides of the container boundary |
@@ -276,13 +283,14 @@ Some checks are standalone harnesses rather than `cases.json` cases:
 | `tests/test_web_search.py` | The background-monitor search layer: one call carrying only `q`+`format=json`, dead engines beside live results are not an outage, score-sorted deduped ranking, the snippet firewall, the engine scoreboard, and `compose/searxng/settings.yml` pinned by sha256 so chat's roster cannot change by accident |
 | `tests/test_retrieval_quality.py` | Which sources survive `rag.relevance_threshold`, scored on real stored chunks |
 | `tests/test_bgtask_intent.py` | Background-task requests reach hermes-agent; ordinary conversation never does (default-deny) |
-| `tests/test_hermes_delegation.py` | What the pipe *concludes* after delegating: all six verification verdicts checked against a stubbed scheduler — creation, update, pointed-at-active, pointed-at-finished, fabrication, unreachable. The guard that exists because the agent has claimed jobs it never created |
+| `tests/test_hermes_delegation.py` | What the pipe *concludes* after delegating: all six verification verdicts checked against a stubbed scheduler — creation, update, pointed-at-active, pointed-at-finished, fabrication, unreachable. The guard that exists because the agent has claimed jobs it never created. Also that the creation path *reaches* shape enforcement — a malformed job is PATCHed once and reported, a well-formed one is not touched — and that no scenario fires live HTTP at the running gateway |
 | `tests/test_memory_routing.py` | Adaptive Memory reaches the model but never the router: the `"User Memories ("` anchor is identical in the vendored filter and the pipe, and neither synthetic nor the box's real stored memories can steer routing |
 | `tests/test_gpuguard.py` | Hermes cron defers while ComfyUI renders **or** a non-cron big model is resident in Ollama; small helpers and our own warm tag never defer; both starvation-escape tiers; fails open on either probe (see `HERMES_AGENT.md`) |
 | `tests/test_hermes_delivery.py` | LOG/ALERT parsing contract: prompt-section lines ignored, missing LOG falls back visibly, recipients validated, alert flood capped |
 | `tests/test_alert_transports.py` | SMS/email transports: E.164 refused locally, resolution precedence, partial-success semantics, Twilio request shape (all offline) |
 | `tests/test_price_search.py` | The no-URL discovery path: one search per monitor lifetime, cooldown and roster-outage backoff, scored picking, accessory penalties — and that a fare is refused with **no search spent and no number ever emitted**, now naming the missing itinerary rather than claiming a fare cannot be watched. *(Was missing from this table; the suite predates the omission.)* |
 | `tests/test_flight_intent.py` | Flight routing and slot parsing, 115 checks, injected clock: 34 phrasings that must reach the flight path (7 of 8 previously reached the chat model, which invents fares) and 38 that must not, each negative naming the deny arm it exercises; positional origin/destination resolution (`from A to B`, bare `A to B`, IATA pairs) after fragment matching got it wrong twice; the Dec→Jan year rollover; season and named-holiday asks that must ASK rather than guess; and that the Google Flights link is built from slots, never typed by a model |
+| `tests/test_job_shape.py` | The three parts of `_HERMES_BRIEF` a machine can hold the agent to, checked on the job record it just created (97 checks, stubbed scheduler): `deliver` is exactly `local`, the prompt carries a `LOG:` instruction, and the prompt is free of leaked tool-call markup — all three pinned against the job hermes actually stored on 2026-08-07, and the markup arm carries seven prose negatives (`<price>`, `x < parameter y`) so a job that merely discusses markup is never truncated. Repairs are mechanical only: markup is cut before the protocol block is appended (order is load-bearing), a vetted-extractor job is never appended to, a prompt that is *only* markup is reported rather than truncated to a stub, a delivery rewire is silent but a failed one always speaks, and a PATCH that does not land can never read as one that did |
 | `tests/test_flight_probe.py` | Harness for `scripts/flight_probe.py --selftest` (62 checks): the pure `verdict()` decision table over recorded measurements, the five 2026-08-07 misclassifications pinned by mechanism, a wall vocabulary deliberately broader than `pw.fetch`'s <20 KB sniff, `parse_keep_only`'s inline-comment trap, and the browser-tier learning order |
 | `tests/test_flight_watch.py` | Harness for `scripts/flight_watch.py --selftest` (73 checks): the four-rung date-flex ladder, the tuple rule (a month-mode fare is invalid without its own dates), owner-independent quorum, `date_basis` confidence ceilings, dot-free SMS labels, and that rung 4 cannot say "cheapest" |
 

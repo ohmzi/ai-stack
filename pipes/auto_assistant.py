@@ -4856,6 +4856,153 @@ class Pipe:
         return (j.get("enabled", True)
                 and (j.get("state") or "").lower() != "completed")
 
+    # ---------------------------------------------------------------- job shape enforcement
+    #
+    # _HERMES_BRIEF is instructions to a 20B local model, and on 2026-08-07 it ignored three of them
+    # at once. Two flight jobs (676e970c59ad, 4df0ab5bed14) were created with deliver='origin' —
+    # whose only origin on this host is the api_server, which has no push channel, so EVERY run
+    # ended in "Adapter send failed: API server uses HTTP request/response, not send()". Neither
+    # prompt asked for a LOG line, so hermes_delivery.py correctly posted them as unverified model
+    # output. And both prompts ended in the model's own tool-call framing, stored verbatim:
+    #
+    #     ...report the cheapest option regardless.</parameter>
+    #     <parameter=deliver>
+    #     origin
+    #
+    # Every one of those three is decidable from the stored record without an opinion, and each had
+    # already shipped. So they stop being advice and become a check — the same move
+    # _hermes_stream's creation verifier already makes against an agent that claims jobs it never
+    # created. What is NOT here is anything needing judgement about what the user meant: whether
+    # 'every 6 hours, forever' is the duration they asked for is not a machine's call, and a
+    # validator that guesses would be the failure it exists to prevent.
+
+    # Tool-call syntax that must never appear inside a stored prompt. Deliberately NARROW — only
+    # unambiguous framing tokens, each requiring a literal '<'. Generic tags (<name>, <price>) are
+    # excluded on purpose: a job that legitimately discusses markup must not be truncated
+    # mid-instruction. The two live cases closed with DIFFERENT tags (</prompt> and </parameter>),
+    # which is why this matches a family rather than one string.
+    _JOB_MARKUP_RE = re.compile(
+        r"</?(?:antml:)?(?:parameter|function|invoke|tool_call|tool_use)[=\s>]|</prompt>", re.I)
+    # The vetted extractors print the protocol lines themselves (brief rules 5d / 5d-ii / 5d-iii),
+    # so a job whose prompt is one of those commands needs no LOG instruction of its own and must
+    # not have one appended — its whole contract is "print this command's output verbatim, add
+    # nothing", and appending would make the run add something.
+    _JOB_VETTED_RE = re.compile(r"\bprice_(?:watch|search)\.py\b")
+    _JOB_PROTOCOL_TAIL = (
+        "\n\nFinish your response with these lines, exactly this shape:\n"
+        "LOG: <one-line summary of this run, leading with the key number>\n"
+        "ALERT({who}): <what happened, with the number>   (ONLY when the condition above holds)\n"
+        "Your response must contain NOTHING ELSE — no commentary, no tables, and never a number you "
+        "did not read from the page with code. If extraction failed, say exactly that in the LOG line."
+    )
+    _JOB_PROMPT_MAX = 5000       # hermes api_server._MAX_PROMPT_LENGTH; a PATCH past it is a 400
+    _JOB_PROMPT_MIN = 24         # below this there is no instruction left to keep
+    # Repaired without saying so. `deliver` is here because an OMITTED deliver defaults to
+    # "origin-or-local" in hermes (tools/cronjob_tools.py:316), and on an api_server session that
+    # resolves to origin — so this is a host-level default the brief has to fight, not something the
+    # agent authored, and it will need repairing on a good fraction of all creations. Announcing it
+    # every time is the pipe narrating its own internals, which the verifier above deliberately
+    # refuses to do. The `repaired` metric still counts it, so the rate stays measurable.
+    #
+    # The prompt defects are NOT here: those change the text of the job the user asked for, and a
+    # rewrite the user cannot see is a rewrite they cannot correct. A repair that FAILS always
+    # speaks, whatever its code — silence about undelivered alerts is the failure this whole
+    # delivery path exists to prevent.
+    _JOB_SILENT_FIX = {"deliver"}
+
+    @classmethod
+    def _job_defects(cls, job):
+        """[(code, what is wrong, what it costs)] for one job record. Empty when well-formed."""
+        out = []
+        deliver = str(job.get("deliver") or "").strip()
+        if deliver != "local":
+            out.append(("deliver", f"delivery was `{deliver or '(unset)'}`, not `local`",
+                        "its results reach nobody — every run ends in a delivery error"))
+        prompt = job.get("prompt") or ""
+        # ORDER IS LOAD-BEARING: markup before protocol. _job_patch cuts at the first markup match,
+        # so appending the protocol tail first would append it past the cut and then delete it.
+        if cls._JOB_MARKUP_RE.search(prompt):
+            out.append(("markup", "the prompt carried leaked tool-call markup",
+                        "every run replays it as if it were part of the instruction"))
+        if "LOG:" not in prompt and not cls._JOB_VETTED_RE.search(prompt):
+            out.append(("protocol", "the prompt never asks for a `LOG:` line",
+                        "every run posts as unverified model output instead of a measurement"))
+        return out
+
+    @classmethod
+    def _job_patch(cls, job, uname):
+        """(PATCH body, repaired defects, unrepairable defects) for one job.
+
+        Repair is only ever MECHANICAL: set a field to the one value the brief allows, cut markup at
+        its first character, append a fixed block. Nothing here rewrites what the job *does* — a
+        prompt this pipe authored would be the pipe guessing at an itinerary or a threshold, which
+        is the exact fabrication the flight path (:1728) exists to refuse.
+        """
+        defects = cls._job_defects(job)
+        original = job.get("prompt") or ""
+        prompt = original
+        fixed, stuck, dead = [], [], False
+        for defect in defects:
+            code = defect[0]
+            if code == "markup":
+                body = prompt[:cls._JOB_MARKUP_RE.search(prompt).start()].rstrip()
+                # A prompt that is ONLY markup has no job left in it. Truncating to near-nothing
+                # would leave a scheduled job that runs and does something arbitrary — worse than
+                # one flagged for the user to cancel.
+                if len(body) < cls._JOB_PROMPT_MIN:
+                    dead = True
+                    break
+                prompt = body
+                fixed.append(defect)
+            elif code == "protocol":
+                tail = cls._JOB_PROTOCOL_TAIL.format(who=uname)
+                if len(prompt) + len(tail) > cls._JOB_PROMPT_MAX:
+                    stuck.append(defect)
+                else:
+                    prompt += tail
+                    fixed.append(defect)
+            else:
+                fixed.append(defect)
+        if dead:
+            # Half-fixing a job we are about to tell the user to cancel is worse than not touching
+            # it: it writes a prompt nobody authored to a job nobody wants. Report all of it.
+            return {}, [], defects
+        patch = {"deliver": "local"} if any(d[0] == "deliver" for d in fixed) else {}
+        if prompt != original:
+            patch["prompt"] = prompt
+        return patch, fixed, stuck
+
+    def _enforce_job_shape(self, jobs, uname):
+        """Repair what just-created jobs got wrong, and report whatever could not be repaired.
+
+        Returns user-facing text, or "" when every job was already well-formed — silence on a clean
+        creation is the same discipline the verifier above keeps: speak only when this check
+        DISAGREES with the agent. Blocking (urllib via _hermes_api); callers wrap it in a thread.
+        """
+        lines = []
+        for job in jobs:
+            jid = job.get("id") or "?"
+            patch, fixed, stuck = self._job_patch(job, uname)
+            if patch:
+                status, data, err = self._hermes_api("PATCH", f"/api/jobs/{jid}", patch)
+                if err:
+                    # A repair that did not land must never read as one that did. Fold the whole
+                    # attempt into the unrepairable list and name the transport failure.
+                    reason = self._api_err_text(data) or err
+                    stuck = stuck + [(c, w, f"{cost} (repair failed: {reason})")
+                                     for c, w, cost in fixed]
+                    fixed = []
+            said = [d for d in fixed if d[0] not in self._JOB_SILENT_FIX]
+            if said:
+                lines.append(f"🔧 **Repaired job `{jid}` before its first run** — "
+                             + "; ".join(w for _, w, _ in said)
+                             + ". Confirmed against the scheduler, not the agent's word.")
+            if stuck:
+                lines.append(f"⚠️ **Job `{jid}` was created malformed and I could not fix it** — "
+                             + "; ".join(f"{w}, so {cost}" for _, w, cost in stuck)
+                             + f". Say *cancel {jid}* to remove it.")
+        return ("\n\n" + "\n\n".join(lines)) if lines else ""
+
     @staticmethod
     def _alert_username(user):
         """OpenWebUI identity -> a short stable handle for addressing alerts. Transport-neutral:
@@ -4948,6 +5095,7 @@ class Pipe:
         # rather than as a missing row.
         outcome = "incomplete"
         stamped = 0
+        repaired = 0        # brief violations found in what the agent just created (:4863)
         t0 = time.monotonic()
 
         def _attribute(snapshot, src_hint="diff"):
@@ -5019,6 +5167,20 @@ class Pipe:
                                         # Except this: more jobs exist than the agent described.
                                         yield (f"\n\nℹ️ Note: {len(new_jobs)} tasks were created, "
                                                f"not one. Say *list my tasks* to see them.")
+                                    # Verified-to-exist is not verified-to-work. The agent has
+                                    # created jobs that could never deliver and whose prompts
+                                    # carried its own tool-call markup (:4863). Hold the record to
+                                    # the three parts of the brief a machine can check, before the
+                                    # first run rather than after it. to_thread per _hermes_api's
+                                    # contract — this pipe serves every other chat on the box.
+                                    shape = await asyncio.to_thread(
+                                        self._enforce_job_shape, new_jobs, uname)
+                                    if shape:
+                                        # A repaired creation is still a creation: 'created' stays
+                                        # countable and malformation gets its own column, rather
+                                        # than a new outcome class that silently shrinks the first.
+                                        repaired = sum(len(self._job_defects(j)) for j in new_jobs)
+                                        yield shape
                                     yield self._alert_setup_block(uname)
                                 elif new_jobs is not None and self._changed_jobs(
                                         before, after, owner=uname if scoped else None,
@@ -5142,7 +5304,7 @@ class Pipe:
             # why attribution happens above rather than in this block — a job created by a turn the
             # user walked away from stays unowned until an admin assigns it.
             self._metric(job="hermes", outcome=outcome, verify=bool(verify_creation),
-                         scoped=bool(scoped), stamped=stamped,
+                         scoped=bool(scoped), stamped=stamped, repaired=repaired,
                          duration_s=round(time.monotonic() - t0, 1))
 
     def _sampling(self, guard_text):
