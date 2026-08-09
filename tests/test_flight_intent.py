@@ -460,9 +460,57 @@ def main():
     check("it asks a direct question about the alert",
           "Do you still want a price alert set up?" in ans, ans[-500:])
     check("...and says what answering yes will get them",
-          "Say **yes**" in ans and "two steps" in ans, ans[-500:])
+          "- **yes**" in ans and "two steps" in ans, ans[-700:])
+    check("...and offers the job as a second option, with its cost in the same breath",
+          "- **schedule it anyway**" in ans and "cannot read a fare" in ans, ans[-700:])
     check("the itinerary link is still handed over unprompted",
           "google.com/travel/flights" in ans)
+
+    # The user asked for the job four times. The refusal was right about the FACT (0 of 19 readable)
+    # and wrong about whose call it is, so "schedule it anyway" builds one — on flight_watch.py,
+    # which takes an itinerary, never on price_search, which has nowhere to put one.
+    print("\n--- 'schedule it anyway' builds the job, deterministically ---")
+    check("the cadence becomes the schedule the user asked for, not a guess",
+          P._fl_schedule("every 15 mins next 2 hours") == ("every 15m", 8, False),
+          P._fl_schedule("every 15 mins next 2 hours"))
+    for cad, want in [("every 6 hours for the next 3 days", ("every 6h", 12)),
+                      ("every 2h next 12 hours", ("every 2h", 6)),
+                      ("every 1 day", ("every 1d", 28)),
+                      ("hourly", ("every 1h", 168)), ("daily", ("every 1d", 7))]:
+        got = P._fl_schedule(cad)
+        check(f"cadence {cad!r} -> {want}", got[:2] == want, got)
+    check("no cadence falls back, and SAYS it fell back",
+          P._fl_schedule(None) == ("every 6h", 28, True))
+
+    cmd = p._fl_watch_cmd(S, "ohmzaiowui", "YTO→YVR fare watch", "every 15m")
+    check("the command is flight_watch, never price_search",
+          "flight_watch.py" in cmd and "price_search" not in cmd, cmd)
+    check("...and it carries the itinerary as real flags",
+          "--depart-month 2026-10" in cmd and "--return-month 2026-11" in cmd, cmd)
+    check("...the ceiling too", "--below 1000" in cmd, cmd)
+    check("...with every spaced value quoted, so argparse accepts it",
+          P._job_stray_args(cmd)[0] == [], P._job_stray_args(cmd))
+    check("...and it passes the pipe's own job-shape check",
+          [d[0] for d in P._job_defects({"prompt": cmd, "deliver": "local"})] == [],
+          [d[0] for d in P._job_defects({"prompt": cmd, "deliver": "local"})])
+    check("a one-way carries --one-way and no return",
+          "--one-way" in p._fl_watch_cmd(dict(S, one_way=True, ret=None), "u", "n", "every 6h"))
+
+    # The offer and the creation must not disagree: the answer quotes a schedule before the job
+    # exists, so both read the same function.
+    _q2 = P.__new__(P); _q2._flight_draft = {}; _q2._route_metric = lambda *a, **k: None
+    ans2 = drain(_q2._flight_turn("z", TURN1, [], resume=False))
+    check("the offer quotes the schedule the builder would actually use",
+          "every 15m" in ans2 and "8 runs" in ans2, ans2[-700:])
+    check("...and names what every run will report",
+          "cannot read a fare" in ans2, ans2[-700:])
+
+    # Routing: "anyway" must beat the plain affirmative, since "yes, schedule it anyway" has both.
+    for t in ("schedule it anyway", "yes schedule it anyway", "create the job", "do it anyway",
+              "just do it", "set it up regardless"):
+        check(f"routed to the builder: {t!r}", bool(P._FL_ANYWAY.search(t)), t)
+    for t in ("yes", "ok do it", "set the alert", "yes please"):
+        check(f"...and a plain yes still is not: {t!r}", not P._FL_ANYWAY.search(t), t)
 
     print("\n--- ...while a correction still re-answers and moving on still routes normally ---")
     for reply, want in [("actually make it december", "December"),

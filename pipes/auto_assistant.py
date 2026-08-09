@@ -1848,7 +1848,149 @@ class Pipe:
         r"(?:up\b|alert|watch|monitor|tracker)"
         r"|\b(?:track|watch|monitor)\s+(?:it|this|that)\b", re.I)
 
-    def _flight_after_answer(self, text, s, cid):
+    # "Build it anyway." Checked BEFORE the plain affirmative, because "yes, schedule it anyway"
+    # contains both and the more specific reading is the one the user typed.
+    _FL_ANYWAY = re.compile(r"\banyway\b|\bregardless\b|\beven\s+(?:so|if|though)\b"
+                            r"|\b(?:create|make|schedule|build|set\s+up)\s+(?:me\s+)?"
+                            r"(?:the|a|it)?\s*(?:hermes\s+)?(?:cron\s+)?job\b"
+                            r"|\bjust\s+(?:do|make|create|schedule)\s+it\b", re.I)
+    _FL_UNIT_MIN = {"m": 1, "min": 1, "mins": 1, "minute": 1, "minutes": 1,
+                    "h": 60, "hr": 60, "hrs": 60, "hour": 60, "hours": 60,
+                    "d": 1440, "day": 1440, "days": 1440, "w": 10080, "week": 10080, "weeks": 10080}
+    _FL_CAD_PARTS = re.compile(r"every\s+(\d{1,4})\s*([a-z]+)"
+                               r"(?:\s*,?\s*(?:for\s+|over\s+)?(?:the\s+)?(?:next\s+)"
+                               r"(\d{1,3})\s*([a-z]+))?", re.I)
+
+    @classmethod
+    def _fl_schedule(cls, cadence):
+        """('every 15m', 8) for "every 15 mins next 2 hours", or the default when none was given.
+
+        Deterministic, and that is the whole point: the ONE time a schedule was left to the agent it
+        read "every 15 mins next 2 hours" as every 1440m for 7 days (job e6df1739a275). The user's
+        own words are already parsed here, so nothing needs to infer them again.
+        """
+        # _FL_CADENCE captures these, so _fl_schedule has to understand them or the confirmation
+        # says "hourly" and the job runs six-hourly — the same class of mismatch this exists to fix.
+        word = {"hourly": ("every 1h", 168), "daily": ("every 1d", 7),
+                "weekly": ("every 7d", 4), "twice a day": ("every 12h", 14)}.get(
+            re.sub(r"\s+", " ", (cadence or "").strip().lower()))
+        if word:
+            return word[0], word[1], False
+        m = cls._FL_CAD_PARTS.search(cadence or "")
+        if not m:
+            # No cadence given. 6-hourly for a week, matching the brief's own default for price
+            # checks, and stated in the confirmation so one word corrects it.
+            return "every 6h", 28, True
+        n, unit = int(m.group(1)), (m.group(2) or "").lower()
+        per = cls._FL_UNIT_MIN.get(unit)
+        if not per or n < 1:
+            return "every 6h", 28, True
+        mins = max(1, n * per)
+        sched = (f"every {mins}m" if mins < 60 else
+                 f"every {mins // 60}h" if mins < 1440 and mins % 60 == 0 else
+                 f"every {mins // 1440}d" if mins % 1440 == 0 else f"every {mins}m")
+        repeat = None
+        if m.group(3) and m.group(4):
+            bound = int(m.group(3)) * (cls._FL_UNIT_MIN.get((m.group(4) or "").lower()) or 0)
+            if bound:
+                repeat = max(1, bound // mins)
+        return sched, (repeat if repeat else 28), False
+
+    def _fl_watch_cmd(self, s, handle, name, sched):
+        """The flight_watch command for this itinerary. Every value comes from the parsed slots.
+
+        No model touches this string. That is not a style preference — the two fare jobs an agent
+        authored for this user carried no dates at all and a --monitor whose spaces broke argparse.
+        """
+        import shlex
+        o, d = s["origin"][0], s["dest"][0]
+        dep, ret = s.get("depart") or {}, s.get("ret") or {}
+        args = ["--origin", o, "--dest", d]
+        if dep.get("kind") == "exact":
+            args += ["--depart", dep["date"]]
+        elif dep.get("kind") == "month":
+            args += ["--depart-month", dep["month"]]
+        else:
+            args += ["--depart-range", f"{dep.get('from')}:{dep.get('to')}"]
+        if s.get("one_way"):
+            args += ["--one-way"]
+        elif ret.get("kind") == "exact":
+            args += ["--return", ret["date"]]
+        elif ret.get("kind") == "month":
+            args += ["--return-month", ret["month"]]
+        elif ret.get("from"):
+            args += ["--return", ret["to"]]
+        if s.get("target"):
+            args += ["--below", f"{s['target']:.0f}"]
+        if s.get("trip_days"):
+            args += ["--trip-days", str(s["trip_days"])]
+        slug = re.sub(r"[^a-z0-9]+", "-",
+                      f"{o}-{d}-{dep.get('month') or dep.get('date') or 'x'}".lower()).strip("-")
+        args += ["--state", slug, "--alert-to", handle, "--monitor", name, "--schedule", sched]
+        return ("Run this terminal command and print its output verbatim as your entire response. "
+                "Add nothing.\n"
+                + "python3 /home/ohmz/ai-stack/scripts/flight_watch.py "
+                + " ".join(shlex.quote(a) for a in args))
+
+    def _flight_make_job(self, s, cid, handle="user"):
+        """Create the fare watch the user asked for a second time, and be exact about what it does.
+
+        This pipe spent a long time refusing to create this job, and the refusal was right about the
+        FACT (0 of 19 sites readable, measured twice) while being wrong about whose call it is. The
+        user asked four times. So it gets built — on flight_watch.py, which is the tested tool that
+        takes an itinerary, and never on price_search, which has nowhere to put one and would search
+        a route page instead.
+
+        What makes this honest rather than the thing the refusal existed to prevent:
+          * every value is parsed, none inferred — origin, dates, ceiling and cadence all came from
+            the user's own words, and the schedule is computed here rather than by the agent that
+            once turned "every 15 mins next 2 hours" into a week of daily runs;
+          * the job is created by a direct POST, so what is scheduled is what is shown;
+          * the reply states plainly that every run will report it cannot read a fare, and why.
+        A watch that says "I could not read it" on schedule is not a lie. A watch that quotes a
+        number off a route page is, and that is still refused.
+        """
+        name = (f"{s['origin'][0]}→{s['dest'][0]} fare watch"
+                + (f" under ${s['target']:,.0f}" if s.get("target") else ""))[:80]
+        sched, repeat, defaulted = self._fl_schedule(s.get("cadence"))
+        prompt = self._fl_watch_cmd(s, handle, name, sched)
+        status, data, err = self._hermes_api(
+            "POST", "/api/jobs",
+            {"name": name, "schedule": sched, "prompt": prompt, "deliver": "local",
+             "repeat": repeat})
+        if err:
+            reason = self._api_err_text(data) or err
+            self._route_metric("flight.job_failed", 0, "flight_anyway_error", reason)
+            return (f"⚠️ **I could not create it** — the scheduler answered `{reason}`. Nothing was "
+                    f"scheduled, so there is no half-made job to clean up. Try again, or say "
+                    f"*list my tasks* to see what is actually there.")
+        job = (data or {}).get("job") or {}
+        jid = job.get("id", "?")
+        if cid:
+            self._flight_draft.pop(cid, None)
+        self._stamp_owner([jid], handle, src="flight")
+        self._route_metric("flight.job_created", 0, "flight_anyway", "", deterministic=True)
+        when = self._when(job.get("next_run_at"))
+        cad = (f"\n\n*You gave no cadence, so this is every 6 hours for a week — say a different one "
+               f"and I'll change it.*" if defaulted else "")
+        return (
+            f"✅ **Created** — job `{jid}`, exactly as you asked.\n\n{self._flight_table(s)}\n\n"
+            f"| | |\n|---|---|\n"
+            f"| Runs | **{sched}**, {repeat} times |\n"
+            f"| First run | **{when or 'shortly'}** |\n"
+            f"| Alerts to | **{handle}** — text and email |\n"
+            f"| Logged in | **background-tasks**, every run |\n\n"
+            f"**What it will actually report, starting on the first run:** that it could not read a "
+            f"fare. Not a guess and not a bug — `flight_watch.py` only queries sites a human marked "
+            f"readable after measuring them, and that set is empty (19 measured, 0 readable). So "
+            f"every run logs *fare_unsupported* and alerts nobody.\n\n"
+            f"That is not nothing, though: this job carries your real itinerary and threshold, so "
+            f"the day a fare source is wired in it starts working with no change from you. And it "
+            f"will never text you an invented number — the run that could do that is the one this "
+            f"refuses.\n\n"
+            f"Say *cancel {jid}* to remove it, or *list my tasks* to see it alongside the rest.{cad}")
+
+    def _flight_after_answer(self, text, s, cid, handle="user"):
         """The turn AFTER a completed flight answer, or None to route normally.
 
         This exists because of what "yes so set alert" did on 2026-08-09. The answer above ends by
@@ -1862,6 +2004,8 @@ class Pipe:
         host (19 sites, 0 readable) so the honest answer to "set the alert" is the alert that
         actually exists, on the itinerary the user already confirmed.
         """
+        if self._FL_ANYWAY.search(text or ""):
+            return self._flight_make_job(s, cid, handle)
         if not self._FL_SETALERT.search(text or ""):
             return None
         if cid:
@@ -1920,6 +2064,11 @@ class Pipe:
                if s.get("target") else "")
         cad = (f" You asked me to check **{s['cadence']}**; no check is running."
                if s.get("cadence") else "")
+        # The cadence the "schedule it anyway" option would actually use, computed the same way the
+        # job builder computes it — so the offer cannot promise one schedule and create another.
+        _sched, _rep, _def = self._fl_schedule(s.get("cadence"))
+        sch = (f"**{_sched}**, {_rep} runs" if not _def
+               else f"**{_sched}** for a week (you gave no cadence)")
         return (
             f"✈️ **{s['origin'][1]} → {s['dest'][1]}** — here's what I understood\n\n"
             f"{self._flight_table(s)}\n\n"
@@ -1935,12 +2084,20 @@ class Pipe:
             f"the fare never dropped.\n\n"
             f"**[Open this search on Google Flights]({url})** — your exact itinerary, prefilled.\n\n"
             f"---\n\n"
-            f"**Do you still want a price alert set up?** Google Flights runs one free and it "
-            f"genuinely works. Say **yes** and I'll give you the two steps"
-            f"{' and where to put your ceiling' if s.get('target') else ''} — about thirty "
-            f"seconds, and it emails you when the fare actually moves.\n\n"
-            f"Otherwise: say *different dates* to change this, or point me at something I can "
-            f"really watch — a product page, a stock, a restock.")
+            f"**Do you still want a price alert set up?** Two honest options:\n\n"
+            f"- **yes** — I'll give you the two steps for Google Flights' own alert"
+            f"{', including where to put your ceiling' if s.get('target') else ''}. Thirty "
+            f"seconds, free, and it emails you when the fare actually moves. This is the one "
+            f"that works today.\n"
+            # The second option exists because the user asked for the job four times and it is
+            # their call, not this pipe's. It is offered with its cost stated in the same breath —
+            # that is the difference between respecting the ask and quietly obeying it.
+            f"- **schedule it anyway** — I'll create a real background job on {sch}, carrying this "
+            f"exact itinerary. Every run will report that it cannot read a fare, because none of "
+            f"the 19 sites is readable. It becomes a working watch the moment a fare source is "
+            f"wired in, and not one minute before.\n\n"
+            f"Or say *different dates* to change this, or point me at something I can really "
+            f"watch — a product page, a stock, a restock.")
 
     _FL_ABANDON = re.compile(r"^\s*(?:never\s?mind|nvm|forget\s+it|cancel\s+that|drop\s+it|stop"
                              r"|no\s+thanks?|not\s+now|leave\s+it)\b", re.I)
@@ -1952,7 +2109,7 @@ class Pipe:
                                  r"|tomorrow|today|soon|whenever|flexible|anytime|any\s+time)\b",
                                  re.I)
 
-    def _flight_turn(self, cid, text, messages, resume=False):
+    def _flight_turn(self, cid, text, messages, resume=False, handle="user"):
         """The only method pipe() calls. Returns a reply, or None to route normally.
 
         Returning None on anything that is not an answer is what keeps a false positive cheap: it
@@ -1977,7 +2134,7 @@ class Pipe:
             # Checked before the merge so an affirmative cannot be read as an empty answer and
             # dropped into the scheduler.
             if (draft or {}).get("answered"):
-                done = self._flight_after_answer(text, prev, cid)
+                done = self._flight_after_answer(text, prev, cid, handle)
                 if done is not None:
                     return self._say(done)
             # Bare months are readable HERE and nowhere else: the form asked "when?", so a lone
@@ -4370,7 +4527,8 @@ class Pipe:
     # READ-ONLY and quotable: every value below was typed into the job by whoever created it, and
     # the failure mode is showing nothing, never showing a trip nobody scheduled. Same rule the
     # slot parser keeps at :1391 — a model may supply a category, never a date or an airport.
-    _IT_FLAG = re.compile(r"--(origin|dest|depart-month|depart|return|trip-days)(?:=|\s+)"
+    _IT_FLAG = re.compile(r"--(origin|dest|depart-month|depart-range|depart|return-month|return"
+                          r"|trip-days|one-way|below)(?:=|\s+)"
                           r"(?:'([^']*)'|\"([^\"]*)\"|(\S+))")
     _IT_FARE = re.compile(r"--kind[=\s]+'?fare\b")
     _IT_VETTED = re.compile(r"\bprice_(?:search|watch)\.py\b")
@@ -4440,11 +4598,16 @@ class Pipe:
                 when.append(f"depart **{cls._it_day(got['depart'])}**")
             elif got.get("depart-month"):
                 when.append(f"any time in **{cls._md_cell(got['depart-month'], 16)}**")
+            # --return-month belongs here beside --return: a month-mode round trip is the shape
+            # the pipe's own builder emits, and leaving it out printed the departure alone — the
+            # exact "show me the departure AND return timeline" this line exists to answer.
             if got.get("return"):
                 when.append(f"return **{cls._it_day(got['return'])}**")
+            elif got.get("return-month"):
+                when.append(f"back any time in **{cls._md_cell(got['return-month'], 16)}**")
             elif got.get("trip-days"):
                 when.append(f"about **{cls._md_cell(got['trip-days'], 4)} days**")
-            elif got.get("depart"):
+            elif "--one-way" in prompt or got.get("depart") or got.get("depart-month"):
                 # Stated, not assumed. flight_watch treats a missing --return as one-way, and a
                 # blank cell would read as "the return is coming" rather than "there is none".
                 when.append("**one way**")
@@ -5007,7 +5170,8 @@ class Pipe:
         #     `referring` below fires whenever a job table was rendered recently — so a bare "stop"
         #     meant to abandon this form would act on a real job instead.
         if FLIGHT_ROUTE and not ref and cid in self._flight_draft:
-            done = self._flight_turn(cid, text, self._ollama_messages(msgs), resume=True)
+            done = self._flight_turn(cid, text, self._ollama_messages(msgs),
+                                     resume=True, handle=handle)
             if done is not None:
                 row("flight.slots", "chip_flight_resume")
                 self._mark_bg(cid)
@@ -5060,7 +5224,7 @@ class Pipe:
         if FLIGHT_ROUTE:
             ftier, frule = self._is_flight_request(text)
             if ftier:
-                done = self._flight_turn(cid, text, omsgs, resume=False)
+                done = self._flight_turn(cid, text, omsgs, resume=False, handle=handle)
                 if done is not None:
                     # flight_tier, not tier: row() already passes tier positionally as 0 (this is a
                     # declaration, not a guess), so reusing the name is a TypeError.
@@ -5264,7 +5428,11 @@ class Pipe:
     # so a job whose prompt is one of those commands needs no LOG instruction of its own and must
     # not have one appended — its whole contract is "print this command's output verbatim, add
     # nothing", and appending would make the run add something.
-    _JOB_VETTED_RE = re.compile(r"\bprice_(?:watch|search)\.py\b")
+    # flight_watch belongs here for the same reason the other two do: it prints its own LOG and
+    # ALERT lines, so a job running it needs no protocol instruction and must not be given one —
+    # appending would make a run whose entire contract is "print this verbatim, add nothing" add
+    # something. Caught by a test asserting the pipe's own generated command passes its own checks.
+    _JOB_VETTED_RE = re.compile(r"\b(?:price_(?:watch|search)|flight_watch)\.py\b")
     _JOB_PROTOCOL_TAIL = (
         "\n\nFinish your response with these lines, exactly this shape:\n"
         "LOG: <one-line summary of this run, leading with the key number>\n"
@@ -6359,7 +6527,8 @@ class Pipe:
         # scheduler reference and act on a real job. The form owns its own abandonment vocabulary,
         # which means it has to be asked first.
         if FLIGHT_ROUTE and not ref and cid in self._flight_draft:
-            done = self._flight_turn(cid, text, omsgs, resume=True)
+            done = self._flight_turn(cid, text, omsgs, resume=True,
+                                     handle=self._alert_username(__user__))
             if done is not None:
                 self._mark_bg(cid)
                 return done
@@ -6438,7 +6607,8 @@ class Pipe:
             if FLIGHT_ROUTE:
                 ftier, frule = self._is_flight_request(text)
                 if ftier:
-                    done = self._flight_turn(cid, text, omsgs, resume=False)
+                    done = self._flight_turn(cid, text, omsgs, resume=False,
+                                             handle=self._alert_username(__user__))
                     if done is not None:
                         self._mark_bg(cid)
                         return done

@@ -646,6 +646,9 @@ def main():
           "YYZ → YVR" in t and "Tue 15 Sep 2026" in t and "Tue 22 Sep 2026" in t, t)
     check("...departure is labelled depart and the other one return",
           "depart **Tue 15 Sep 2026**" in t and "return **Tue 22 Sep 2026**" in t, t)
+    t = T(fw("--origin YYZ --dest YVR --depart-month 2026-10 --return-month 2026-11 --below 1000"))
+    check("a month-mode ROUND TRIP shows both ends (job bada3ce6c0d4)",
+          "any time in **2026-10**" in t and "back any time in **2026-11**" in t, t)
     t = T(fw("--origin YYZ --dest YVR --depart-month 2027-03 --trip-days 7"))
     check("a month watch says the window and the trip length",
           "any time in **2027-03**" in t and "about **7 days**" in t, t)
