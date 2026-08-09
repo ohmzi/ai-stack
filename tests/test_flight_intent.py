@@ -428,14 +428,41 @@ def main():
                   "track it", "sure", "yes please"):
         out, _ = answered(reply, S)
         check(f"claimed, not scheduled: {reply!r}",
-              out is not None and "can't set that one up" in out, (out or "FELL THROUGH")[:120])
+              out is not None and "Still nothing scheduled" in out, (out or "FELL THROUGH")[:120])
     out, after = answered("yes so set alert", S)
     check("...it hands over the real alert, on the confirmed itinerary",
           "Track prices" in out and "google.com/travel/flights" in out, out[:200])
     check("...says the cadence back rather than ignoring it",
           "every 15 mins next 2 hours" in out, out[-400:])
-    check("...names why it will not schedule one itself", "never read a number" in out, out[-500:])
+    check("...names why it will not schedule one itself",
+          "won't for a fare" in out and "can't read one on every single run" in out, out[-600:])
+    check("...promises two steps and lists exactly two",
+          out.count("\n1. ") == 1 and out.count("\n2. ") == 1 and "\n3. " not in out, out)
+    check("...and the list is closed, so the next paragraph is not swallowed into item 2",
+          "\n\nThat alert is Google's" in out, out[out.find("2. "):][:260])
     check("...and drops the draft so it cannot answer twice", "c" not in after._flight_draft)
+
+    # REPORTED 2026-08-09: "I've noted your $1,000 target" read as though something had been stored
+    # and would be acted on, in a reply whose whole point is that nothing was. And the reply never
+    # actually ASKED whether the user wanted the alert -- it trailed off into "want different
+    # dates?", so "yes so set alert" was the user answering a question that had not been put.
+    print("\n--- the answer states what is NOT running, and asks a real question ---")
+    q = P.__new__(P); q._flight_draft = {}; q._route_metric = lambda *a, **k: None
+    ans = drain(q._flight_turn("c", TURN1, [], resume=False))
+    check("it says plainly that nothing is scheduled",
+          "Nothing is scheduled" in ans and "no alert, no watch, no job" in ans.lower(), ans[:400])
+    check("'I've noted' is gone — it implied storage that never happened",
+          "noted your" not in ans.lower(), ans[:400])
+    check("...and the target is described as unsaved, not noted",
+          "not saved anywhere" in ans and "nothing is comparing against it" in ans, ans[:600])
+    check("the cadence is echoed as NOT running, rather than silently dropped",
+          "every 15 mins next 2 hours" in ans and "no check is running" in ans, ans[:600])
+    check("it asks a direct question about the alert",
+          "Do you still want a price alert set up?" in ans, ans[-500:])
+    check("...and says what answering yes will get them",
+          "Say **yes**" in ans and "two steps" in ans, ans[-500:])
+    check("the itinerary link is still handed over unprompted",
+          "google.com/travel/flights" in ans)
 
     print("\n--- ...while a correction still re-answers and moving on still routes normally ---")
     for reply, want in [("actually make it december", "December"),

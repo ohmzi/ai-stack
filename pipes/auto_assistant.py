@@ -1868,23 +1868,30 @@ class Pipe:
             self._flight_draft.pop(cid, None)
         self._route_metric("flight.alert_handoff", 0, "flight_setalert", text, deterministic=True)
         url = self._gflights_url(s)
-        tgt = (f" and set **under ${s['target']:,.0f}** as the threshold" if s.get("target") else "")
+        # The previous reply promised "the two steps", so this owes exactly that — numbered, on the
+        # itinerary already confirmed, with nothing left for the reader to work out.
+        # Folded into step 2 rather than added as a third: the previous reply promised TWO steps,
+        # and a reply that then lists three is the same species of small dishonesty as "I've noted".
+        tgt = (f" If it offers a ceiling, put **${s['target']:,.0f}** in; otherwise its default is "
+               f"any meaningful drop, which is usually what you want anyway."
+               if s.get("target") else "")
         # Say the cadence back when they gave one. They asked for something specific and a reply
         # that ignores it reads as though it was not heard — which is what the broken job did.
-        cad = (f"\n\nYou asked me to check **{s['cadence']}**. Google Flights watches the fare "
-               f"continuously and mails you on a real change, so it is strictly more often than "
-               f"that, and without eight texts telling you nothing moved."
+        cad = (f"\n\nOn your **{s['cadence']}**: Google's watcher runs continuously, so it is "
+               f"strictly more often than that — and it only mails you when the fare actually "
+               f"moves, instead of eight texts telling you nothing changed."
                if s.get("cadence") else "")
         return (
-            f"I can't set that one up myself — and I'd rather say so than schedule something that "
-            f"silently never fires.\n\n{self._flight_table(s)}\n\n"
-            f"**[Open your itinerary on Google Flights]({url})** — then switch on **Track prices** "
-            f"at the top of the results{tgt}. That alert is theirs, it emails you on a real price "
-            f"move, and it costs nothing.\n\n"
-            f"Why not here: a fare only exists for one route on one set of dates, behind a search "
-            f"form. I measured all 19 flight sites this host knows — 16 block automated visits, 1 "
-            f"has no linkable search, 2 are deal blogs. A watch I scheduled would tick on your "
-            f"itinerary and never read a number.{cad}\n\n"
+            f"Here are the two steps. I can't run this one myself, so this is the alert that "
+            f"actually works, on the itinerary you confirmed:\n\n"
+            f"{self._flight_table(s)}\n\n"
+            f"1. **[Open your itinerary on Google Flights]({url})** — it's prefilled.\n"
+            # Blank line, or markdown treats the next paragraph as lazy continuation of item 2 and
+            # renders it inside the list.
+            f"2. Switch on **Track prices** (the toggle above the results).{tgt}\n\n"
+            f"That alert is Google's, it emails you on a real price move, and it costs nothing.\n\n"
+            f"**Still nothing scheduled on my side** — I haven't created a job, and I won't for a "
+            f"fare, because it would report that it can't read one on every single run.{cad}\n\n"
             f"*If you'd rather I watched something I actually can — a product page, a stock, a "
             f"restock — just say so.*")
 
@@ -1904,20 +1911,36 @@ class Pipe:
             self._lru(self._flight_draft, cid,
                       {"t": time.time(), "turns": 0, "slots": s, "answered": True})
         url = self._gflights_url(s)
-        tgt = (f"\n\nI've noted your **under ${s['target']:,.0f}** target — Google Flights can set a "
-               f"price alert on that itinerary for you in one click, on the same page."
+        # "I've noted your $1,000 target" used to sit here, and it was the misleading half of this
+        # reply: noted implies stored and acted upon, and nothing was either. The number is shown in
+        # the table because the user typed it, it is used to prefill a link, and it is not persisted
+        # anywhere. Say what the state IS rather than a word that sounds like progress.
+        tgt = (f" Your **${s['target']:,.0f}** ceiling is in the table because you said it — it is "
+               f"not saved anywhere and nothing is comparing against it."
                if s.get("target") else "")
+        cad = (f" You asked me to check **{s['cadence']}**; no check is running."
+               if s.get("cadence") else "")
         return (
-            f"✈️ **{s['origin'][1]} → {s['dest'][1]}**\n\n{self._flight_table(s)}\n\n"
-            f"**[Open this search on Google Flights]({url})**\n\n"
+            f"✈️ **{s['origin'][1]} → {s['dest'][1]}** — here's what I understood\n\n"
+            f"{self._flight_table(s)}\n\n"
+            f"**⚠️ Nothing is scheduled.** No alert, no watch, no job — this is a reading of your "
+            f"message, not a thing that is now running.{tgt}{cad}\n\n"
             # Counts come from flight_sites.json and were 11/6/2 until the 2026-08-09 browser recon
             # closed the six unmeasured hosts. Two different tallies on the same surface is how a
             # reader learns not to trust either, so they move together or not at all.
-            f"I can't quote you a fare myself, and I'd rather say so than make one up. I checked "
-            f"all 19 flight sites for this: 16 block automated visits outright, 1 has no linkable "
-            f"search, and 2 are deal blogs rather than search engines — so any number I gave you "
-            f"would be invented. The link above is your exact itinerary, prefilled.{tgt}\n\n"
-            f"*Want a different route or dates? Just say so.*")
+            f"**Why I won't set one up:** a fare exists only for one route on one set of dates, "
+            f"behind a search form. I measured all 19 flight sites this host knows — 16 block "
+            f"automated visits, 1 has no linkable search, 2 are deal blogs. A watch I scheduled "
+            f"would tick on your itinerary and never read a number, so you'd get silence and think "
+            f"the fare never dropped.\n\n"
+            f"**[Open this search on Google Flights]({url})** — your exact itinerary, prefilled.\n\n"
+            f"---\n\n"
+            f"**Do you still want a price alert set up?** Google Flights runs one free and it "
+            f"genuinely works. Say **yes** and I'll give you the two steps"
+            f"{' and where to put your ceiling' if s.get('target') else ''} — about thirty "
+            f"seconds, and it emails you when the fare actually moves.\n\n"
+            f"Otherwise: say *different dates* to change this, or point me at something I can "
+            f"really watch — a product page, a stock, a restock.")
 
     _FL_ABANDON = re.compile(r"^\s*(?:never\s?mind|nvm|forget\s+it|cancel\s+that|drop\s+it|stop"
                              r"|no\s+thanks?|not\s+now|leave\s+it)\b", re.I)
