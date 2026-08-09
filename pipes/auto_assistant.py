@@ -310,6 +310,12 @@ PARK_TTL_S = 86400      # a rendered list older than this stops backing ordinals
 # When a readable source appears — Chrome recon on the six unmeasured sites, or a keyed fare API —
 # the slot collection below is unchanged and only that final step moves.
 FLIGHT_ROUTE = True
+# FlightClaw — the fare engine (docs/FLIGHTCLAW.md). An always-on MCP server over Google Flights'
+# protobuf API; measured live 2026-08-09 returning real CAD fares with booking links, no key.
+# The OWUI container runs network_mode: host, so 127.0.0.1 is the host's loopback.
+FLIGHTCLAW_URL = os.environ.get("FLIGHTCLAW_MCP", "http://127.0.0.1:8765/mcp")
+FLIGHTCLAW_SEARCH_TIMEOUT_S = 75   # one protobuf query; date-grid searches are the slow end
+FLIGHTCLAW_WATCH_MAX_RUNS = 360    # cap for an unbounded cadence scaled to a far-out departure
 FLIGHT_CLASSIFIER = True   # the gemma3:1b tier for the ambiguous band; independent of the coder's
 FLIGHT_DRAFT_TTL_S = 3600  # an abandoned itinerary stops owning the conversation after an hour
 FLIGHT_MAX_TURNS = 6       # asks before the flow gives up and says so rather than looping
@@ -1488,7 +1494,15 @@ class Pipe:
                             re.I)
     _FL_TARGET = re.compile(r"\b(?:under|below|less\s+than|at\s+most|max(?:imum)?|budget\s+of"
                             r"|no\s+more\s+than|cheaper\s+than)\s*\$?\s*([\d,]+(?:\.\d{2})?)\b", re.I)
-    # How often the user asked to be checked, verbatim. Recorded, never acted on.
+    # The verbs that make a flight ask a WATCH rather than a lookup. Deliberately narrower than
+    # _FLIGHT_ASK, which also matches find/show/search — those are lookups.
+    _FL_WATCHY = re.compile(r"\b(?:track|watch|monitor|keep\s+an\s+eye|alert\s+me|notify\s+me"
+                            r"|text\s+me|email\s+me|ping\s+me|let\s+me\s+know|tell\s+me\s+(?:when|if)"
+                            r"|set\s+up\s+(?:a\s+|an\s+)?(?:alert|watch|tracker))\b", re.I)
+    # A North-American phone number given inline. _norm_phone is the validator; this only finds
+    # the candidate token.
+    _FL_PHONE_INLINE = re.compile(r"\+?1?[\s\-.]?\(?\d{3}\)?[\s\-.]?\d{3}[\s\-.]?\d{4}\b")
+    # How often the user asked to be checked, verbatim.
     # "That answer was close, but change this." Distinguishes a correction the answer invited from
     # an unrelated sentence that merely contains a month-shaped word.
     _FL_CHANGE = re.compile(r"\b(?:actually|instead|rather|change|make\s+it|switch|move\s+it"
@@ -1705,13 +1719,23 @@ class Pipe:
         m = self._FL_TARGET.search(text or "")
         if m:
             s["target"] = float(m.group(1).replace(",", ""))
-        # The cadence is NOT used to schedule anything — nothing here schedules. It is captured so
-        # the reply can say it back, because "check every 15 mins next 2 hours" was stated in the
-        # first turn, dropped on the floor, and the job that eventually appeared ran once a day for
-        # a week instead. Whatever answers "set the alert" has to show it heard this.
+        # Captured so the schedule is built from the user's words: "check every 15 mins next 2
+        # hours" was once dropped on the floor, and the job that eventually appeared ran once a
+        # day for a week instead.
         m = self._FL_CADENCE.search(text or "")
         if m:
             s["cadence"] = re.sub(r"\s+", " ", m.group(0)).strip()
+        # Tracking intent, sticky across turns: "track ... text me" in turn 1 followed by dates in
+        # turn 2 is still a tracking ask. This is what decides search-only vs search-and-watch.
+        if self._FL_WATCHY.search(text or ""):
+            s["wants_watch"] = True
+        # An inline number ("notify me on text at 5145579764") is a slot like any other. Validated
+        # by the same rule the phone gate uses; saved only at watch creation, never on parse.
+        m = self._FL_PHONE_INLINE.search(text or "")
+        if m:
+            e164 = self._norm_phone(m.group(0))
+            if e164:
+                s["phone"] = e164
         if self._FL_SEASON.search(text or "") and not dates:
             s["season_only"] = True
         return s
@@ -1862,29 +1886,55 @@ class Pipe:
                                r"(\d{1,3})\s*([a-z]+))?", re.I)
 
     @classmethod
-    def _fl_schedule(cls, cadence):
-        """('every 15m', 8) for "every 15 mins next 2 hours", or the default when none was given.
+    def _fl_horizon_days(cls, s, today=None):
+        """Days from today until this itinerary's departure stops mattering.
 
-        Deterministic, and that is the whole point: the ONE time a schedule was left to the agent it
-        read "every 15 mins next 2 hours" as every 1440m for 7 days (job e6df1739a275). The user's
-        own words are already parsed here, so nothing needs to infer them again.
+        Exact date -> that date; a month/range window -> the window's END, because a fare for
+        "any time in October" is still worth watching until October is over. Clamped to [1, 120]:
+        a passed date still gets one run (which will say so), and a far-future trip does not
+        become a four-year job.
         """
+        today = today or datetime.date.today()
+        dep = s.get("depart") or {}
+        iso = dep.get("date") or dep.get("to")
+        if not iso:
+            return 14
+        try:
+            days = (datetime.date.fromisoformat(iso) - today).days
+        except Exception:
+            return 14
+        return max(1, min(120, days))
+
+    @classmethod
+    def _fl_schedule(cls, cadence, horizon_days=14):
+        """('every 15m', 8) for "every 15 mins next 2 hours"; default = daily until departure.
+
+        Deterministic, and that is the whole point: the ONE time a schedule was left to the agent
+        it read "every 15 mins next 2 hours" as every 1440m for 7 days (job e6df1739a275). The
+        user's own words are already parsed here, so nothing needs to infer them again.
+
+        `horizon_days` bounds every UNBOUNDED cadence — the user's own bound ("next 2 hours")
+        always wins, but "every 6 hours" with no end now runs until the departure passes rather
+        than for an arbitrary week, and no cadence at all means one check a day until then
+        (the user's chosen default, 2026-08-09). Capped at FLIGHTCLAW_WATCH_MAX_RUNS so
+        "every 15 mins" against a trip four months out cannot become five thousand runs.
+        """
+        def until(mins):
+            return max(1, min(FLIGHTCLAW_WATCH_MAX_RUNS, (horizon_days * 1440) // mins))
         # _FL_CADENCE captures these, so _fl_schedule has to understand them or the confirmation
         # says "hourly" and the job runs six-hourly — the same class of mismatch this exists to fix.
-        word = {"hourly": ("every 1h", 168), "daily": ("every 1d", 7),
-                "weekly": ("every 7d", 4), "twice a day": ("every 12h", 14)}.get(
+        word = {"hourly": ("every 1h", 60), "daily": ("every 1d", 1440),
+                "weekly": ("every 7d", 10080), "twice a day": ("every 12h", 720)}.get(
             re.sub(r"\s+", " ", (cadence or "").strip().lower()))
         if word:
-            return word[0], word[1], False
+            return word[0], until(word[1]), False
         m = cls._FL_CAD_PARTS.search(cadence or "")
         if not m:
-            # No cadence given. 6-hourly for a week, matching the brief's own default for price
-            # checks, and stated in the confirmation so one word corrects it.
-            return "every 6h", 28, True
+            return "every 1d", until(1440), True
         n, unit = int(m.group(1)), (m.group(2) or "").lower()
         per = cls._FL_UNIT_MIN.get(unit)
         if not per or n < 1:
-            return "every 6h", 28, True
+            return "every 1d", until(1440), True
         mins = max(1, n * per)
         sched = (f"every {mins}m" if mins < 60 else
                  f"every {mins // 60}h" if mins < 1440 and mins % 60 == 0 else
@@ -1894,210 +1944,319 @@ class Pipe:
             bound = int(m.group(3)) * (cls._FL_UNIT_MIN.get((m.group(4) or "").lower()) or 0)
             if bound:
                 repeat = max(1, bound // mins)
-        return sched, (repeat if repeat else 28), False
+        return sched, (repeat if repeat else until(mins)), False
 
-    def _fl_watch_cmd(self, s, handle, name, sched):
-        """The flight_watch command for this itinerary. Every value comes from the parsed slots.
+    # ---------------------------------------------------------------- FlightClaw client
+    #
+    # The fare engine (docs/FLIGHTCLAW.md): an always-on MCP server on the host loopback, speaking
+    # MCP streamable HTTP. Three POSTs per call (initialize -> initialized -> tools/call) — worth
+    # it for statelessness: no session to leak across chat turns, nothing to reconnect after the
+    # service restarts. Responses arrive as SSE data: lines; the last one is the answer.
 
-        No model touches this string. That is not a style preference — the two fare jobs an agent
-        authored for this user carried no dates at all and a --monitor whose spaces broke argparse.
+    @staticmethod
+    async def _fc_rpc(http, method, params, session_id=None, rpc_id=None):
+        headers = {"Content-Type": "application/json",
+                   "Accept": "application/json, text/event-stream"}
+        if session_id:
+            headers["mcp-session-id"] = session_id
+        body = {"jsonrpc": "2.0", "method": method}
+        if params is not None:
+            body["params"] = params
+        if rpc_id is not None:
+            body["id"] = rpc_id
+        async with http.post(FLIGHTCLAW_URL, json=body, headers=headers) as r:
+            sid = r.headers.get("mcp-session-id") or session_id
+            ctype = r.headers.get("content-type", "")
+            raw = await r.text()
+        if "text/event-stream" in ctype:
+            msgs = [json.loads(ln[5:].strip()) for ln in raw.splitlines()
+                    if ln.startswith("data:")]
+            return (msgs[-1] if msgs else None), sid
+        return (json.loads(raw) if raw.strip() else None), sid
+
+    async def _fc_call(self, tool, arguments, timeout=FLIGHTCLAW_SEARCH_TIMEOUT_S):
+        """One FlightClaw tool call. Returns the tool's text; raises on any failure —
+        every caller turns that into an honest sentence, never into a fabricated fare."""
+        tmo = aiohttp.ClientTimeout(total=timeout + 20, sock_connect=5, sock_read=timeout)
+        async with aiohttp.ClientSession(timeout=tmo) as http:
+            msg, sid = await self._fc_rpc(http, "initialize", {
+                "protocolVersion": "2025-06-18", "capabilities": {},
+                "clientInfo": {"name": "auto_assistant", "version": "1.0"}}, rpc_id=1)
+            await self._fc_rpc(http, "notifications/initialized", {}, session_id=sid)
+            msg, _ = await self._fc_rpc(http, "tools/call",
+                                        {"name": tool, "arguments": arguments},
+                                        session_id=sid, rpc_id=2)
+        if msg and msg.get("error"):
+            raise RuntimeError(str(msg["error"])[:200])
+        content = ((msg or {}).get("result") or {}).get("content") or []
+        if not content:
+            raise RuntimeError("empty MCP response")
+        return content[0].get("text", "")
+
+    # The slot parser deliberately reads bare city names as METRO codes ("toronto" -> YTO, any
+    # Toronto airport) and specific names as airports ("pearson" -> YYZ). Google's q= text search
+    # accepts both; fli's Airport enum accepts only real airports — measured 2026-08-09, 15 of the
+    # 129 codes in _IATA are metro codes fli rejects. Translated at the ENGINE boundary, not in
+    # the table, so the user-facing semantics ("any Toronto airport") stay intact everywhere else.
+    # Every target verified present in fli's enum the same day.
+    _FC_METRO = {"YTO": "YYZ", "NYC": "JFK", "LON": "LHR", "PAR": "CDG", "TYO": "NRT",
+                 "OSA": "KIX", "SEL": "ICN", "BJS": "PEK", "CHI": "ORD", "WAS": "IAD",
+                 "MIL": "MXP", "ROM": "FCO", "STO": "ARN", "RIO": "GIG", "BUE": "EZE"}
+
+    @classmethod
+    def _fc_code(cls, code):
+        return cls._FC_METRO.get(code, code)
+
+    # search_dates emits "  2026-10-14 -> 2026-11-14: C$322" (round trip) or
+    # "  2026-10-15: C$338" (one way), sorted cheapest-first by flightclaw itself.
+    _FC_DATE_LINE = re.compile(r"^\s{2}(\d{4}-\d{2}-\d{2})"
+                               r"(?:\s*->\s*(\d{4}-\d{2}-\d{2}))?:\s*(\S.*)$", re.M)
+    _FC_BOOK_LINE = re.compile(r"^\s*Book:\s*(https://\S+)\s*$", re.M)
+    _FC_NO_FARES = re.compile(r"\bNo (?:prices|flights) found\b", re.I)
+
+    def _fc_search_plan(self, s):
+        """(tool, arguments) for these slots — the deterministic slots→API mapping.
+
+        Exact dates -> search_flights (real options with airlines and booking links). A month or
+        range window -> search_dates (one calendar-grid query for the whole window), with the trip
+        length taken from the user's own words or, failing that, the gap between the two windows —
+        stated in the reply, because the chosen dates are then dates the user never typed.
         """
-        import shlex
-        o, d = s["origin"][0], s["dest"][0]
+        o, d = self._fc_code(s["origin"][0]), self._fc_code(s["dest"][0])
         dep, ret = s.get("depart") or {}, s.get("ret") or {}
-        args = ["--origin", o, "--dest", d]
         if dep.get("kind") == "exact":
-            args += ["--depart", dep["date"]]
-        elif dep.get("kind") == "month":
-            args += ["--depart-month", dep["month"]]
-        else:
-            args += ["--depart-range", f"{dep.get('from')}:{dep.get('to')}"]
-        if s.get("one_way"):
-            args += ["--one-way"]
-        elif ret.get("kind") == "exact":
-            args += ["--return", ret["date"]]
-        elif ret.get("kind") == "month":
-            args += ["--return-month", ret["month"]]
-        elif ret.get("from"):
-            args += ["--return", ret["to"]]
-        if s.get("target"):
-            args += ["--below", f"{s['target']:.0f}"]
-        if s.get("trip_days"):
-            args += ["--trip-days", str(s["trip_days"])]
-        slug = re.sub(r"[^a-z0-9]+", "-",
-                      f"{o}-{d}-{dep.get('month') or dep.get('date') or 'x'}".lower()).strip("-")
-        args += ["--state", slug, "--alert-to", handle, "--monitor", name, "--schedule", sched]
+            args = {"origin": o, "destination": d, "date": dep["date"], "results": 3}
+            if not s.get("one_way") and ret.get("kind") == "exact":
+                args["return_date"] = ret["date"]
+            return "search_flights", args
+        args = {"origin": o, "destination": d,
+                "from_date": dep.get("from"), "to_date": dep.get("to")}
+        if not s.get("one_way"):
+            if s.get("trip_days"):
+                args["trip_duration"] = int(s["trip_days"])
+            elif ret.get("from") and dep.get("from"):
+                gap = (datetime.date.fromisoformat(ret["from"])
+                       - datetime.date.fromisoformat(dep["from"])).days
+                if gap > 0:
+                    args["trip_duration"] = gap
+        return "search_dates", args
+
+    async def _fc_resolve_dates(self, s):
+        """Month/range windows -> the cheapest CONCRETE dates in them, via one search_dates call.
+
+        Returns (s, note) where s carries exact-date specs a fare can bind to. The note names the
+        chosen dates as CHOSEN — a fare for "any time in October" is really a fare for the pair
+        this found, and saying so is what lets one word correct it. Raises on an unreachable
+        engine or an empty grid; callers say so rather than schedule on a guess.
+        """
+        dep = s.get("depart") or {}
+        if dep.get("kind") == "exact":
+            return s, ""
+        tool, args = self._fc_search_plan(s)
+        text = await self._fc_call(tool, args)
+        if self._FC_NO_FARES.search(text):
+            raise RuntimeError(f"no fares found between {args.get('from_date')} and "
+                               f"{args.get('to_date')}")
+        m = self._FC_DATE_LINE.search(text)
+        if not m:
+            raise RuntimeError("the date grid came back in a shape I could not read")
+        s = dict(s)
+        s["depart"] = {"kind": "exact", "date": m.group(1)}
+        if m.group(2):
+            s["ret"] = {"kind": "exact", "date": m.group(2)}
+            s.pop("ret_defaulted", None)
+        note = (f"**{m.group(1)}"
+                + (f" → {m.group(2)}" if m.group(2) else "")
+                + f"** was the cheapest in your window ({m.group(3).strip()}) — these are chosen "
+                  f"dates, not typed ones; give exact dates to pin different ones.")
+        return s, note
+
+    def _fc_render_options(self, text, limit=3):
+        """search_flights output as chat markdown: fares in a code block (its alignment is the
+        formatting), booking links pulled out underneath as real links — a 500-char tfs URL
+        inline is unreadable, and the link is the single most useful thing on the page.
+
+        Split on the "Option N:" boundaries themselves, not on ruler lines: the CLI prints
+        ===== rulers between options and the MCP tool prints none (measured live 2026-08-09 —
+        splitting on rulers rendered an empty block against the real service). Rulers, where
+        present, are stripped first so both shapes parse identically.
+        """
+        text = re.sub(r"^\s*={10,}\s*$", "", text or "", flags=re.M)
+        blocks = [b.strip() for b in re.split(r"\n(?=Option \d)", text) if b.strip()]
+        head = blocks[0] if blocks and not blocks[0].startswith("Option") else ""
+        options = [b for b in blocks if b.startswith("Option")][:limit]
+        links = []
+        shown = []
+        for b in options:
+            urls = self._FC_BOOK_LINE.findall(b)
+            if urls:
+                links.append(urls[0])
+            shown.append(self._FC_BOOK_LINE.sub("", b).strip())
+        out = "```\n" + (head + "\n\n" if head else "") + "\n\n".join(shown) + "\n```"
+        if links:
+            out += "\n" + " · ".join(f"[Book option {i + 1}]({u})"
+                                      for i, u in enumerate(links))
+        return out
+
+    # ---------------------------------------------------------------- the watch, one turn
+    @classmethod
+    def _fc_route_id(cls, s):
+        """FlightClaw's own id formula (tracking.py:63) — duplicated so the cron command can be
+        built without a second round trip, pinned by tests on both sides."""
+        rid = (f"{cls._fc_code(s['origin'][0])}-{cls._fc_code(s['dest'][0])}"
+               f"-{s['depart']['date']}")
+        if not s.get("one_way") and (s.get("ret") or {}).get("date"):
+            rid += f"-RT-{s['ret']['date']}"
+        return rid
+
+    def _fc_watch_cmd(self, route_id, state, handle, name, sched, target):
+        """The vetted command a hermes job runs. Every value parsed, none inferred — the two fare
+        jobs an agent authored carried no dates at all and a --monitor whose spaces broke argparse."""
+        import shlex
+        args = ["--route-id", route_id, "--state", state, "--alert-to", handle]
+        if target:
+            args += ["--below", f"{target:.0f}"]
+        args += ["--monitor", name, "--schedule", sched]
         return ("Run this terminal command and print its output verbatim as your entire response. "
                 "Add nothing.\n"
-                + "python3 /home/ohmz/ai-stack/scripts/flight_watch.py "
+                + "python3 /home/ohmz/ai-stack/scripts/flightclaw_watch.py "
                 + " ".join(shlex.quote(a) for a in args))
 
-    def _flight_make_job(self, s, cid, handle="user"):
-        """Create the fare watch the user asked for a second time, and be exact about what it does.
+    async def _fc_make_watch(self, s, cid, handle="user"):
+        """Create the whole watch in one turn: FlightClaw tracks the fare, hermes schedules the
+        checks, and the confirmation states everything it just did — schedule, horizon, channels.
 
-        This pipe spent a long time refusing to create this job, and the refusal was right about the
-        FACT (0 of 19 sites readable, measured twice) while being wrong about whose call it is. The
-        user asked four times. So it gets built — on flight_watch.py, which is the tested tool that
-        takes an itinerary, and never on price_search, which has nowhere to put one and would search
-        a route page instead.
-
-        What makes this honest rather than the thing the refusal existed to prevent:
-          * every value is parsed, none inferred — origin, dates, ceiling and cadence all came from
-            the user's own words, and the schedule is computed here rather than by the agent that
-            once turned "every 15 mins next 2 hours" into a week of daily runs;
-          * the job is created by a direct POST, so what is scheduled is what is shown;
-          * the reply states plainly that every run will report it cannot read a fare, and why.
-        A watch that says "I could not read it" on schedule is not a lie. A watch that quotes a
-        number off a route page is, and that is still refused.
+        Retry-safe by construction: track_flight is idempotent on FlightClaw's side ("Already
+        tracking"), so a failed job POST can be retried with the same words and nothing doubles.
         """
+        try:
+            s, note = await self._fc_resolve_dates(s)
+        except Exception as e:
+            return (f"⚠️ **Nothing was scheduled.** I could not pin dates inside your window — "
+                    f"{str(e)[:160]}. Say *track it* to retry, or give exact dates.")
+        # An inline number ("text me at 514...") is saved BEFORE the watch exists, so the first
+        # alert has somewhere to go. Never overwrites a number already on file.
+        if s.get("phone") and not (self._contact(handle) or {}).get("phone"):
+            self._save_phone(handle, s["phone"])
         name = (f"{s['origin'][0]}→{s['dest'][0]} fare watch"
                 + (f" under ${s['target']:,.0f}" if s.get("target") else ""))[:80]
-        sched, repeat, defaulted = self._fl_schedule(s.get("cadence"))
-        prompt = self._fl_watch_cmd(s, handle, name, sched)
-        status, data, err = self._hermes_api(
-            "POST", "/api/jobs",
+        route_id = self._fc_route_id(s)
+        track_args = {"origin": self._fc_code(s["origin"][0]),
+                      "destination": self._fc_code(s["dest"][0]),
+                      "date": s["depart"]["date"]}
+        if not s.get("one_way") and (s.get("ret") or {}).get("date"):
+            track_args["return_date"] = s["ret"]["date"]
+        if s.get("target"):
+            track_args["target_price"] = float(s["target"])
+        try:
+            tracked_reply = await self._fc_call("track_flight", track_args)
+        except Exception as e:
+            return (f"⚠️ **Nothing was scheduled.** The fare engine did not accept the tracking "
+                    f"request ({str(e)[:140]}). Say *track it* to retry.")
+        horizon = self._fl_horizon_days(s)
+        sched, repeat, defaulted = self._fl_schedule(s.get("cadence"), horizon_days=horizon)
+        slug = re.sub(r"[^a-z0-9]+", "-", f"fc-{route_id}".lower()).strip("-")
+        prompt = self._fc_watch_cmd(route_id, slug, handle, name, sched, s.get("target"))
+        status, data, err = await asyncio.to_thread(
+            self._hermes_api, "POST", "/api/jobs",
             {"name": name, "schedule": sched, "prompt": prompt, "deliver": "local",
              "repeat": repeat})
         if err:
             reason = self._api_err_text(data) or err
-            self._route_metric("flight.job_failed", 0, "flight_anyway_error", reason)
-            return (f"⚠️ **I could not create it** — the scheduler answered `{reason}`. Nothing was "
-                    f"scheduled, so there is no half-made job to clean up. Try again, or say "
-                    f"*list my tasks* to see what is actually there.")
+            self._route_metric("flight.job_failed", 0, "flight_watch_error", reason)
+            return (f"⚠️ FlightClaw is now tracking **{route_id}** ({self._md_cell(tracked_reply, 60)}), "
+                    f"but the check schedule failed: `{reason}`. No checks will run until it "
+                    f"exists — say *track it* to retry (nothing will double).")
         job = (data or {}).get("job") or {}
         jid = job.get("id", "?")
         if cid:
             self._flight_draft.pop(cid, None)
         self._stamp_owner([jid], handle, src="flight")
-        self._route_metric("flight.job_created", 0, "flight_anyway", "", deterministic=True)
-        when = self._when(job.get("next_run_at"))
-        cad = (f"\n\n*You gave no cadence, so this is every 6 hours for a week — say a different one "
-               f"and I'll change it.*" if defaulted else "")
+        self._route_metric("flight.watch_created", 0, "flight_watch", "", deterministic=True)
+        # The baseline FlightClaw just recorded ("Tracking YYZ-...: C$338 (F8)") is the first
+        # real number of this watch — show it.
+        base = self._md_cell(tracked_reply.splitlines()[0] if tracked_reply else "", 90)
+        cad = (f"\n\n*You gave no cadence, so this checks once a day until departure — say a "
+               f"different one and I'll change it.*" if defaulted else "")
         return (
-            f"✅ **Created** — job `{jid}`, exactly as you asked.\n\n{self._flight_table(s)}\n\n"
-            f"| | |\n|---|---|\n"
-            f"| Runs | **{sched}**, {repeat} times |\n"
-            f"| First run | **{when or 'shortly'}** |\n"
-            f"| Alerts to | **{handle}** — text and email |\n"
-            f"| Logged in | **background-tasks**, every run |\n\n"
-            f"**What it will actually report, starting on the first run:** that it could not read a "
-            f"fare. Not a guess and not a bug — `flight_watch.py` only queries sites a human marked "
-            f"readable after measuring them, and that set is empty (19 measured, 0 readable). So "
-            f"every run logs *fare_unsupported* and alerts nobody.\n\n"
-            f"That is not nothing, though: this job carries your real itinerary and threshold, so "
-            f"the day a fare source is wired in it starts working with no change from you. And it "
-            f"will never text you an invented number — the run that could do that is the one this "
-            f"refuses.\n\n"
-            f"Say *cancel {jid}* to remove it, or *list my tasks* to see it alongside the rest.{cad}")
+            f"✅ **Watching it** — job `{jid}`.\n\n{self._flight_table(s)}\n\n"
+            + (f"{note}\n\n" if note else "")
+            + f"| | |\n|---|---|\n"
+            f"| Baseline | {base or '*first check pending*'} |\n"
+            f"| Checks | **{sched}**, {repeat} runs (~{horizon} days) |\n"
+            f"| First check | **{self._when(job.get('next_run_at')) or 'shortly'}** |\n"
+            + (f"| Alert when | under **${s['target']:,.0f}** |\n" if s.get("target") else "")
+            + f"\nEvery check logs the real price to **background-tasks**; you get a text and an "
+            f"email only when it crosses your line, and never the same price twice."
+            f"{self._alert_setup_block(handle)}\n\n"
+            f"Say *cancel {jid}* to stop it, or *list my tasks* to see it."
+            f"{cad}")
 
     def _flight_after_answer(self, text, s, cid, handle="user"):
-        """The turn AFTER a completed flight answer, or None to route normally.
+        """The turn AFTER a completed flight answer: "track it" builds the watch, anything else
+        routes normally. Exists because "yes so set alert" once fell through to the agent and
+        became a job that ran daily, watched nothing, and could not parse (e6df1739a275)."""
+        if self._FL_ANYWAY.search(text or "") or self._FL_SETALERT.search(text or ""):
+            self._route_metric("flight.watch_confirm", 0, "flight_setalert", text,
+                               deterministic=True)
 
-        This exists because of what "yes so set alert" did on 2026-08-09. The answer above ends by
-        saying Google Flights can set a price alert in one click — the user replied yes to exactly
-        that, and because the draft had already been dropped, the reply matched nothing here, became
-        a background followup, and the agent built job e6df1739a275: a fare watch scheduled every
-        1440 minutes for 7 days, with no --depart or --return, from a command that argparse rejects
-        outright. Three separate failures, all downstream of this one gap.
+            async def go():
+                yield await self._fc_make_watch(s, cid, handle)
+            return go()
+        return None
 
-        Nothing here schedules anything, and that is the point: the fare cannot be watched by this
-        host (19 sites, 0 readable) so the honest answer to "set the alert" is the alert that
-        actually exists, on the itinerary the user already confirmed.
+    async def _flight_answer_stream(self, s, cid, handle="user"):
+        """The answer, with real fares in it: live search, and — when the ask carried tracking
+        intent — the watch created in the same turn. One message in, everything running.
+
+        The refusal that used to live here was right about its facts (19 scrapeable sites, 0
+        readable — docs/FLIGHT_RECON.md) and is obsolete about the conclusion: FlightClaw reads
+        Google Flights' protobuf API, a surface the recon never measured, and returned C$348 from
+        this host on the first try (docs/FLIGHTCLAW.md). What survives from the old discipline is
+        its one law: no number in this reply is ever invented — a failed search says it failed.
         """
-        if self._FL_ANYWAY.search(text or ""):
-            return self._flight_make_job(s, cid, handle)
-        if not self._FL_SETALERT.search(text or ""):
-            return None
-        if cid:
-            self._flight_draft.pop(cid, None)
-        self._route_metric("flight.alert_handoff", 0, "flight_setalert", text, deterministic=True)
-        url = self._gflights_url(s)
-        # The previous reply promised "the two steps", so this owes exactly that — numbered, on the
-        # itinerary already confirmed, with nothing left for the reader to work out.
-        # Folded into step 2 rather than added as a third: the previous reply promised TWO steps,
-        # and a reply that then lists three is the same species of small dishonesty as "I've noted".
-        tgt = (f" If it offers a ceiling, put **${s['target']:,.0f}** in; otherwise its default is "
-               f"any meaningful drop, which is usually what you want anyway."
-               if s.get("target") else "")
-        # Say the cadence back when they gave one. They asked for something specific and a reply
-        # that ignores it reads as though it was not heard — which is what the broken job did.
-        cad = (f"\n\nOn your **{s['cadence']}**: Google's watcher runs continuously, so it is "
-               f"strictly more often than that — and it only mails you when the fare actually "
-               f"moves, instead of eight texts telling you nothing changed."
-               if s.get("cadence") else "")
-        return (
-            f"Here are the two steps. I can't run this one myself, so this is the alert that "
-            f"actually works, on the itinerary you confirmed:\n\n"
-            f"{self._flight_table(s)}\n\n"
-            f"1. **[Open your itinerary on Google Flights]({url})** — it's prefilled.\n"
-            # Blank line, or markdown treats the next paragraph as lazy continuation of item 2 and
-            # renders it inside the list.
-            f"2. Switch on **Track prices** (the toggle above the results).{tgt}\n\n"
-            f"That alert is Google's, it emails you on a real price move, and it costs nothing.\n\n"
-            f"**Still nothing scheduled on my side** — I haven't created a job, and I won't for a "
-            f"fare, because it would report that it can't read one on every single run.{cad}\n\n"
-            f"*If you'd rather I watched something I actually can — a product page, a stock, a "
-            f"restock — just say so.*")
-
-    def _flight_answer(self, s, cid):
-        """The honest answer. Nothing is scheduled, and the reply says why in one sentence.
-
-        This is where a watch WOULD be created if any site were readable. Measured across all 19
-        sites the user named (docs/FLIGHT_RECON.md): 16 block automated clients, 1 exposes no fetchable
-        URL, 2 are deal feeds, 0 are readable. Creating a watch anyway would leave a monitor that
-        fires, reports that it cannot read a fare, and texts nobody — so it hands over a link the
-        user can click instead of a promise it cannot keep.
-        """
-        # The draft is KEPT, marked answered, rather than dropped. Dropping it is what left "yes so
-        # set alert" with nothing to match, so it fell through to the agent and became a fare job
-        # that could not run (:_flight_after_answer). It still expires on the ordinary TTL.
+        yield f"✈️ **{s['origin'][1]} → {s['dest'][1]}** — checking live fares…\n\n"
+        note = ""
+        try:
+            dep = s.get("depart") or {}
+            if dep.get("kind") == "exact":
+                tool, args = self._fc_search_plan(s)
+                fares = self._fc_render_options(await self._fc_call(tool, args))
+            else:
+                s, note = await self._fc_resolve_dates(s)
+                tool, args = self._fc_search_plan(s)     # now exact: real options on the pick
+                fares = self._fc_render_options(await self._fc_call(tool, args))
+        except Exception as e:
+            # The draft survives NOT answered: "try again" re-searches instead of trying to build
+            # a watch on dates that were never pinned.
+            if cid:
+                self._lru(self._flight_draft, cid,
+                          {"t": time.time(), "turns": 0, "slots": s})
+            self._route_metric("flight.search_failed", 0, "flight_engine_error", str(e)[:120])
+            yield (f"⚠️ **I couldn't reach live fares** ({str(e)[:140]}). Nothing was scheduled "
+                   f"and no number was made up. Try again in a moment — or "
+                   f"**[open the search yourself]({self._gflights_url(s)})**.")
+            return
+        if self._FC_NO_FARES.search(fares):
+            if cid:
+                self._lru(self._flight_draft, cid,
+                          {"t": time.time(), "turns": 0, "slots": s, "answered": True})
+            yield (f"{self._flight_table(s)}\n\nGoogle returned **no fares** for this itinerary "
+                   f"right now — that happens on far-out or thin routes. "
+                   f"**[Check it yourself]({self._gflights_url(s)})**, or try different dates.")
+            return
+        yield f"{self._flight_table(s)}\n\n" + (f"{note}\n\n" if note else "") + fares + "\n\n"
+        if s.get("wants_watch"):
+            yield await self._fc_make_watch(s, cid, handle)
+            return
+        # A pure search. The draft is kept, marked answered, so "track it" works — the gap that
+        # once sent that phrase to the scheduler.
         if cid:
             self._lru(self._flight_draft, cid,
                       {"t": time.time(), "turns": 0, "slots": s, "answered": True})
-        url = self._gflights_url(s)
-        # "I've noted your $1,000 target" used to sit here, and it was the misleading half of this
-        # reply: noted implies stored and acted upon, and nothing was either. The number is shown in
-        # the table because the user typed it, it is used to prefill a link, and it is not persisted
-        # anywhere. Say what the state IS rather than a word that sounds like progress.
-        tgt = (f" Your **${s['target']:,.0f}** ceiling is in the table because you said it — it is "
-               f"not saved anywhere and nothing is comparing against it."
-               if s.get("target") else "")
-        cad = (f" You asked me to check **{s['cadence']}**; no check is running."
-               if s.get("cadence") else "")
-        # The cadence the "schedule it anyway" option would actually use, computed the same way the
-        # job builder computes it — so the offer cannot promise one schedule and create another.
-        _sched, _rep, _def = self._fl_schedule(s.get("cadence"))
-        sch = (f"**{_sched}**, {_rep} runs" if not _def
-               else f"**{_sched}** for a week (you gave no cadence)")
-        return (
-            f"✈️ **{s['origin'][1]} → {s['dest'][1]}** — here's what I understood\n\n"
-            f"{self._flight_table(s)}\n\n"
-            f"**⚠️ Nothing is scheduled.** No alert, no watch, no job — this is a reading of your "
-            f"message, not a thing that is now running.{tgt}{cad}\n\n"
-            # Counts come from flight_sites.json and were 11/6/2 until the 2026-08-09 browser recon
-            # closed the six unmeasured hosts. Two different tallies on the same surface is how a
-            # reader learns not to trust either, so they move together or not at all.
-            f"**Why I won't set one up:** a fare exists only for one route on one set of dates, "
-            f"behind a search form. I measured all 19 flight sites this host knows — 16 block "
-            f"automated visits, 1 has no linkable search, 2 are deal blogs. A watch I scheduled "
-            f"would tick on your itinerary and never read a number, so you'd get silence and think "
-            f"the fare never dropped.\n\n"
-            f"**[Open this search on Google Flights]({url})** — your exact itinerary, prefilled.\n\n"
-            f"---\n\n"
-            f"**Do you still want a price alert set up?** Two honest options:\n\n"
-            f"- **yes** — I'll give you the two steps for Google Flights' own alert"
-            f"{', including where to put your ceiling' if s.get('target') else ''}. Thirty "
-            f"seconds, free, and it emails you when the fare actually moves. This is the one "
-            f"that works today.\n"
-            # The second option exists because the user asked for the job four times and it is
-            # their call, not this pipe's. It is offered with its cost stated in the same breath —
-            # that is the difference between respecting the ask and quietly obeying it.
-            f"- **schedule it anyway** — I'll create a real background job on {sch}, carrying this "
-            f"exact itinerary. Every run will report that it cannot read a fare, because none of "
-            f"the 19 sites is readable. It becomes a working watch the moment a fare source is "
-            f"wired in, and not one minute before.\n\n"
-            f"Or say *different dates* to change this, or point me at something I can really "
-            f"watch — a product page, a stock, a restock.")
+        tgt = f" and text you under **${s['target']:,.0f}**" if s.get("target") else ""
+        yield (f"Say **track it** and I'll watch this fare{tgt} — checks on your schedule, "
+               f"alerts by text and email. Or *different dates* to change the search.")
 
     _FL_ABANDON = re.compile(r"^\s*(?:never\s?mind|nvm|forget\s+it|cancel\s+that|drop\s+it|stop"
                              r"|no\s+thanks?|not\s+now|leave\s+it)\b", re.I)
@@ -2136,7 +2295,7 @@ class Pipe:
             if (draft or {}).get("answered"):
                 done = self._flight_after_answer(text, prev, cid, handle)
                 if done is not None:
-                    return self._say(done)
+                    return done
             # Bare months are readable HERE and nowhere else: the form asked "when?", so a lone
             # "October" is an answer rather than a modal verb. After an ANSWER there is no
             # outstanding question, so a bare month is only taken alongside a change cue —
@@ -2171,7 +2330,7 @@ class Pipe:
             self._route_metric("flight.answer", 0 if resume else 1,
                                "flight_form_complete" if resume else "flight_strong", text,
                                deterministic=True)
-            return self._say(self._flight_answer(slots, cid))
+            return self._flight_answer_stream(slots, cid, handle)
         turns += 1
         if turns > FLIGHT_MAX_TURNS:
             self._flight_draft.pop(cid, None)
@@ -4289,18 +4448,23 @@ class Pipe:
         "Pass --unit only when the USER named a currency; otherwise leave it. Do not mention "
         "skills, internal tools, or what you might do later — the reply is a confirmation of what "
         "was scheduled, nothing else.\n"
-        "5d-ii. WATCHING A PRICE OR FARE WITH NO URL — when the user names a product or a flight "
-        "but gives no link, do NOT ask for one and do NOT build your own search-and-scrape job. "
-        "A second vetted script finds the page itself via the local search engine; make the "
+        "5d-ii. WATCHING A PRODUCT PRICE WITH NO URL — when the user names a product but gives no "
+        "link, do NOT ask for one and do NOT build your own search-and-scrape job. A second "
+        "vetted script finds the page itself via the local search engine; make the "
         "job's prompt exactly:\n"
         "    Run this terminal command and print its output verbatim as your entire response. Add nothing.\n"
         "    python3 /home/ohmz/ai-stack/scripts/price_search.py --query '<item words>' --state '<short_name>' --below <N> --alert-to <username> --kind <kind> --monitor '<job name>' --schedule '<schedule>'\n"
         "It searches once, picks the best product page, remembers it, and from then on behaves "
-        "exactly like price_watch.py — same flags: --above for a rise, --kind fare for flights, "
+        "exactly like price_watch.py — same flags: --above for a rise, "
         "--unit only when the user named a currency, --require-confidence to refuse "
         "low-confidence alerts. Keep --query to the item's own words — no 'price of', no "
         "quotation marks or apostrophes inside the value, never a URL. If the user DID give a "
         "URL or a page address, rule 5d applies instead, never this one.\n"
+        "5d-iv. FLIGHTS AND AIR FARES ARE NEVER YOURS TO SCHEDULE. The assistant's own flight "
+        "path handles fare asks before you and creates its jobs directly. If a fare or flight "
+        "request reaches you anyway, create NOTHING — no price_search job (--kind fare refuses "
+        "itself every run), no scraper — and reply exactly: the flight watcher handles fares; "
+        "please re-send the request as its own message. Never invent a fare number.\n"
         "5d-iii. WATCHING STOCK OR AVAILABILITY — 'tell me when it is back in stock', 'text me if "
         "it sells out', 'how many are left', appointment or ticket availability. The SAME vetted "
         "script does this in a different mode; do NOT write your own scraper and do NOT reach for a "
@@ -4586,6 +4750,16 @@ class Pipe:
         """
         cls = type(self)
         prompt = job.get("prompt") or ""
+        # The FlightClaw shape: the whole itinerary lives inside --route-id, in FlightClaw's own
+        # formula (ORIG-DEST-YYYY-MM-DD[-RT-YYYY-MM-DD]) — one token to parse, quoted or not.
+        m = re.search(r"flightclaw_watch\.py.*?--route-id[=\s]+'?"
+                      r"([A-Z]{3})-([A-Z]{3})-(\d{4}-\d{2}-\d{2})"
+                      r"(?:-RT-(\d{4}-\d{2}-\d{2}))?", prompt, re.S)
+        if m:
+            o, d, dep, ret = m.groups()
+            when = f"depart **{cls._it_day(dep)}**"
+            when += f" · return **{cls._it_day(ret)}**" if ret else " · **one way**"
+            return f"✈️ **{o} → {d}** · {when}"
         if "flight_watch.py" in prompt:
             got = {}
             for m in cls._IT_FLAG.finditer(prompt):

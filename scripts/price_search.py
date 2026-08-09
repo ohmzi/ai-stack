@@ -360,8 +360,9 @@ FARE_REFUSAL = ("a fare exists only for one origin, one destination and one set 
 def refuse_fare(a):
     sname = a.state + ".search"
     sstate = pw.read_state(sname)
-    print(f"LOG: this monitor needs an itinerary — {FARE_REFUSAL}. Use flight_watch.py with "
-          f"--origin, --dest and --depart (a month is enough).")
+    print(f"LOG: this monitor needs an itinerary — {FARE_REFUSAL}. Fares are watched by "
+          f"FlightClaw now (docs/FLIGHTCLAW.md): ask the assistant to track the flight and it "
+          f"builds the right watch itself.")
     if not sstate.get("fare_refused"):
         sstate["fare_refused"] = True
         pw.emit({"to": a.alert_to, "item": a.label or a.query, "url": None, "unit": a.unit or "$",

@@ -374,14 +374,14 @@ def main():
     rc, out = run(state="t4", query="toronto to karachi", kind="fare", below=900)
     check("no search is spent at all", search.calls == calls, out)
     check("it exits 0 — a config limit is not an infrastructure error", rc == 0, rc)
-    # The message and the kind changed DELIBERATELY when scripts/flight_watch.py shipped: a fare CAN
-    # now be read, from a URL built out of an itinerary, so refusing with "this cannot work" became
-    # false. What this file still cannot do is invent the dates. The two STRUCTURAL assertions below
-    # are unchanged and are the ones that matter — no search is spent, and no number is ever emitted
-    # for a fare.
+    # The pointer changed twice, deliberately both times: first to flight_watch.py when a fare
+    # became readable from a built URL, then to FlightClaw (2026-08-09) when the fare engine
+    # became real. What this file still cannot do is invent the dates. The two STRUCTURAL
+    # assertions below are unchanged and are the ones that matter — no search is spent, and no
+    # number is ever emitted for a fare.
     check("the LOG line says an itinerary is what is missing, and points at the tool",
           len(hd.LOG_RE.findall("## Response\n" + out)) == 1
-          and "needs an itinerary" in out and "flight_watch.py" in out, out)
+          and "needs an itinerary" in out and "FlightClaw" in out, out)
     check("...and it no longer claims a fare cannot be watched at all",
           "cannot work" not in out, out)
     data = [json.loads(m) for m in hd.ALERT_DATA_RE.findall("## Response\n" + out)]

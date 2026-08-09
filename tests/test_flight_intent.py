@@ -341,42 +341,100 @@ def main():
     check("the modal 'may' is why bare is off by default",
           p._fl_find_dates("may i ask what this costs", TODAY) == [])
 
-    print("\n--- the reported two-turn exchange, end to end ---")
+    print("\n--- the reported two-turn exchange, end to end (hermetic engine) ---")
+    # Every turn that completes the form now calls FlightClaw. The stub returns canned text in
+    # the SAME shapes the live service emits (pinned against a live capture, 2026-08-09) — these
+    # tests must never touch the network, and a fabricated engine reply here is fine because what
+    # is under test is the pipe's handling, not the engine.
+    DATES_TEXT = ("YYZ -> YVR cheapest dates (ECONOMY, CAD):\n"
+                  "  2026-10-02 -> 2026-11-02: C$323\n"
+                  "  2026-10-15 -> 2026-11-15: C$338\n"
+                  "\n2 date(s) found. Cheapest: C$323")
+    DEC_TEXT = ("YYZ -> YVR cheapest dates (ECONOMY, CAD):\n"
+                "  2026-12-03 -> 2027-01-03: C$401\n\n1 date(s) found. Cheapest: C$401")
+    # The RULERLESS shape — the MCP tool's real output (captured live 2026-08-09). The CLI
+    # prints ===== rulers; the renderer must take both, and the ruler-shape is pinned separately.
+    OPTIONS_TEXT = ("\nYYZ -> YVR on 2026-10-02 (CAD):\n\n"
+                    "Option 1: C$686 total\n  Outbound: C$338 | 5h 10m | 0 stop(s)\n"
+                    "  F8 607: YYZ 19:55 -> YVR 22:05\n  Book: https://g.example/book1\n\n"
+                    "Option 2: C$690 total\n  Outbound: C$340 | 5h 10m | 0 stop(s)\n"
+                    "  Book: https://g.example/book2\n")
+    TRACK_TEXT = ("Tracking YYZ-YVR-2026-10-02-RT-2026-11-02: C$338 (F8)\n"
+                  "Target price: C$1,000\n\n1 new route(s) tracked.")
+
+    def rig(q, dates=DATES_TEXT, options=OPTIONS_TEXT, track=TRACK_TEXT, fail=None,
+            calls=None, jobs=None):
+        """A pipe whose engine and scheduler are fixtures. Records every call."""
+        calls = calls if calls is not None else []
+        jobs = jobs if jobs is not None else []
+
+        async def fc(tool, arguments, timeout=0):
+            calls.append((tool, dict(arguments)))
+            if fail:
+                raise RuntimeError(fail)
+            return {"search_dates": dates, "search_flights": options,
+                    "track_flight": track}.get(tool, "")
+
+        def api(method, path, body=None, timeout=10):
+            if method == "POST" and path == "/api/jobs":
+                jobs.append(body)
+                return 200, {"job": {"id": "fcjob1234567", "next_run_at": None}}, None
+            return 200, {"jobs": []}, None
+
+        q._fc_call = fc
+        q._hermes_api = api
+        q._stamp_owner = lambda *a, **k: 1
+        q._contact = lambda h: {}
+        q._save_phone = lambda h, e: True
+        q._alert_setup_block = lambda h: "\n\n[alert-setup]"
+        q._route_metric = lambda *a, **k: None
+        return q, calls, jobs
 
     def drain(gen):
         async def go():
             return "".join([c async for c in gen])
         return asyncio.run(go())
 
-    def form_turn(reply, prev):
-        """Turn 2: a live draft, then the user's answer."""
+    def form_turn(reply, prev, answered=False, **rigkw):
+        """Turn 2: a live draft, then the user's answer. Hermetic."""
         q = P.__new__(P)
-        q._flight_draft = {"c": {"t": time.time(), "turns": 1, "slots": dict(prev)}}
-        q._route_metric = lambda *a, **k: None
+        q._flight_draft = {"c": {"t": time.time(), "turns": 1, "slots": dict(prev),
+                                 **({"answered": True} if answered else {})}}
+        q, calls, jobs = rig(q, **rigkw)
         out = q._flight_turn("c", reply, [], resume=True)
-        return None if out is None else drain(out)
+        return (None if out is None else drain(out)), calls, jobs, q
 
     OPEN = {"origin": ["YTO", "Toronto"], "dest": ["YVR", "Vancouver"], "target": 1000.0}
-    out = form_turn("leaving October and returning nov", OPEN)
+    out, calls, jobs, _ = form_turn("leaving October and returning nov", OPEN)
     check("the reply is ANSWERED, not passed on", out is not None, "returned None")
-    check("...with October as the departure", out and "October 2026" in out, (out or "")[:220])
-    check("...and November as the return", out and "November 2026" in out, (out or "")[:220])
-    check("...and a link built from those months",
-          out and "October%202026" in out, (out or "")[:400])
-    out = form_turn("October", OPEN)
-    check("a one-word month answers too", out is not None and "October 2026" in out,
-          (out or "")[:160])
+    check("...the month window resolved to CONCRETE dates via search_dates",
+          calls and calls[0][0] == "search_dates"
+          and calls[0][1]["from_date"] == "2026-10-01" and calls[0][1]["to_date"] == "2026-10-31",
+          calls[:1])
+    check("...with the trip length taken from the window gap",
+          calls[0][1].get("trip_duration") == 31, calls[:1])
+    check("...and the chosen dates are NAMED as chosen",
+          "2026-10-02" in out and "chosen dates, not typed ones" in out, out[:600])
+    check("...real fares are shown for the pick",
+          calls[1][0] == "search_flights" and "Option 1: C$686 total" in out, out[:900])
+    check("...as links, not raw 500-char URLs",
+          "[Book option 1](https://g.example/book1)" in out, out[-600:])
+    check("no watch verbs -> nothing scheduled, and the offer says how",
+          not jobs and "track it" in out, out[-300:])
+    out, calls, jobs, _ = form_turn("October", OPEN)
+    check("a one-word month answers too", out is not None and "2026-10-02" in out,
+          (out or "")[:300])
 
     print("\n--- a date attempt the parser cannot read re-asks; it never escapes ---")
     for reply in ("sometime around the 3rd quarter", "5ish weeks out",
                   "the week after next month maybe"):
-        out = form_turn(reply, OPEN)
+        out, _c, _j, _ = form_turn(reply, OPEN)
         check(f"unreadable dates re-ask: {reply[:38]!r}",
               out is not None and "couldn't read" in out, (out or "RETURNED NONE")[:160])
     check("...and the re-ask quotes what it could not read",
-          "3rd quarter" in (form_turn("sometime around the 3rd quarter", OPEN) or ""))
+          "3rd quarter" in (form_turn("sometime around the 3rd quarter", OPEN)[0] or ""))
     check("...and lists forms that do work",
-          "Oct 15" in (form_turn("5ish weeks out", OPEN) or ""))
+          "Oct 15" in (form_turn("5ish weeks out", OPEN)[0] or ""))
     # The wildcard that made this necessary: 'next month' used to resolve to a next-Monday date and
     # complete the form on a departure the user never named.
     check("'next month' names no day of the week",
@@ -390,139 +448,154 @@ def main():
               got and got[0].get("date") == want, got)
     # The other direction: moving on must stay cheap. No month, no digit, no duration word.
     for reply in ("what's the weather like", "who won the game", "thanks"):
-        check(f"a topic change still routes normally: {reply!r}", form_turn(reply, OPEN) is None,
-              (form_turn(reply, OPEN) or "")[:120])
+        check(f"a topic change still routes normally: {reply!r}",
+              form_turn(reply, OPEN)[0] is None)
     check("abandoning still wins over everything",
-          "dropped" in (form_turn("never mind", OPEN) or ""))
+          "dropped" in (form_turn("never mind", OPEN)[0] or ""))
 
-    # REPORTED LIVE, 2026-08-09. The answer ends by saying Google Flights can set a price alert in
-    # one click. The user replied "yes so set alert" — the draft had already been dropped, so that
-    # matched nothing, became a background followup, and the agent built job e6df1739a275: every
-    # 1440m for 7 days (against "every 15 mins next 2 hours"), no --depart/--return, and a command
-    # argparse rejects outright. Three failures, all downstream of this one gap.
-    print("\n--- 'yes, set it up' after an answer is claimed, never handed to the scheduler ---")
-
-    def answered(reply, slots):
-        q = P.__new__(P)
-        q._flight_draft = {"c": {"t": time.time(), "turns": 0, "slots": dict(slots),
-                                 "answered": True}}
-        q._route_metric = lambda *a, **k: None
-        out = q._flight_turn("c", reply, [], resume=True)
-        return (None if out is None else drain(out)), q
-
+    print("\n--- ONE TURN: a tracking ask searches, tracks and schedules together ---")
+    # The canonical message, the one that started all of this. With FlightClaw live it now does
+    # everything at once: resolve the window, show real fares, create the tracking entry AND the
+    # cron job on the USER'S cadence — and the phone typed inline is saved before the first alert
+    # could need it.
     TURN1 = ("track price from Toronto to Vancouver and text me if the price is under 1000, "
-             "leaving oct and returning nov, check every 15 mins next 2 hours.")
-    S = p._flight_slots(TURN1, today=TODAY)
-    check("the cadence the user asked for is captured, not dropped",
-          S.get("cadence") == "every 15 mins next 2 hours", S.get("cadence"))
-    check("...and the dates come out of the same sentence",
-          S["depart"]["month"] == "2026-10" and S["ret"]["month"] == "2026-11", S.get("depart"))
+             "leaving oct and returning nov send me the link on email and notify me on text at "
+             "5145579764, check every 15 mins next 2 hours.")
+    S1 = p._flight_slots(TURN1, today=TODAY)
+    check("tracking intent is a slot", S1.get("wants_watch") is True, S1)
+    check("the inline phone number is a slot, normalised",
+          S1.get("phone") == "+15145579764", S1.get("phone"))
+    check("...and 'under 1000' did not read as a phone number",
+          p._flight_slots("watch flights to tokyo under 1000", today=TODAY).get("phone") is None)
 
-    # The answer must LEAVE the draft behind, or the affirmative has nothing to match.
-    q = P.__new__(P); q._flight_draft = {}; q._route_metric = lambda *a, **k: None
-    drain(q._flight_turn("c", TURN1, [], resume=False))
-    check("a completed answer keeps its draft, marked answered",
-          q._flight_draft.get("c", {}).get("answered") is True, q._flight_draft)
+    q = P.__new__(P); q._flight_draft = {}
+    q, calls, jobs = rig(q)
+    saved_phones = []
+    q._save_phone = lambda h, e: (saved_phones.append((h, e)), True)[1]
+    out = drain(q._flight_turn("c", TURN1, [], resume=False, handle="tester"))
+    check("one turn: fares are shown", "Option 1: C$686 total" in out, out[:800])
+    check("one turn: the watch is created", "Watching it" in out and "fcjob1234567" in out,
+          out[-900:])
+    check("...tracking was created with the user's ceiling",
+          any(t == "track_flight" and a.get("target_price") == 1000.0 for t, a in calls), calls)
+    check("...on the RESOLVED dates, not the window",
+          any(t == "track_flight" and a.get("date") == "2026-10-02"
+              and a.get("return_date") == "2026-11-02" for t, a in calls), calls)
+    check("...the job runs on the cadence the user typed",
+          jobs and jobs[0]["schedule"] == "every 15m" and jobs[0]["repeat"] == 8, jobs)
+    check("...its command is the vetted flightclaw_watch with the route id",
+          "flightclaw_watch.py" in jobs[0]["prompt"]
+          and "YYZ-YVR-2026-10-02-RT-2026-11-02" in jobs[0]["prompt"], jobs[0]["prompt"])
+    check("...which parses clean and passes the pipe's own job-shape checks",
+          P._job_stray_args(jobs[0]["prompt"])[0] == []
+          and [d[0] for d in P._job_defects({"prompt": jobs[0]["prompt"], "deliver": "local"})]
+          == [], jobs[0]["prompt"])
+    check("...the inline phone was saved for the alerts",
+          saved_phones == [("tester", "+15145579764")], saved_phones)
+    check("...and the confirmation shows the alert channels", "[alert-setup]" in out)
+    check("...and the baseline price FlightClaw just recorded",
+          "C$338" in out, out[-900:])
 
-    for reply in ("yes so set alert", "yes", "ok do it", "set the alert", "please set it up",
-                  "track it", "sure", "yes please"):
-        out, _ = answered(reply, S)
-        check(f"claimed, not scheduled: {reply!r}",
-              out is not None and "Still nothing scheduled" in out, (out or "FELL THROUGH")[:120])
-    out, after = answered("yes so set alert", S)
-    check("...it hands over the real alert, on the confirmed itinerary",
-          "Track prices" in out and "google.com/travel/flights" in out, out[:200])
-    check("...says the cadence back rather than ignoring it",
-          "every 15 mins next 2 hours" in out, out[-400:])
-    check("...names why it will not schedule one itself",
-          "won't for a fare" in out and "can't read one on every single run" in out, out[-600:])
-    check("...promises two steps and lists exactly two",
-          out.count("\n1. ") == 1 and out.count("\n2. ") == 1 and "\n3. " not in out, out)
-    check("...and the list is closed, so the next paragraph is not swallowed into item 2",
-          "\n\nThat alert is Google's" in out, out[out.find("2. "):][:260])
-    check("...and drops the draft so it cannot answer twice", "c" not in after._flight_draft)
+    print("\n--- 'track it' after a search-only answer creates the same watch ---")
+    S_EXACT = p._flight_slots("find flights from toronto to vancouver oct 15 returning nov 12 "
+                              "under 1000", today=TODAY)
+    check("lookup verbs alone do not set wants_watch", not S_EXACT.get("wants_watch"), S_EXACT)
+    for reply in ("track it", "yes", "set the alert", "yes please", "schedule it anyway"):
+        out, calls, jobs, _ = form_turn(reply, S_EXACT, answered=True)
+        check(f"watch created on: {reply!r}",
+              out is not None and "Watching it" in out and len(jobs) == 1,
+              (out or "FELL THROUGH")[:200])
+    out, calls, jobs, _ = form_turn("what's the weather", S_EXACT, answered=True)
+    check("moving on after an answer still routes normally", out is None)
+    out, calls, jobs, _ = form_turn("never mind", S_EXACT, answered=True)
+    check("abandoning after an answer still wins", "dropped" in (out or ""))
 
-    # REPORTED 2026-08-09: "I've noted your $1,000 target" read as though something had been stored
-    # and would be acted on, in a reply whose whole point is that nothing was. And the reply never
-    # actually ASKED whether the user wanted the alert -- it trailed off into "want different
-    # dates?", so "yes so set alert" was the user answering a question that had not been put.
-    print("\n--- the answer states what is NOT running, and asks a real question ---")
-    q = P.__new__(P); q._flight_draft = {}; q._route_metric = lambda *a, **k: None
-    ans = drain(q._flight_turn("c", TURN1, [], resume=False))
-    check("it says plainly that nothing is scheduled",
-          "Nothing is scheduled" in ans and "no alert, no watch, no job" in ans.lower(), ans[:400])
-    check("'I've noted' is gone — it implied storage that never happened",
-          "noted your" not in ans.lower(), ans[:400])
-    check("...and the target is described as unsaved, not noted",
-          "not saved anywhere" in ans and "nothing is comparing against it" in ans, ans[:600])
-    check("the cadence is echoed as NOT running, rather than silently dropped",
-          "every 15 mins next 2 hours" in ans and "no check is running" in ans, ans[:600])
-    check("it asks a direct question about the alert",
-          "Do you still want a price alert set up?" in ans, ans[-500:])
-    check("...and says what answering yes will get them",
-          "- **yes**" in ans and "two steps" in ans, ans[-700:])
-    check("...and offers the job as a second option, with its cost in the same breath",
-          "- **schedule it anyway**" in ans and "cannot read a fare" in ans, ans[-700:])
-    check("the itinerary link is still handed over unprompted",
-          "google.com/travel/flights" in ans)
+    print("\n--- the engine failing is said plainly; nothing is scheduled on a guess ---")
+    q = P.__new__(P); q._flight_draft = {}
+    q, calls, jobs = rig(q, fail="connection refused")
+    out = drain(q._flight_turn("c", TURN1, [], resume=False, handle="tester"))
+    check("engine down: honest, with the manual link",
+          "couldn't reach live fares" in out and "google.com/travel/flights" in out, out)
+    check("...and NO job was created", jobs == [], jobs)
+    check("...and no number was invented", "C$" not in out.split("](")[0], out)
+    check("...the draft survives un-answered so a retry re-searches",
+          q._flight_draft["c"].get("answered") is not True)
+    q = P.__new__(P); q._flight_draft = {}
+    q, calls, jobs = rig(q, dates="No prices found for YYZ -> YVR between X and Y")
+    out = drain(q._flight_turn("c", TURN1, [], resume=False, handle="tester"))
+    check("an empty grid is honest too, and schedules nothing",
+          "Nothing was scheduled" in out and jobs == [], out[:400])
 
-    # The user asked for the job four times. The refusal was right about the FACT (0 of 19 readable)
-    # and wrong about whose call it is, so "schedule it anyway" builds one — on flight_watch.py,
-    # which takes an itinerary, never on price_search, which has nowhere to put one.
-    print("\n--- 'schedule it anyway' builds the job, deterministically ---")
-    check("the cadence becomes the schedule the user asked for, not a guess",
-          P._fl_schedule("every 15 mins next 2 hours") == ("every 15m", 8, False),
-          P._fl_schedule("every 15 mins next 2 hours"))
-    for cad, want in [("every 6 hours for the next 3 days", ("every 6h", 12)),
-                      ("every 2h next 12 hours", ("every 2h", 6)),
-                      ("every 1 day", ("every 1d", 28)),
-                      ("hourly", ("every 1h", 168)), ("daily", ("every 1d", 7))]:
-        got = P._fl_schedule(cad)
-        check(f"cadence {cad!r} -> {want}", got[:2] == want, got)
-    check("no cadence falls back, and SAYS it fell back",
-          P._fl_schedule(None) == ("every 6h", 28, True))
-
-    cmd = p._fl_watch_cmd(S, "ohmzaiowui", "YTO→YVR fare watch", "every 15m")
-    check("the command is flight_watch, never price_search",
-          "flight_watch.py" in cmd and "price_search" not in cmd, cmd)
-    check("...and it carries the itinerary as real flags",
-          "--depart-month 2026-10" in cmd and "--return-month 2026-11" in cmd, cmd)
-    check("...the ceiling too", "--below 1000" in cmd, cmd)
-    check("...with every spaced value quoted, so argparse accepts it",
+    print("\n--- the deterministic pieces the one-turn flow is built from ---")
+    check("cadence with its own bound: the user's words win",
+          P._fl_schedule("every 15 mins next 2 hours", horizon_days=60) == ("every 15m", 8, False))
+    check("an UNBOUNDED cadence runs until departure",
+          P._fl_schedule("every 6 hours", horizon_days=30) == ("every 6h", 120, False))
+    check("no cadence at all: daily until departure, and SAYS it defaulted",
+          P._fl_schedule(None, horizon_days=30) == ("every 1d", 30, True))
+    check("...capped so 15-minute checks on a far trip cannot be five thousand runs",
+          P._fl_schedule("every 15 mins", horizon_days=120)[1] == 360)
+    check("the horizon for an exact date is days until it",
+          P._fl_horizon_days({"depart": {"kind": "exact", "date": "2026-09-08"}},
+                             today=TODAY) == 32)
+    check("...for a window, days until the window ENDS",
+          P._fl_horizon_days({"depart": {"kind": "month", "from": "2026-10-01",
+                                         "to": "2026-10-31"}}, today=TODAY) == 85)
+    check("...clamped for a passed date", P._fl_horizon_days(
+        {"depart": {"kind": "exact", "date": "2020-01-01"}}, today=TODAY) == 1)
+    rid = P._fc_route_id({"origin": ["YYZ", "x"], "dest": ["YVR", "y"],
+                          "depart": {"kind": "exact", "date": "2026-10-02"},
+                          "ret": {"kind": "exact", "date": "2026-11-02"}})
+    # "toronto" resolves to the METRO code YTO on purpose (any Toronto airport) — and fli's
+    # Airport enum rejects metro codes. Measured 2026-08-09: 15 of 129 codes in _IATA are metro.
+    # The translation lives at the engine boundary so the table's semantics survive.
+    check("metro codes are translated at the engine boundary",
+          P._fc_code("YTO") == "YYZ" and P._fc_code("NYC") == "JFK"
+          and P._fc_code("LON") == "LHR", "")
+    check("...and real airport codes pass through untouched",
+          P._fc_code("YYZ") == "YYZ" and P._fc_code("KHI") == "KHI")
+    check("...so a 'toronto to vancouver' route id is an AIRPORT pair",
+          P._fc_route_id({"origin": ["YTO", "Toronto"], "dest": ["YVR", "Vancouver"],
+                          "depart": {"kind": "exact", "date": "2026-10-02"},
+                          "ret": {"kind": "exact", "date": "2026-11-02"}})
+          == "YYZ-YVR-2026-10-02-RT-2026-11-02")
+    tor_plan = p._fc_search_plan({"origin": ["YTO", "Toronto"], "dest": ["YVR", "Vancouver"],
+                                  "depart": {"kind": "exact", "date": "2026-10-15"}})
+    check("...and the search goes out with the airport code too",
+          tor_plan[1]["origin"] == "YYZ", tor_plan)
+    check("the route id matches FlightClaw's own formula",
+          rid == "YYZ-YVR-2026-10-02-RT-2026-11-02", rid)
+    check("...one-way has no RT tail",
+          P._fc_route_id({"origin": ["YYZ", "x"], "dest": ["YYC", "y"], "one_way": True,
+                          "depart": {"kind": "exact", "date": "2026-09-12"}})
+          == "YYZ-YYC-2026-09-12")
+    plan = P._fc_search_plan(P.__new__(P), {"origin": ["YYZ", "x"], "dest": ["YVR", "y"],
+                                            "depart": {"kind": "exact", "date": "2026-10-15"},
+                                            "ret": {"kind": "exact", "date": "2026-11-12"}}) \
+        if False else p._fc_search_plan({"origin": ["YYZ", "x"], "dest": ["YVR", "y"],
+                                         "depart": {"kind": "exact", "date": "2026-10-15"},
+                                         "ret": {"kind": "exact", "date": "2026-11-12"}})
+    ruled = ("\nYYZ -> YVR (CAD)\n\n" + "=" * 60 + "\nOption 1: C$646 total\n"
+             "  Book: https://g/b1\n" + "=" * 60 + "\nOption 2: C$650\n  Book: https://g/b2\n")
+    r_out = p._fc_render_options(ruled)
+    check("the CLI's ruler shape renders identically",
+          "Option 1: C$646 total" in r_out and "[Book option 1](https://g/b1)" in r_out, r_out)
+    check("exact dates -> search_flights with both dates",
+          plan[0] == "search_flights" and plan[1]["return_date"] == "2026-11-12", plan)
+    cmd = p._fc_watch_cmd("YYZ-YVR-2026-10-02-RT-2026-11-02", "fc-test", "tester",
+                          "YYZ→YVR fare watch under $1,000", "every 15m", 1000.0)
+    check("the watch command quotes every spaced value",
           P._job_stray_args(cmd)[0] == [], P._job_stray_args(cmd))
-    check("...and it passes the pipe's own job-shape check",
-          [d[0] for d in P._job_defects({"prompt": cmd, "deliver": "local"})] == [],
-          [d[0] for d in P._job_defects({"prompt": cmd, "deliver": "local"})])
-    check("a one-way carries --one-way and no return",
-          "--one-way" in p._fl_watch_cmd(dict(S, one_way=True, ret=None), "u", "n", "every 6h"))
+    trip = p._job_trip({"prompt": cmd})
+    check("the job listing renders the itinerary from the route id",
+          "YYZ → YVR" in trip and "2 Oct 2026" in trip and "2 Nov 2026" in trip, trip)
 
-    # The offer and the creation must not disagree: the answer quotes a schedule before the job
-    # exists, so both read the same function.
-    _q2 = P.__new__(P); _q2._flight_draft = {}; _q2._route_metric = lambda *a, **k: None
-    ans2 = drain(_q2._flight_turn("z", TURN1, [], resume=False))
-    check("the offer quotes the schedule the builder would actually use",
-          "every 15m" in ans2 and "8 runs" in ans2, ans2[-700:])
-    check("...and names what every run will report",
-          "cannot read a fare" in ans2, ans2[-700:])
-
-    # Routing: "anyway" must beat the plain affirmative, since "yes, schedule it anyway" has both.
-    for t in ("schedule it anyway", "yes schedule it anyway", "create the job", "do it anyway",
-              "just do it", "set it up regardless"):
-        check(f"routed to the builder: {t!r}", bool(P._FL_ANYWAY.search(t)), t)
-    for t in ("yes", "ok do it", "set the alert", "yes please"):
-        check(f"...and a plain yes still is not: {t!r}", not P._FL_ANYWAY.search(t), t)
-
-    print("\n--- ...while a correction still re-answers and moving on still routes normally ---")
-    for reply, want in [("actually make it december", "December"),
-                        ("no, make it december", "December"),
-                        ("how about december instead", "December")]:
-        out, _ = answered(reply, S)
-        check(f"a correction re-answers: {reply!r}", out and want in out, (out or "None")[:140])
-    for reply in ("what's the weather", "may i ask something else", "thanks"):
-        out, _ = answered(reply, S)
-        check(f"moving on routes normally: {reply!r}", out is None, (out or "")[:120])
-    out, _ = answered("never mind", S)
-    check("abandoning still wins after an answer too", out and "dropped" in out)
+    print("\n--- ...while a correction still re-answers and moving on routes normally ---")
+    for reply in ("actually make it december", "no, make it december",
+                  "how about december instead"):
+        out, calls, _j, _ = form_turn(reply, S_EXACT, answered=True, dates=DEC_TEXT)
+        check(f"a correction re-answers with a fresh search: {reply!r}",
+              out is not None and calls and "2026-12-03" in out, (out or "None")[:300])
 
     print("\n--- the Google Flights link is built from the slots, never typed by a model ---")
     u = p._gflights_url(b)
