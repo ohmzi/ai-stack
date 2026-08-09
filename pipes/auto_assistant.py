@@ -300,8 +300,8 @@ PARK_TTL_S = 86400      # a rendered list older than this stops backing ordinals
 # eight and nothing consumed it, because the branch that would was never reached.
 #
 # So this path exists to stop a fabricated fare, which it can do WITHOUT being able to read a real
-# one. Measured across all 19 sites the user named (docs/FLIGHT_RECON.md): 11 block automated
-# clients outright, 6 have no fetchable URL, 2 are deal feeds. Zero are readable. So the terminal
+# one. Measured across all 19 sites the user named (docs/FLIGHT_RECON.md): 16 block automated
+# clients outright, 1 has no fetchable URL, 2 are deal feeds. Zero are readable. So the terminal
 # action here is deliberately NOT "create a watch" — creating one would leave a monitor that fires,
 # reports fare_unsupported and texts nobody, which is the exact failure the phone gate at :5147
 # exists to prevent. The terminal action is an honest answer plus a Google Flights link built from
@@ -1488,6 +1488,20 @@ class Pipe:
                             re.I)
     _FL_TARGET = re.compile(r"\b(?:under|below|less\s+than|at\s+most|max(?:imum)?|budget\s+of"
                             r"|no\s+more\s+than|cheaper\s+than)\s*\$?\s*([\d,]+(?:\.\d{2})?)\b", re.I)
+    # How often the user asked to be checked, verbatim. Recorded, never acted on.
+    # "That answer was close, but change this." Distinguishes a correction the answer invited from
+    # an unrelated sentence that merely contains a month-shaped word.
+    _FL_CHANGE = re.compile(r"\b(?:actually|instead|rather|change|make\s+it|switch|move\s+it"
+                            r"|how\s+about|what\s+about|can\s+we\s+do|let'?s\s+do|different"
+                            r"|no,?\s+(?:make|do|try)|update\s+it)\b", re.I)
+    _FL_UNITS = r"m|min|mins|minutes?|h|hr|hrs|hours?|d|days?|w|weeks?"
+    # The bound is optional AND its lead-in is: people write "every 15 mins next 2 hours" as often
+    # as "...for the next 2 hours". Requiring for|over captured only half the phrase, which is the
+    # half that matters least.
+    _FL_CADENCE = re.compile(rf"\bevery\s+\d{{1,4}}\s*(?:{_FL_UNITS})\b"
+                             rf"(?:\s*,?\s*(?:for\s+|over\s+)?(?:the\s+)?(?:next\s+)"
+                             rf"\d{{1,3}}\s*(?:{_FL_UNITS})\b)?"
+                             rf"|\b(?:hourly|daily|weekly|twice\s+a\s+day)\b", re.I)
     _FL_WORDNUM = {"a": 1, "one": 1, "two": 2, "three": 3, "four": 4}
     _FL_DOW = {"mon": 0, "tue": 1, "tues": 1, "wed": 2, "thu": 3, "thur": 3, "thurs": 3,
                "fri": 4, "sat": 5, "sun": 6}
@@ -1691,6 +1705,13 @@ class Pipe:
         m = self._FL_TARGET.search(text or "")
         if m:
             s["target"] = float(m.group(1).replace(",", ""))
+        # The cadence is NOT used to schedule anything — nothing here schedules. It is captured so
+        # the reply can say it back, because "check every 15 mins next 2 hours" was stated in the
+        # first turn, dropped on the floor, and the job that eventually appeared ran once a day for
+        # a week instead. Whatever answers "set the alert" has to show it heard this.
+        m = self._FL_CADENCE.search(text or "")
+        if m:
+            s["cadence"] = re.sub(r"\s+", " ", m.group(0)).strip()
         if self._FL_SEASON.search(text or "") and not dates:
             s["season_only"] = True
         return s
@@ -1819,17 +1840,69 @@ class Pipe:
                 f"Tell me {' and '.join(asks)}, and I'll pull it up.{note}\n\n"
                 f"*Say “never mind” to drop this.*")
 
+    # "Yes, do that" said to the answer above. Anchored affirmatives plus explicit set-it-up verbs.
+    _FL_SETALERT = re.compile(
+        r"^\s*(?:yes|yeah|yep|yup|ok(?:ay)?|sure|please|do\s+it|go\s+ahead|sounds?\s+good)\b"
+        r"|\bset\s+(?:it\s+|the\s+|an?\s+)*alert"
+        r"|\b(?:set|create|make|add|start|schedule)\s+(?:it|the|an?|this|that)?\s*"
+        r"(?:up\b|alert|watch|monitor|tracker)"
+        r"|\b(?:track|watch|monitor)\s+(?:it|this|that)\b", re.I)
+
+    def _flight_after_answer(self, text, s, cid):
+        """The turn AFTER a completed flight answer, or None to route normally.
+
+        This exists because of what "yes so set alert" did on 2026-08-09. The answer above ends by
+        saying Google Flights can set a price alert in one click — the user replied yes to exactly
+        that, and because the draft had already been dropped, the reply matched nothing here, became
+        a background followup, and the agent built job e6df1739a275: a fare watch scheduled every
+        1440 minutes for 7 days, with no --depart or --return, from a command that argparse rejects
+        outright. Three separate failures, all downstream of this one gap.
+
+        Nothing here schedules anything, and that is the point: the fare cannot be watched by this
+        host (19 sites, 0 readable) so the honest answer to "set the alert" is the alert that
+        actually exists, on the itinerary the user already confirmed.
+        """
+        if not self._FL_SETALERT.search(text or ""):
+            return None
+        if cid:
+            self._flight_draft.pop(cid, None)
+        self._route_metric("flight.alert_handoff", 0, "flight_setalert", text, deterministic=True)
+        url = self._gflights_url(s)
+        tgt = (f" and set **under ${s['target']:,.0f}** as the threshold" if s.get("target") else "")
+        # Say the cadence back when they gave one. They asked for something specific and a reply
+        # that ignores it reads as though it was not heard — which is what the broken job did.
+        cad = (f"\n\nYou asked me to check **{s['cadence']}**. Google Flights watches the fare "
+               f"continuously and mails you on a real change, so it is strictly more often than "
+               f"that, and without eight texts telling you nothing moved."
+               if s.get("cadence") else "")
+        return (
+            f"I can't set that one up myself — and I'd rather say so than schedule something that "
+            f"silently never fires.\n\n{self._flight_table(s)}\n\n"
+            f"**[Open your itinerary on Google Flights]({url})** — then switch on **Track prices** "
+            f"at the top of the results{tgt}. That alert is theirs, it emails you on a real price "
+            f"move, and it costs nothing.\n\n"
+            f"Why not here: a fare only exists for one route on one set of dates, behind a search "
+            f"form. I measured all 19 flight sites this host knows — 16 block automated visits, 1 "
+            f"has no linkable search, 2 are deal blogs. A watch I scheduled would tick on your "
+            f"itinerary and never read a number.{cad}\n\n"
+            f"*If you'd rather I watched something I actually can — a product page, a stock, a "
+            f"restock — just say so.*")
+
     def _flight_answer(self, s, cid):
         """The honest answer. Nothing is scheduled, and the reply says why in one sentence.
 
         This is where a watch WOULD be created if any site were readable. Measured across all 19
-        sites the user named (docs/FLIGHT_RECON.md): 11 block automated clients, 6 expose no fetchable
+        sites the user named (docs/FLIGHT_RECON.md): 16 block automated clients, 1 exposes no fetchable
         URL, 2 are deal feeds, 0 are readable. Creating a watch anyway would leave a monitor that
         fires, reports that it cannot read a fare, and texts nobody — so it hands over a link the
         user can click instead of a promise it cannot keep.
         """
+        # The draft is KEPT, marked answered, rather than dropped. Dropping it is what left "yes so
+        # set alert" with nothing to match, so it fell through to the agent and became a fare job
+        # that could not run (:_flight_after_answer). It still expires on the ordinary TTL.
         if cid:
-            self._flight_draft.pop(cid, None)
+            self._lru(self._flight_draft, cid,
+                      {"t": time.time(), "turns": 0, "slots": s, "answered": True})
         url = self._gflights_url(s)
         tgt = (f"\n\nI've noted your **under ${s['target']:,.0f}** target — Google Flights can set a "
                f"price alert on that itinerary for you in one click, on the same page."
@@ -1837,9 +1910,12 @@ class Pipe:
         return (
             f"✈️ **{s['origin'][1]} → {s['dest'][1]}**\n\n{self._flight_table(s)}\n\n"
             f"**[Open this search on Google Flights]({url})**\n\n"
+            # Counts come from flight_sites.json and were 11/6/2 until the 2026-08-09 browser recon
+            # closed the six unmeasured hosts. Two different tallies on the same surface is how a
+            # reader learns not to trust either, so they move together or not at all.
             f"I can't quote you a fare myself, and I'd rather say so than make one up. I checked "
-            f"all 19 flight sites for this: 11 block automated visits outright, 6 have no URL I can "
-            f"read, and 2 are deal blogs rather than search engines — so any number I gave you "
+            f"all 19 flight sites for this: 16 block automated visits outright, 1 has no linkable "
+            f"search, and 2 are deal blogs rather than search engines — so any number I gave you "
             f"would be invented. The link above is your exact itinerary, prefilled.{tgt}\n\n"
             f"*Want a different route or dates? Just say so.*")
 
@@ -1874,9 +1950,21 @@ class Pipe:
                 return self._say("No problem — dropped.")
             if prev is None:
                 return None
+            # An answered itinerary: "yes, set it up" is about THAT, not a new slot to merge.
+            # Checked before the merge so an affirmative cannot be read as an empty answer and
+            # dropped into the scheduler.
+            if (draft or {}).get("answered"):
+                done = self._flight_after_answer(text, prev, cid)
+                if done is not None:
+                    return self._say(done)
             # Bare months are readable HERE and nowhere else: the form asked "when?", so a lone
-            # "October" is an answer rather than a modal verb.
-            slots = self._flight_slots(text, prev=prev, bare="depart" not in prev)
+            # "October" is an answer rather than a modal verb. After an ANSWER there is no
+            # outstanding question, so a bare month is only taken alongside a change cue —
+            # "actually make it december" is a correction the answer invited ("Want a different
+            # route or dates? Just say so"), while "may i ask something" is not a date at all.
+            answered = bool((draft or {}).get("answered"))
+            bare = ("depart" not in prev) or (answered and bool(self._FL_CHANGE.search(text or "")))
+            slots = self._flight_slots(text, prev=prev, bare=bare)
             # A reply that fills nothing and answers nothing is the user moving on, not an answer.
             if slots == prev and not self._is_flight_request(text)[0]:
                 # ...unless it was plainly an ATTEMPT at dates that no arm could read. Falling
@@ -1886,7 +1974,11 @@ class Pipe:
                 # month, a digit or a duration word is the user answering the question — so say it
                 # could not be read, and ask again in the same breath. Anything else still returns
                 # None, because the user moving on must stay cheap.
-                if self._FL_TRIED_DATES.search(text or ""):
+                # Only while the form is genuinely OPEN. After an answer nothing is outstanding, so
+                # an unreadable message is the user moving on, not a failed attempt at dates —
+                # re-asking there would trap them with "I couldn't read the dates" for a sentence
+                # that was never about dates.
+                if not answered and self._FL_TRIED_DATES.search(text or ""):
                     self._route_metric("flight.slots", 0, "flight_dates_unparsed", text,
                                        n_missing=len(self._flight_missing(prev)))
                     return self._say(self._flight_ask(prev, cid, turns + 1, unreadable=text))
@@ -4929,7 +5021,7 @@ class Pipe:
 
         # 3a. A FLIGHT ask, before the agent gets it. This control means "make this a background
         #     job", and for a fare that is a promise this host cannot keep: measured across all 19
-        #     sites the user named, 11 block automated clients, 6 expose no fetchable URL, 2 are deal
+        #     sites the user named, 16 block automated clients, 1 exposes no fetchable URL, 2 are deal
         #     feeds, 0 are readable (docs/FLIGHT_RECON.md). Delegating anyway is not neutral — it
         #     produces exactly the job the user reported on 2026-08-09, 0cf56b8c3afd: a fare watched
         #     as a product, which reads whatever number a flight page shows and texts it as if it
@@ -5189,7 +5281,62 @@ class Pipe:
         if "LOG:" not in prompt and not cls._JOB_VETTED_RE.search(prompt):
             out.append(("protocol", "the prompt never asks for a `LOG:` line",
                         "every run posts as unverified model output instead of a measurement"))
+        # A vetted command that argparse will reject. Measured live 2026-08-09, job e6df1739a275:
+        # `--monitor YTO→YVR fare watch` was written unquoted, so --monitor took 'YTO→YVR' and left
+        # 'fare' and 'watch' as positionals. price_search defines no positional arguments, so
+        # argparse exits 2 before the script does anything at all — every run fails, with no LOG
+        # line, for a reason no other check here looks at. Decidable from the stored record with no
+        # opinion, which is the bar this list keeps.
+        stray, _flag = cls._job_stray_args(prompt)
+        if stray:
+            out.append(("argv", f"the command leaves {', '.join(repr(s) for s in stray[:3])} "
+                                f"dangling — a flag value with spaces was written unquoted",
+                        "argparse rejects it, so every run exits before it checks anything"))
         return out
+
+    # Flags whose value is a free-text phrase, i.e. the ones an unquoted value breaks. Taken from
+    # price_watch/price_search's own parsers rather than guessed; a flag missing here simply means
+    # its strays are reported and not repaired, which is the safe direction.
+    _JOB_TEXT_FLAGS = ("--monitor", "--query", "--schedule", "--state", "--label", "--url",
+                       "--alert-to", "--kind", "--unit", "--prefer-domain")
+
+    @classmethod
+    def _job_stray_args(cls, prompt):
+        """(stray tokens, the flag they belong after) for a vetted command, else ([], None).
+
+        Only ever run against the extractors this repo ships, because only there is "no positional
+        arguments exist" a fact rather than an assumption.
+        """
+        line = next((ln for ln in (prompt or "").splitlines()
+                     if cls._JOB_VETTED_RE.search(ln)), None)
+        if not line:
+            return [], None
+        try:
+            import shlex
+            argv = shlex.split(line.strip())
+        except ValueError:
+            return [], None            # unbalanced quotes is a different defect; do not guess
+        try:
+            argv = argv[argv.index(next(a for a in argv if a.endswith(".py"))) + 1:]
+        except StopIteration:
+            return [], None
+        stray, last, owner, i = [], None, None, 0
+        while i < len(argv):
+            a = argv[i]
+            if a.startswith("--"):
+                if "=" not in a and i + 1 < len(argv) and not argv[i + 1].startswith("--"):
+                    last, i = a, i + 2           # flag plus its value
+                else:
+                    last, i = a, i + 1           # --flag=value, or a bare switch
+                continue
+            # The flag in flight when the FIRST stray appears is the one whose value lost its
+            # quotes. Recording `last` at the end of the loop instead named whatever flag happened
+            # to come after the damage.
+            if owner is None:
+                owner = last
+            stray.append(a)
+            i += 1
+        return stray, owner
 
     @classmethod
     def _job_patch(cls, job, uname):
@@ -5216,6 +5363,34 @@ class Pipe:
                     break
                 prompt = body
                 fixed.append(defect)
+            elif code == "argv":
+                # Mechanical and narrow: put the quotes back around the value that lost them, and
+                # ONLY when the strays sit directly after a known free-text flag. That is not a
+                # guess about intent — argparse says those tokens belong to nothing, and the single
+                # reading consistent with the command as written is that they are the tail of the
+                # preceding value. Anything else (strays after an unknown flag, or after none at
+                # all) is reported instead, because re-joining there would be authoring.
+                stray, owner = cls._job_stray_args(prompt)
+                fixed_line = None
+                if owner in cls._JOB_TEXT_FLAGS and stray:
+                    import shlex
+                    for ln in prompt.splitlines():
+                        if not cls._JOB_VETTED_RE.search(ln):
+                            continue
+                        argv = shlex.split(ln.strip())
+                        k = argv.index(owner)
+                        val = " ".join(argv[k + 1:k + 2 + len(stray)])
+                        rebuilt = argv[:k + 1] + [val] + argv[k + 2 + len(stray):]
+                        fixed_line = " ".join(shlex.quote(t) if (" " in t or not t) else t
+                                              for t in rebuilt)
+                        # shlex.quote would also quote the interpreter and path; harmless, but keep
+                        # the line readable by leaving space-free tokens bare (above).
+                        prompt = prompt.replace(ln.strip(), fixed_line)
+                        break
+                if fixed_line and not cls._job_stray_args(prompt)[0]:
+                    fixed.append(defect)
+                else:
+                    stuck.append(defect)
             elif code == "protocol":
                 tail = cls._JOB_PROTOCOL_TAIL.format(who=uname)
                 if len(prompt) + len(tail) > cls._JOB_PROMPT_MAX:

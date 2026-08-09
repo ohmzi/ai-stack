@@ -247,6 +247,49 @@ check("the repairable one is reported repaired", "Repaired job `4df0ab5bed14`" i
 check("the unrepairable one is reported unrepairable", "Job `bad1` was created malformed" in text)
 check("the clean one is not mentioned at all", "aaaaaaaaaaaa" not in text)
 
+print("--- a stored command argparse will reject (job e6df1739a275, 2026-08-09) ---")
+# The fourth defect decidable from the record. `--monitor YTO→YVR fare watch` was written
+# unquoted, so --monitor took 'YTO→YVR' and left 'fare' and 'watch' dangling. price_search
+# defines no positional arguments, so argparse exits 2 before the script checks anything: every
+# run fails, with no LOG line, for a reason none of the other three checks looks at.
+LIVE = ("Run this terminal command and print its output verbatim as your entire response. Add "
+        "nothing.\n\npython3 /home/ohmz/ai-stack/scripts/price_search.py --query 'Toronto "
+        "Vancouver flights October November 2026 roundtrip' --state yto_yvr_oct_nov2026 --below "
+        "1000 --alert-to ohmzaiowui --kind fare --monitor YTO\u2192YVR fare watch --schedule "
+        "'every 1d' --unit CAD")
+stray, owner = P._job_stray_args(LIVE)
+check("the dangling tokens are found", stray == ["fare", "watch"], (stray, owner))
+check("...and attributed to the flag whose quotes were lost, not the next one seen",
+      owner == "--monitor", owner)
+check("it is reported as a defect", "argv" in [d[0] for d in P._job_defects(
+    {"id": "e6df1739a275", "prompt": LIVE, "deliver": "local"})])
+patch, fixed, stuck = P._job_patch({"id": "e6df1739a275", "prompt": LIVE, "deliver": "local"}, "u")
+check("...and repaired by putting the quotes back", "argv" in [d[0] for d in fixed] and not stuck)
+check("...so the repaired command parses clean",
+      P._job_stray_args(patch["prompt"])[0] == [], P._job_stray_args(patch["prompt"]))
+check("...with the whole name preserved, not truncated at the space",
+      "'YTO\u2192YVR fare watch'" in patch["prompt"], patch["prompt"][-160:])
+check("a correctly quoted command has no argv defect",
+      P._job_stray_args("python3 /x/scripts/price_watch.py --url 'https://a/b' --monitor 'A B C'")
+      [0] == [])
+check("a bare switch before a flag is not mistaken for a stray",
+      P._job_stray_args("python3 /x/scripts/price_search.py --require-confidence --kind fare")[0]
+      == [])
+check("an --flag=value form is understood",
+      P._job_stray_args("python3 /x/scripts/price_watch.py --url=https://a --kind=price_drop")[0]
+      == [])
+# The boundary: repair only where the reading is forced. Strays after an unknown flag could belong
+# anywhere, so they are reported for the user to cancel rather than re-joined by guess.
+odd = {"id": "y", "deliver": "local",
+       "prompt": "python3 /home/ohmz/ai-stack/scripts/price_watch.py --url https://x --weird a b"}
+_pa, _fx, _st = P._job_patch(odd, "u")
+check("strays after an UNKNOWN flag are reported, never re-joined",
+      [d[0] for d in _st] == ["argv"] and not _fx, (_fx, _st))
+check("a non-vetted prompt is never argv-checked at all",
+      P._job_stray_args("just some prose the agent wrote with stray words")[0] == [])
+check("unbalanced quotes are left alone rather than guessed at",
+      P._job_stray_args("python3 /x/scripts/price_watch.py --monitor 'unclosed")[0] == [])
+
 print("--- a job with no id still produces readable text rather than raising ---")
 text, _ = enforce([{"deliver": "origin", "prompt": "Fetch it."}])
 check("it renders", "Repaired job" in text and "`?`" in text, text[:120])

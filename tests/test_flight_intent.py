@@ -395,6 +395,60 @@ def main():
     check("abandoning still wins over everything",
           "dropped" in (form_turn("never mind", OPEN) or ""))
 
+    # REPORTED LIVE, 2026-08-09. The answer ends by saying Google Flights can set a price alert in
+    # one click. The user replied "yes so set alert" — the draft had already been dropped, so that
+    # matched nothing, became a background followup, and the agent built job e6df1739a275: every
+    # 1440m for 7 days (against "every 15 mins next 2 hours"), no --depart/--return, and a command
+    # argparse rejects outright. Three failures, all downstream of this one gap.
+    print("\n--- 'yes, set it up' after an answer is claimed, never handed to the scheduler ---")
+
+    def answered(reply, slots):
+        q = P.__new__(P)
+        q._flight_draft = {"c": {"t": time.time(), "turns": 0, "slots": dict(slots),
+                                 "answered": True}}
+        q._route_metric = lambda *a, **k: None
+        out = q._flight_turn("c", reply, [], resume=True)
+        return (None if out is None else drain(out)), q
+
+    TURN1 = ("track price from Toronto to Vancouver and text me if the price is under 1000, "
+             "leaving oct and returning nov, check every 15 mins next 2 hours.")
+    S = p._flight_slots(TURN1, today=TODAY)
+    check("the cadence the user asked for is captured, not dropped",
+          S.get("cadence") == "every 15 mins next 2 hours", S.get("cadence"))
+    check("...and the dates come out of the same sentence",
+          S["depart"]["month"] == "2026-10" and S["ret"]["month"] == "2026-11", S.get("depart"))
+
+    # The answer must LEAVE the draft behind, or the affirmative has nothing to match.
+    q = P.__new__(P); q._flight_draft = {}; q._route_metric = lambda *a, **k: None
+    drain(q._flight_turn("c", TURN1, [], resume=False))
+    check("a completed answer keeps its draft, marked answered",
+          q._flight_draft.get("c", {}).get("answered") is True, q._flight_draft)
+
+    for reply in ("yes so set alert", "yes", "ok do it", "set the alert", "please set it up",
+                  "track it", "sure", "yes please"):
+        out, _ = answered(reply, S)
+        check(f"claimed, not scheduled: {reply!r}",
+              out is not None and "can't set that one up" in out, (out or "FELL THROUGH")[:120])
+    out, after = answered("yes so set alert", S)
+    check("...it hands over the real alert, on the confirmed itinerary",
+          "Track prices" in out and "google.com/travel/flights" in out, out[:200])
+    check("...says the cadence back rather than ignoring it",
+          "every 15 mins next 2 hours" in out, out[-400:])
+    check("...names why it will not schedule one itself", "never read a number" in out, out[-500:])
+    check("...and drops the draft so it cannot answer twice", "c" not in after._flight_draft)
+
+    print("\n--- ...while a correction still re-answers and moving on still routes normally ---")
+    for reply, want in [("actually make it december", "December"),
+                        ("no, make it december", "December"),
+                        ("how about december instead", "December")]:
+        out, _ = answered(reply, S)
+        check(f"a correction re-answers: {reply!r}", out and want in out, (out or "None")[:140])
+    for reply in ("what's the weather", "may i ask something else", "thanks"):
+        out, _ = answered(reply, S)
+        check(f"moving on routes normally: {reply!r}", out is None, (out or "")[:120])
+    out, _ = answered("never mind", S)
+    check("abandoning still wins after an answer too", out and "dropped" in out)
+
     print("\n--- the Google Flights link is built from the slots, never typed by a model ---")
     u = p._gflights_url(b)
     check("it carries both codes", "YTO" in u and "YVR" in u)
