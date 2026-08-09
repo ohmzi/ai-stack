@@ -180,21 +180,38 @@ IP does not work, and eleven of them refuse an automated client outright.**
 
 ## What is actually left, honestly ranked
 
-1. **The six `no_deeplink` sites are unmeasured, not refused.** No slot-bearing URL could be authored
-   for them, so no request was made. Chrome recon (a real browser session, reading the address bar
-   and the network tab) is the only way to learn their URL grammar and whether their frontends call
-   a JSON endpoint. A JSON endpoint would beat DOM scraping on every axis and need no browser at
-   all. `flightsfinder.com` and `airwander.com` are small and plausibly the least defended hosts in
-   the roster. **This is the only remaining free path, and it is a real one** — but note that three
-   of the six are Fareportal/FlightHub storefronts (cheapoair.ca and onetravel.com are one engine and
-   count once in a quorum), so the six sites are five independent owners, not six: kiwi, fareportal,
-   flighthub_group, airwander, flightsfinder.
+1. ~~**The six `no_deeplink` sites are unmeasured, not refused.**~~ **CLOSED 2026-08-09.** They are
+   measured now. `scripts/flight_deeplink_recon.py` opened all six in a real headless Chromium,
+   read each search form's grammar off its own DOM, and watched the network tab — one visit per
+   host, no UI driving, no retries:
 
-   **Corrected 2026-08-08.** This read "four of the six are Fareportal/FlightHub OTAs, so the
-   independent-source count it could yield is closer to three than six". Both numbers were wrong
-   against the registry: fareportal owns two of the six and flighthub_group one, and the six span
-   five distinct owners. The ceiling a fully successful Chrome recon could yield is five independent
-   sources, not three — understating it argues the only remaining free path down on a bad count.
+   | host | owner | result |
+   |---|---|---|
+   | kiwi.com | kiwi | captcha to a real browser — **and robots.txt disallows `/en/search`** |
+   | cheapoair.ca | fareportal | edge block, page titled "Access Denied" |
+   | onetravel.com | fareportal | identical, same engine, same edge |
+   | flighthub.com | flighthub_group | Cloudflare "Just a moment…" — **and robots disallows `/flight`** |
+   | airwander.com | airwander | Cloudflare "Just a moment…" |
+   | flightsfinder.com | flightsfinder | loads clean, no wall — but see below |
+
+   **flightsfinder was the real candidate and it was tested rather than assumed.** Its form is a
+   POST to `/en-ca/search-proxy`, but unlike Fareportal's encoded token its slots are plain and
+   published in the markup: `from`, `to`, `depart`, `return`, `adults`, `children`, `infants`,
+   `class`, `flighttype`, `searchtype`, `lang`. A POST form is only undeeplinkable if the server
+   refuses the same query as a GET, so that exact GET was issued, using the form's own parameter
+   names. It returns **HTTP 404**. The action is POST-only; no slot-bearing URL exists to author.
+
+   Two of the six are additionally **robots-disallowed on the search path**, which outranks
+   readability: even a readable kiwi or flighthub would be off limits.
+
+   One correction this produced about the recon method itself: `www.airwander.com` has **no DNS
+   record** while `airwander.com` resolves. A www-only attempt reports "unreachable" for a site that
+   is merely challenging, and that false negative was on its way into the registry before the apex
+   host was tried. Verdicts here are from the apex.
+
+   **So the free path is exhausted, and now by measurement.** 19 of 19 sites carry a verdict, zero
+   are shippable, and nothing in the roster is `untested`. The ceiling of five independent owners
+   this option was worth is now zero.
 
 2. **A keyed fare API.** Amadeus, Duffel and Kiwi's partner API all expose real bookable fares under
    terms that permit automation, several with free tiers. This is the answer that actually works, and
@@ -208,8 +225,8 @@ IP does not work, and eleven of them refuse an automated client outright.**
 **Not on this list, deliberately:** residential proxies, CAPTCHA-solving services, and
 fingerprint-spoofing browser plugins. Those are what would be required to get past PerimeterX,
 Akamai and whaleguard, they are what the sites' terms forbid, and defeating a bot defence is not the
-same kind of problem as reading a page. If free scraping is the constraint, the answer is (1); if a
-working fare watch is the goal, the answer is (2).
+same kind of problem as reading a page. Option (1) is now closed by measurement, so if a working fare watch is the goal, the answer is
+(2) and there is no free alternative to it.
 
 ## What was built, and what it is worth
 

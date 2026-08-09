@@ -1106,8 +1106,21 @@ def selftest():
        _fetchable == [])
     ck("...and no site is shippable, so flight_watch queries nothing",
        [s["domain"] for s in _reg["sites"] if s["verdict"] in SHIPPABLE] == [])
-    ck("six sites are still genuinely UNMEASURED (no_deeplink = never fetched, not 'blocked')",
-       len([s for s in _reg["sites"] if s["verdict"] == "no_deeplink"]) == 6)
+    # WAS: "six sites are still genuinely UNMEASURED". That stopped being true on 2026-08-09, when
+    # flight_deeplink_recon.py opened all six in a real browser. Five serve a wall (kiwi captcha,
+    # cheapoair/onetravel 'Access Denied', flighthub/airwander Cloudflare) and flightsfinder loads
+    # clean but its POST search action returns 404 to the same query as a GET — so it keeps
+    # no_deeplink, now as a measurement rather than a gap. Two are additionally robots-disallowed on
+    # their search path (kiwi /en/search, flighthub /flight), which outranks readability either way.
+    #
+    # The assertion is kept and inverted rather than deleted: "nothing is unmeasured" is the claim
+    # worth failing on, because the next thing to change here should be a NEW site or a keyed API,
+    # not a rediscovery of these.
+    _undeeplinked = [s["domain"] for s in _reg["sites"] if s["verdict"] == "no_deeplink"]
+    ck(f"the six unmeasured sites are measured; only flightsfinder stays no_deeplink "
+       f"(got {_undeeplinked})", _undeeplinked == ["flightsfinder.com"])
+    ck("...and nothing in the roster is untested any more",
+       [s["domain"] for s in _reg["sites"] if s["verdict"] == "untested"] == [])
 
     print("--- the renderer is invoked with an explicit interpreter ---")
     ck("BROWSER_PY is an absolute path, not 'python3'", BROWSER_PY.startswith("/"))

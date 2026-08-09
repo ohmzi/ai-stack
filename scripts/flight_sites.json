@@ -131,9 +131,9 @@
       "extract": null,
       "code_map": "REQUIRED — kiwi routes by city slug ('toronto-canada'), not IATA. Recon must record the slug derivation or this site stays untested.",
       "caveat": null,
-      "verdict": "no_deeplink",
-      "measured_at": null,
-      "notes": "Not fetched: no url_template could be authored, because kiwi routes by city slug ('toronto-canada') rather than IATA and the derivation is unverified. Nothing was learned about whether it blocks. Chrome recon should capture the slug form and its JSON endpoint before this is retried.  ||  Worth probing early despite the slug problem: kiwi's own frontend calls a documented-shaped GraphQL/umbrella endpoint, and a JSON endpoint beats DOM scraping on every axis — stability, size, and not needing a browser at all. Recon target #1 for the network tab."
+      "verdict": "blocked",
+      "measured_at": "2026-08-09",
+      "notes": "BROWSER RECON 2026-08-09 (flight_deeplink_recon.py): captcha to a real browser at /en. TWO independent stoppers, and the second outranks the first: kiwi's own robots.txt DISALLOWS /en/search for *, so the search path is off limits whether or not it can be read. The hoped-for JSON endpoint does exist (api.skypicker.com/umbrella/v2/graphql) but the call observed was PopularDestinations marketing, not a fare search, and reaching a fare one still means crossing the disallowed path. Kiwi's PARTNER API remains the legitimate route to the same data.  ||  Not fetched: no url_template could be authored, because kiwi routes by city slug ('toronto-canada') rather than IATA and the derivation is unverified. Nothing was learned about whether it blocks. Chrome recon should capture the slug form and its JSON endpoint before this is retried.  ||  Worth probing early despite the slug problem: kiwi's own frontend calls a documented-shaped GraphQL/umbrella endpoint, and a JSON endpoint beats DOM scraping on every axis — stability, size, and not needing a browser at all. Recon target #1 for the network tab."
     },
     {
       "domain": "skiplagged.com",
@@ -352,9 +352,9 @@
       "extract": null,
       "code_map": null,
       "caveat": null,
-      "verdict": "no_deeplink",
-      "measured_at": null,
-      "notes": "Not fetched: no slot-bearing URL could be authored (Fareportal's listing URL carries an encoded search token). Nothing learned about blocking.  ||  No deep-link grammar authored: Fareportal's listing URL carries an encoded search token rather than plain slots, so a template written from recall would be a fabrication. Recon must either capture a slot-bearing URL or set verdict=no_deeplink. Sibling of onetravel.com."
+      "verdict": "blocked",
+      "measured_at": "2026-08-09",
+      "notes": "BROWSER RECON 2026-08-09 (flight_deeplink_recon.py): edge block to a real browser -- HTTP page titled 'Access Denied' at /flights, robots.txt itself returns an HTTP error. No form reached, so the encoded-search-token theory below stays untested and is now moot.  ||  Not fetched: no slot-bearing URL could be authored (Fareportal's listing URL carries an encoded search token). Nothing learned about blocking.  ||  No deep-link grammar authored: Fareportal's listing URL carries an encoded search token rather than plain slots, so a template written from recall would be a fabrication. Recon must either capture a slot-bearing URL or set verdict=no_deeplink. Sibling of onetravel.com."
     },
     {
       "domain": "onetravel.com",
@@ -372,9 +372,9 @@
       "extract": null,
       "code_map": null,
       "caveat": null,
-      "verdict": "no_deeplink",
-      "measured_at": null,
-      "notes": "Not fetched: same Fareportal engine as cheapoair.ca, same missing deep link.  ||  Fareportal's other storefront, same engine as cheapoair.ca. If one gets a deep link the other almost certainly takes the same grammar with a different host — but they still count as ONE source in a quorum."
+      "verdict": "blocked",
+      "measured_at": "2026-08-09",
+      "notes": "BROWSER RECON 2026-08-09 (flight_deeplink_recon.py): identical to its Fareportal sibling cheapoair.ca -- 'Access Denied' at /flights, robots.txt errors. Same engine, same edge, and they were always one source in a quorum rather than two.  ||  Not fetched: same Fareportal engine as cheapoair.ca, same missing deep link.  ||  Fareportal's other storefront, same engine as cheapoair.ca. If one gets a deep link the other almost certainly takes the same grammar with a different host — but they still count as ONE source in a quorum."
     },
     {
       "domain": "flighthub.com",
@@ -392,9 +392,9 @@
       "extract": null,
       "code_map": null,
       "caveat": null,
-      "verdict": "no_deeplink",
-      "measured_at": null,
-      "notes": "Not fetched: results believed to sit behind a POSTed search returning a session-scoped URL. Unmeasured, so recorded as unknown rather than blocked.  ||  Canadian OTA. Results are believed to live behind a POSTed search that returns a session-scoped URL, i.e. no_deeplink — but that is an expectation, not a measurement, so it is recorded here rather than acted on. Recon decides."
+      "verdict": "blocked",
+      "measured_at": "2026-08-09",
+      "notes": "BROWSER RECON 2026-08-09 (flight_deeplink_recon.py): Cloudflare interstitial to a real browser -- title 'Just a moment...', 'enable javascript and cookies'. Independently, robots.txt DISALLOWS /flight for *. The POSTed-session-URL theory below was never reachable to test, and the robots rule settles it regardless.  ||  Not fetched: results believed to sit behind a POSTed search returning a session-scoped URL. Unmeasured, so recorded as unknown rather than blocked.  ||  Canadian OTA. Results are believed to live behind a POSTed search that returns a session-scoped URL, i.e. no_deeplink — but that is an expectation, not a measurement, so it is recorded here rather than acted on. Recon decides."
     },
     {
       "domain": "airwander.com",
@@ -412,9 +412,9 @@
       "extract": null,
       "code_map": null,
       "caveat": "stopover_specialist",
-      "verdict": "no_deeplink",
-      "measured_at": null,
-      "notes": "Not fetched: no URL grammar authored. Multi-stop specialist, so a plain round trip may not be its question even if it can be reached.  ||  A multi-stop / stopover specialist, not a plain A-to-B engine: its whole product is inserting a stopover city. For a simple round trip it may return nothing useful even when it works perfectly. Small site, so likely the least defended in the roster — worth probing precisely because the well-known ones are expected to block."
+      "verdict": "blocked",
+      "measured_at": "2026-08-09",
+      "notes": "BROWSER RECON 2026-08-09 (flight_deeplink_recon.py): reached at the APEX host and served a Cloudflare interstitial -- title 'Just a moment...', wall signal 'enable javascript and cookies'. No form, no XHR surface. Note the earlier www. assumption was wrong: www.airwander.com has NO DNS record while airwander.com resolves, so a www-only attempt reports 'unreachable' for a site that is merely challenging. Measured at the apex.  ||  Not fetched: no URL grammar authored. Multi-stop specialist, so a plain round trip may not be its question even if it can be reached.  ||  A multi-stop / stopover specialist, not a plain A-to-B engine: its whole product is inserting a stopover city. For a simple round trip it may return nothing useful even when it works perfectly. Small site, so likely the least defended in the roster — worth probing precisely because the well-known ones are expected to block."
     },
     {
       "domain": "flightsfinder.com",
@@ -433,8 +433,8 @@
       "code_map": null,
       "caveat": null,
       "verdict": "no_deeplink",
-      "measured_at": null,
-      "notes": "Not fetched: no URL grammar authored. Small metasearch, plausibly the least defended host in the roster — worth Chrome recon before writing it off.  ||  Small UK metasearch. Same reasoning as airwander: low traffic often means low defences. May prove to be redirect_only — a referral shell that shows a teaser and hands off to an OTA for the real price."
+      "measured_at": "2026-08-09",
+      "notes": "BROWSER RECON 2026-08-09 (flight_deeplink_recon.py): page loads clean, no wall, and the search form is POST to /en-ca/search-proxy carrying a Laravel _token. Its slots are PLAIN and published in the markup (from, to, depart, return, adults, children, infants, class, flighttype, searchtype, lang) -- the most promising grammar in the roster. So it was tested rather than assumed: the same action as a GET, with the form's OWN parameter names, returns HTTP 404. The action is POST-only, so no slot-bearing URL exists to author. Not blocked, and still not deeplinkable.  ||  Not fetched: no URL grammar authored. Small metasearch, plausibly the least defended host in the roster — worth Chrome recon before writing it off.  ||  Small UK metasearch. Same reasoning as airwander: low traffic often means low defences. May prove to be redirect_only — a referral shell that shows a teaser and hands off to an OTA for the real price."
     },
     {
       "domain": "secretflying.com",
