@@ -629,6 +629,90 @@ def main():
     check("...and ordinary chat history does not",
           not fresh._was_bg_turn("unseen-chat", assistant("Paris is the capital of France.")))
 
+    # ---- the trip a fare watch is watching -------------------------------------------------
+    #
+    # A hermes job has no itinerary field, so _job_trip reads the stored COMMAND back. Everything
+    # here is therefore a quoting test: the renderer may show what the prompt says, may say a value
+    # is absent, and may never supply one. The warning case is the one with teeth — job
+    # ba2a91e18def was confirmed as a "Flight price watch" while carrying no dates at all.
+    print("\n--- the trip is read out of the job's own command, never invented ---")
+    T = make()._job_trip
+
+    def fw(args):
+        return {"id": "x", "prompt": "python3 /home/ohmz/ai-stack/scripts/flight_watch.py " + args}
+
+    t = T(fw("--origin YYZ --dest YVR --depart 2026-09-15 --return 2026-09-22 --below 600"))
+    check("an exact round trip shows both ends of the timeline",
+          "YYZ → YVR" in t and "Tue 15 Sep 2026" in t and "Tue 22 Sep 2026" in t, t)
+    check("...departure is labelled depart and the other one return",
+          "depart **Tue 15 Sep 2026**" in t and "return **Tue 22 Sep 2026**" in t, t)
+    t = T(fw("--origin YYZ --dest YVR --depart-month 2027-03 --trip-days 7"))
+    check("a month watch says the window and the trip length",
+          "any time in **2027-03**" in t and "about **7 days**" in t, t)
+    t = T(fw("--origin YYZ --dest YYC --depart 2026-09-12"))
+    check("a missing return reads as one way, not as a blank",
+          "**one way**" in t and "return" not in t, t)
+    t = T(fw("--origin YYZ --dest YVR"))
+    check("a built watch with no dates says so rather than showing an empty timeline",
+          "no dates in it" in t, t)
+    t = T(fw("--depart 2026-09-15 --return 2026-09-22"))
+    check("a missing route is named, and the dates still render",
+          "route not stated" in t and "Tue 15 Sep 2026" in t, t)
+    check("a date the creator did not write in ISO is quoted, never reinterpreted",
+          "next tuesday" in T(fw("--origin YYZ --dest YVR --depart 'next tuesday'")), "")
+    check("quoted and = forms of a flag are both read",
+          "YYZ → YVR" in T(fw("--origin='YYZ' --dest=\"YVR\" --depart 2026-09-15")), "")
+
+    # The live failure: price_search has nowhere to put an itinerary, so a fare watch built on it
+    # cannot have one — and the run refuses (scripts/price_search.py:360) while the confirmation
+    # card reads like a working watch.
+    dateless = {"id": "ba2a91e18def", "prompt":
+                "python3 /home/ohmz/ai-stack/scripts/price_search.py --query 'Toronto to Vancouver "
+                "flights' --state 'YYZ-YVR-fare' --below 1000 --alert-to ohmz --kind fare"}
+    t = T(dateless)
+    check("a fare watch with no itinerary is called out, not left blank",
+          "no itinerary" in t and "every run refuses" in t, t)
+    check("a product price watch grows no trip line at all",
+          T({"id": "y", "prompt": "python3 scripts/price_watch.py --url https://x --below 20 "
+                                  "--kind price_drop"}) == "")
+    check("a job with no prompt at all is not a trip", T({"id": "z"}) == "")
+
+    # MEASURED LIVE, 2026-08-08. Asked twice for a Toronto->Vancouver price watch, the agent built
+    # the job with --kind price_drop and a name of "YYZ->YVR Flight Price Watch". That label skips
+    # the fare refusal entirely, so this one does not sit inert — it runs the product path over a
+    # flight search page, which is the $358.72 fabrication in docs/TRACKING_ENHANCEMENT.md. The two
+    # must therefore read differently, and the --kind must not be what decides.
+    mislabelled = {"id": "c9776e4c21f9", "prompt":
+                   "python3 /home/ohmz/ai-stack/scripts/price_search.py --query 'Toronto to "
+                   "Vancouver flights' --state 'yyz-yvr-flights' --below 1000 --alert-to ohmz "
+                   "--kind price_drop --monitor 'YYZ→YVR Flight Price Watch (Under $1,000)'"}
+    t = T(mislabelled)
+    check("a fare watch mislabelled as a product watch is still caught",
+          "as if it were a product" in t, t)
+    check("...and it is NOT described as refusing, because it does not refuse",
+          "refuses" not in t and "may not be bookable" in t, t)
+    check("...the agent's --kind is not what decides it",
+          mod.Pipe._IT_FARE.search(mislabelled["prompt"]) is None)
+    check("a product whose NAME contains 'flight' stays a product",
+          T({"id": "fs", "prompt": "python3 scripts/price_search.py --query 'Microsoft Flight "
+                                   "Simulator 2024' --below 40 --kind price_drop"}) == "")
+    check("a flight word with no resolvable route is not a fare watch",
+          T({"id": "fw2", "prompt": "python3 scripts/price_watch.py --url https://x/flight-case "
+                                    "--below 20 --kind price_drop"}) == "")
+
+    print("\n--- the trip reaches the listing, capped and counted ---")
+    notes = make()._jobs_notes([dict(dateless, name="fare watch", state="scheduled",
+                                     enabled=True, schedule_display="every 15m")])
+    check("the listing carries the warning below the table", "no itinerary" in notes, notes[:200])
+    many = [dict(fw(f"--origin YYZ --dest YVR --depart 2026-09-1{i}"), name=f"w{i}",
+                 state="scheduled", enabled=True, schedule_display="every 6h") for i in range(5)]
+    notes = make()._jobs_notes(many)
+    check("at most three trips are shown", notes.count("✈️") == 3, notes)
+    check("...and the rest are counted, not silently dropped",
+          "…and 2 more with a trip attached." in notes, notes)
+    check("a listing of ordinary jobs is unchanged by any of this",
+          "✈️" not in make()._jobs_notes(JOBS))
+
     fails = results.count(False)
     print(f"\n{len(results)} checks — {'ALL PASS' if not fails else str(fails) + ' FAILURE(S)'}")
     return 1 if fails else 0

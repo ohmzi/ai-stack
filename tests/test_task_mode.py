@@ -159,6 +159,34 @@ def main():
     check("...the agent was never asked", SENT == [], repr(SENT))
     check("...and the chat tenant was never evicted", EVICT == [], repr(EVICT))
 
+    print("--- ON: a fare is not delegated, because the agent cannot watch one ---")
+    # REPORTED LIVE, 2026-08-09. The flight gate was fixed and verified through OWUI's own loader,
+    # and the user still got job 0cf56b8c3afd out of the real UI: the Task control sits ABOVE both
+    # flight branches in pipe(), so with the chip on, the gate is unreachable and the ask goes
+    # straight to the agent — which builds a fare watch with no itinerary. The control decides
+    # WHETHER to delegate, never WHAT the request is, and a fare is the second thing (after the
+    # scheduler reads above) that this pipe answers without an agent at all.
+    p = stack()
+    out = say(p, "track price from Toronto to Vancouver and text me if the price is under 1000, "
+                 "check every 15 mins next 2 hours")
+    check("a route fare ask under the control is answered, not delegated", SENT == [], repr(SENT))
+    check("...and it asks for the dates it does not have",
+          "Depart" in out and "need this" in out, out[:200])
+    check("...naming the route it did resolve", "YTO" in out and "YVR" in out, out[:200])
+    p = stack()
+    out = say(p, "track flights from Toronto to Vancouver departing September 15 returning "
+                 "September 22, text me under 600")
+    check("a complete itinerary under the control answers with the timeline",
+          SENT == [] and "Depart" in out and "Return" in out, out[:220])
+    # The exception must be exactly this shape and no wider: an ordinary watch still delegates.
+    p = stack()
+    say(p, f"track the item {URL} when the price is under 10")
+    check("a product watch under the control still reaches the agent",
+          len(SENT) == 1 and SENT[0]["brief"] == "cron", repr(SENT[:1])[:160])
+    p = stack()
+    say(p, "how much does it cost to ship a package from toronto to vancouver")
+    check("a route travelled another way is not claimed by the flight path", SENT != [], repr(SENT))
+
     print("--- ON: OpenWebUI's own prompts are still not the user talking ---")
     p = stack()
     say(p, "track the price every hour", task="title_generation")

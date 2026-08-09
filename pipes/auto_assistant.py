@@ -1367,6 +1367,31 @@ class Pipe:
                          error=type(e).__name__, latency_ms=round((time.monotonic() - t0) * 1000))
             return False
 
+    # Travel between two places that is explicitly NOT flying. This is the whole ambiguity in a
+    # route with no flight noun — "from Toronto to Vancouver under $1000" is a fare unless the
+    # message says otherwise — so naming the exceptions is what lets the route band be decided here
+    # instead of by a model. Kept to modes and carriers that are unambiguous in any sentence:
+    # 'package' and 'cargo' are deliberately absent because a holiday package is a flight ask, and
+    # 'ship a package' is already caught by 'ship'.
+    _FL_OTHER_MODE = re.compile(
+        r"\b(?:driv(?:e|es|ing)|road\s?trip|car\s+rental|rent\s+a\s+car|mileage"
+        r"|train|rail|via\s?rail|amtrak|bus|coach|greyhound|megabus"
+        r"|ferry|cruise|boat|sail(?:ing)?"
+        r"|ship(?:s|ping|ment)?|courier|freight|fedex|purolator"
+        r"|mov(?:e|es|ing|ers)|u-?haul"
+        r"|hotel|airbnb|hostel)\b", re.I)
+
+    def _fl_route(self, text):
+        """True when the text names a resolvable origin AND destination — a ROUTE, with no flight
+        noun required. Deterministic: both ends must be in _IATA, so this asserts "these are two
+        airports" and never "this is about flying", which is the classifier's call.
+
+        Same-airport pairs are rejected. "from toronto to toronto" is a typo or a joke, and either
+        way sending it down the flight path costs a question about dates for a trip nobody is taking.
+        """
+        o, d, _unknown = self._fl_places(text)
+        return bool(o and d and o[0] != d[0])
+
     def _is_flight_request(self, text):
         """(tier, rule) when this turn asks for a flight fare, else (None, None)."""
         if not FLIGHT_ROUTE or not text:
@@ -1374,12 +1399,39 @@ class Pipe:
         if self._flight_deny(text):
             return None, None
         pair = self._flight_pair(text)
-        if not (pair or self._FLIGHT_NOUN.search(text)):
-            return None, None
         framed = bool(self._FLIGHT_ASK.match(text) or self._FLIGHT_SUPER.search(text))
-        placed = bool(pair or self._FLIGHT_PLACE.search(text))
-        if framed and placed:
-            return 1, "flight_strong"
+        if pair or self._FLIGHT_NOUN.search(text):
+            placed = bool(pair or self._FLIGHT_PLACE.search(text))
+            if framed and placed:
+                return 1, "flight_strong"
+        # No noun and no pair — the ROUTE band. A flight ask does not have to name a flight: "track
+        # price from Toronto to Vancouver, text me under 1000" is what a person actually types, and
+        # it is what created job ba2a91e18def on 2026-08-08 — a fare watch with no itinerary in it,
+        # which would have refused itself on all 8 runs under a confirmation card that read like a
+        # working watch. It matched no arm here: the frame matched, the places matched, and the word
+        # "flights" was the one thing missing. tests/test_flight_intent.py already carried the
+        # near-identical POSITIVE case one word away ("track Toronto to Vancouver flights under
+        # $600"), which is how close this sat to being caught.
+        #
+        # DECIDED HERE, NOT BY THE CLASSIFIER, and that is a measurement rather than a preference.
+        # This band was first routed to the 1B tier, on the theory that a bare route is ambiguous.
+        # Measured against gemma3:1b on 2026-08-08: 7 of 11, and it answered OTHER for the live
+        # message above, for "watch the price toronto to vancouver, alert me under 900" and for
+        # "monitor prices from montreal to lisbon in october" — its own prompt says OTHER covers
+        # "any other kind of price watching", which is exactly what a route price ask looks like. A
+        # reworded prompt reached 9 of 11 and started leaking a moving quote. So the ambiguity is
+        # named instead: _fl_route proves two AIRPORTS deterministically, _FLIGHT_ASK proves a
+        # request, and _FL_OTHER_MODE removes the sentences that say they are about some other way
+        # of travelling. What is left is a fare ask, and the cost of being wrong is one question
+        # about dates — against a failure mode that silently schedules a watch that cannot work.
+        #
+        # Tier 2, so this stream stays separable from both the strong tier and the classifier in
+        # route_metrics. `framed` short-circuits first: _fl_route scans the whole airport table
+        # (~0.3 ms), and an anchored request verb keeps that off every message in every chat.
+        elif framed and self._fl_route(text) and not self._FL_OTHER_MODE.search(text):
+            return 2, "flight_route"
+        else:
+            return None, None
         # HINT band. Suppressed on developer vocabulary: "build me a flight search API" has the noun,
         # no frame, and belongs to the coder tier further down the cascade.
         if not FLIGHT_CLASSIFIER or self._CODE_HINT.search(text):
@@ -1399,16 +1451,35 @@ class Pipe:
     _FL_ISO = re.compile(r"\b(20\d{2})-(\d{1,2})-(\d{1,2})\b")
     _FL_MD = re.compile(rf"\b({_FL_MONWORD})\.?\s+(\d{{1,2}})(?:st|nd|rd|th)?\b", re.I)
     _FL_DM = re.compile(rf"\b(\d{{1,2}})(?:st|nd|rd|th)?\s+({_FL_MONWORD})\b", re.I)
-    _FL_NEXTDOW = re.compile(r"\b(?:next|this)\s+"
-                             r"(mon|tue|tues|wed|thu|thur|thurs|fri|sat|sun)[a-z]*\b", re.I)
+    # Day names spelled out, with NO trailing [a-z]* — that wildcard made "next month" match `mon`
+    # and then swallow the "th", so "next month" resolved to a specific next-Monday date and the
+    # form completed on a departure the user never gave. A guessed date is the one failure this
+    # parser exists to prevent (:1391), and it was reachable from two very ordinary words.
+    _FL_NEXTDOW = re.compile(r"\b(?:next|this)\s+(mon(?:day)?|tue(?:s|sday)?|wed(?:nesday)?"
+                             r"|thu(?:r|rs|rsday)?|fri(?:day)?|sat(?:urday)?|sun(?:day)?)\b", re.I)
     _FL_INN = re.compile(r"\bin\s+(\d{1,2})\s+(day|week|month)s?\b", re.I)
     # A part-month is a RANGE; a bare month is a MONTH. Ordering matters and is load-bearing:
     # "first week of september" must be claimed here before the bare-month arm sees "september".
     _FL_PARTMON = re.compile(rf"\b(early|mid(?:dle)?|late|first\s+week\s+of|last\s+week\s+of"
                              rf"|second\s+week\s+of|third\s+week\s+of|beginning\s+of|end\s+of)\s+"
                              rf"({_FL_MONWORD})\b", re.I)
-    _FL_BAREMON = re.compile(rf"\b(?:in|during|sometime\s+in|for|around)\s+({_FL_MONWORD})\b"
+    # A month needs SOMETHING in front of it, because half the month names are ordinary English:
+    # "may" is a modal, "march" is a verb, "august" is an adjective. The original set was
+    # prepositions only, which meant the form could invite "a month like March" and then fail to
+    # read the answer: "leaving October and returning nov" parsed to nothing at all, the turn fell
+    # through to the agent, and the agent replied about flying to Astana and searching Amazon.ca
+    # (reported live 2026-08-09). Departure and return CUES are the missing half of the same idea —
+    # "leaving October" is exactly as unambiguous as "in October", and it is what people type when
+    # asked when they want to go.
+    _FL_MONCUE = (r"in|during|sometime\s+in|for|around"
+                  r"|leav(?:e|ing)|depart(?:ing|s)?|fly(?:ing)?\s+out|head(?:ing)?\s+out|go(?:ing)?"
+                  r"|out|return(?:ing|s)?|back|coming\s+back|home")
+    _FL_BAREMON = re.compile(rf"\b(?:{_FL_MONCUE})\s+(?:in\s+|on\s+|of\s+)?({_FL_MONWORD})\b"
                              rf"(?!\s*\.?\s*\d)", re.I)
+    # A month standing completely alone, allowed ONLY while the flight form is open (see
+    # _fl_find_dates' `bare`). There the question was literally "when?", so "October" is an answer
+    # and not a modal verb — the ambiguity that forces a cue everywhere else does not exist.
+    _FL_MONALONE = re.compile(rf"\b({_FL_MONWORD})\b(?!\s*\.?\s*\d)", re.I)
     _FL_ONEWAY = re.compile(r"\bone[\s-]?way\b|\bno\s+return\b|\bnot\s+coming\s+back\b"
                             r"|\bsingle\s+ticket\b|\bjust\s+going\b", re.I)
     _FL_TRIPLEN = re.compile(r"\bfor\s+(?:(\d{1,2})|a|one|two|three|four)\s+(day|week|month|night)s?\b"
@@ -1447,11 +1518,15 @@ class Pipe:
                 "from": lo.isoformat(), "to": datetime.date(year, mi, b).isoformat()}
 
     @classmethod
-    def _fl_find_dates(cls, text, today):
+    def _fl_find_dates(cls, text, today, bare=False):
         """[spec, ...] in the order they appear. Exact dates first, then ranges, then bare months.
 
         Each arm removes what it consumed, so "Sep 3 back Sep 10" cannot also be read as a bare
         September, and "first week of September" cannot be re-read as the whole month.
+
+        `bare` adds a final arm for a month name with nothing in front of it, and is passed only
+        when the flight form is open and waiting on an answer to "when?". It is off by default
+        because "may" and "march" are ordinary words in free text.
         """
         t = text or ""
         found = []
@@ -1503,6 +1578,10 @@ class Pipe:
 
         take(cls._FL_PARTMON, lambda m: cls._fl_month_spec(m.group(2), today, part=m.group(1)))
         take(cls._FL_BAREMON, lambda m: cls._fl_month_spec(m.group(1), today))
+        # LAST, and only inside the open form: every cued and dated reading above has already been
+        # consumed, so this can only pick up a month that nothing else claimed.
+        if bare:
+            take(cls._FL_MONALONE, lambda m: cls._fl_month_spec(m.group(1), today))
         return [s for _o, s in sorted(found, key=lambda p: p[0])]
 
     @classmethod
@@ -1577,8 +1656,12 @@ class Pipe:
                 unknown.append(frag)
         return origin, dest, unknown
 
-    def _flight_slots(self, text, prev=None, today=None):
-        """The itinerary this turn describes, merged onto any draft already in flight."""
+    def _flight_slots(self, text, prev=None, today=None, bare=False):
+        """The itinerary this turn describes, merged onto any draft already in flight.
+
+        `bare` is passed only when the form is open and the outstanding question is "when?" — see
+        _fl_find_dates.
+        """
         today = today or datetime.date.today()
         s = dict(prev or {})
         o, d, unknown = self._fl_places(text)
@@ -1588,7 +1671,7 @@ class Pipe:
             s["dest"] = list(d)
         if unknown:
             s["unknown_places"] = unknown
-        dates = self._fl_find_dates(text, today)
+        dates = self._fl_find_dates(text, today, bare=bare)
         if dates:
             s["depart"] = dates[0]
             if len(dates) > 1:
@@ -1699,9 +1782,14 @@ class Pipe:
                 s[key] = [m.group(1), m.group(2).strip()]
         return s or None
 
-    def _flight_ask(self, s, cid, turns):
+    def _flight_ask(self, s, cid, turns, unreadable=None):
         """Ask for everything still missing, in ONE message. With three or four slots, one-at-a-time
-        is four round trips and four chances to lose the thread; most real asks already carry two."""
+        is four round trips and four chances to lose the thread; most real asks already carry two.
+
+        `unreadable` is the user's previous reply when it looked like an answer this parser could
+        not read. Quoting it back matters: without it the form re-renders unchanged and reads as if
+        the user had said nothing, which invites them to retype the same words.
+        """
         need = self._flight_missing(s)
         if cid:
             self._lru(self._flight_draft, cid, {"t": time.time(), "turns": turns, "slots": s})
@@ -1721,7 +1809,13 @@ class Pipe:
         if s.get("season_only"):
             note += ("\n\nAlso, *“the fall”* is three months and no site can search all of it at "
                      "once — pick a month and I'll search the whole thing.")
-        return (f"✈️ **Flight search**\n\n{self._flight_table(s)}\n\n"
+        lead = "✈️ **Flight search**"
+        if unreadable:
+            lead = (f"✈️ **I couldn't read the dates in “{self._md_cell(unreadable, 60)}”** — that's "
+                    f"my parser's fault, not yours.")
+            note += ("\n\nThese all work: **October**, *in October*, *Oct 15*, "
+                     "*Oct 15 returning Nov 3*, *first week of October*.")
+        return (f"{lead}\n\n{self._flight_table(s)}\n\n"
                 f"Tell me {' and '.join(asks)}, and I'll pull it up.{note}\n\n"
                 f"*Say “never mind” to drop this.*")
 
@@ -1751,6 +1845,13 @@ class Pipe:
 
     _FL_ABANDON = re.compile(r"^\s*(?:never\s?mind|nvm|forget\s+it|cancel\s+that|drop\s+it|stop"
                              r"|no\s+thanks?|not\s+now|leave\s+it)\b", re.I)
+    # "You were trying to give me dates and I could not read them." Deliberately generous — the cost
+    # of a false positive is one re-ask inside a form the user is already in, and the cost of a false
+    # negative is the turn escaping to a model that invents an itinerary.
+    _FL_TRIED_DATES = re.compile(rf"\b(?:{_FL_MONWORD})\b|\d"
+                                 r"|\b(?:day|days|week|weeks|month|months|night|nights|weekend"
+                                 r"|tomorrow|today|soon|whenever|flexible|anytime|any\s+time)\b",
+                                 re.I)
 
     def _flight_turn(self, cid, text, messages, resume=False):
         """The only method pipe() calls. Returns a reply, or None to route normally.
@@ -1773,9 +1874,22 @@ class Pipe:
                 return self._say("No problem — dropped.")
             if prev is None:
                 return None
-            slots = self._flight_slots(text, prev=prev)
+            # Bare months are readable HERE and nowhere else: the form asked "when?", so a lone
+            # "October" is an answer rather than a modal verb.
+            slots = self._flight_slots(text, prev=prev, bare="depart" not in prev)
             # A reply that fills nothing and answers nothing is the user moving on, not an answer.
             if slots == prev and not self._is_flight_request(text)[0]:
+                # ...unless it was plainly an ATTEMPT at dates that no arm could read. Falling
+                # through then is what produced the 2026-08-09 report: "leaving October and
+                # returning nov" parsed to nothing, the turn reached the agent as a background
+                # followup, and the agent answered about Astana and Amazon.ca. A reply carrying a
+                # month, a digit or a duration word is the user answering the question — so say it
+                # could not be read, and ask again in the same breath. Anything else still returns
+                # None, because the user moving on must stay cheap.
+                if self._FL_TRIED_DATES.search(text or ""):
+                    self._route_metric("flight.slots", 0, "flight_dates_unparsed", text,
+                                       n_missing=len(self._flight_missing(prev)))
+                    return self._say(self._flight_ask(prev, cid, turns + 1, unreadable=text))
                 return None
         else:
             slots = self._flight_slots(text, prev=None)
@@ -4133,12 +4247,122 @@ class Pipe:
             out += f"\n\n*…and {len(jobs) - JOBS_MAX} more — ask for one by id if you need it.*"
         return out
 
+    # ---------- the trip a fare watch is watching ----------
+    #
+    # A hermes job has NO itinerary field. The whole record is name / prompt / schedule / deliver
+    # (~/.hermes/cron/jobs.json), so the only place an itinerary can live is inside the stored
+    # command — which is why this reads the prompt back rather than a column. That makes it
+    # READ-ONLY and quotable: every value below was typed into the job by whoever created it, and
+    # the failure mode is showing nothing, never showing a trip nobody scheduled. Same rule the
+    # slot parser keeps at :1391 — a model may supply a category, never a date or an airport.
+    _IT_FLAG = re.compile(r"--(origin|dest|depart-month|depart|return|trip-days)(?:=|\s+)"
+                          r"(?:'([^']*)'|\"([^\"]*)\"|(\S+))")
+    _IT_FARE = re.compile(r"--kind[=\s]+'?fare\b")
+    _IT_VETTED = re.compile(r"\bprice_(?:search|watch)\.py\b")
+
+    @staticmethod
+    def _it_day(v):
+        """An ISO date as a person would say it; the raw string when it is not one.
+
+        Never reformats what it could not parse. A --depart the creator wrote as 'next tuesday' is
+        shown as 'next tuesday', because guessing which Tuesday is how a watch ends up bound to a
+        trip the user never asked for.
+        """
+        try:
+            import datetime
+            return datetime.date.fromisoformat(str(v)).strftime("%a %d %b %Y").replace(" 0", " ")
+        except Exception:
+            return Pipe._md_cell(v, 24)
+
+    def _it_fare_watch(self, prompt):
+        """"declared" | "mislabelled" | "" — a fare watch with nowhere to put an itinerary.
+
+        `--kind fare` is the honest label and the easy case. The hard one was measured live on
+        2026-08-08: asked for a Toronto→Vancouver price watch, the agent twice built the job with
+        `--kind price_drop` while naming it "YYZ→YVR Flight Price Watch". The label is the agent's
+        opinion; the ROUTE is not — so a vetted extractor plus a flight word plus two airports the
+        parser can actually resolve is read as a fare watch whatever the --kind says.
+
+        All three are required for the mislabelled arm, and the third is what keeps "Microsoft
+        Flight Simulator" a product: it names a flight and no route, so it is one.
+
+        The two are told apart because they FAIL DIFFERENTLY, and only one of them is dangerous.
+        `--kind fare` refuses at the first run and alerts once (scripts/price_search.py:360), so it
+        is inert and merely useless. A mislabelled one never reaches that guard: it runs the ordinary
+        product path over a flight search result, which is precisely how a fare monitor texted
+        "$358.72, under your $1,000.00 target" at high confidence off a page whose own title read
+        "C$ 146+" (docs/TRACKING_ENHANCEMENT.md). Reporting both as "it will refuse" would describe
+        the safe failure while the unsafe one is the live risk.
+        """
+        if self._IT_FARE.search(prompt):
+            return "declared"
+        if (self._IT_VETTED.search(prompt) and self._FLIGHT_NOUN.search(prompt)
+                and self._fl_route(prompt)):
+            return "mislabelled"
+        return ""
+
+    def _job_trip(self, job):
+        """The trip line for one job, or "" when the job is not about a trip at all.
+
+        Three outcomes, and the middle one is why this exists. On 2026-08-08 job ba2a91e18def was
+        confirmed to the user as a "Flight price watch" whose only itinerary was the search string
+        'Toronto to Vancouver flights' — no dates, because price_search has nowhere to put any. It
+        would have refused on all 8 runs (scripts/price_search.py:360) while the confirmation card
+        read like a working watch. A fare belongs to one route on one set of dates or it belongs to
+        nothing, so a fare watch that cannot name them says so here instead of looking scheduled.
+        """
+        cls = type(self)
+        prompt = job.get("prompt") or ""
+        if "flight_watch.py" in prompt:
+            got = {}
+            for m in cls._IT_FLAG.finditer(prompt):
+                got[m.group(1)] = (m.group(2) or m.group(3) or m.group(4) or "").strip()
+            o, d = got.get("origin"), got.get("dest")
+            route = (f"**{cls._md_cell(o, 8)} → {cls._md_cell(d, 8)}**" if o and d
+                     else "**route not stated**")
+            when = []
+            if got.get("depart"):
+                when.append(f"depart **{cls._it_day(got['depart'])}**")
+            elif got.get("depart-month"):
+                when.append(f"any time in **{cls._md_cell(got['depart-month'], 16)}**")
+            if got.get("return"):
+                when.append(f"return **{cls._it_day(got['return'])}**")
+            elif got.get("trip-days"):
+                when.append(f"about **{cls._md_cell(got['trip-days'], 4)} days**")
+            elif got.get("depart"):
+                # Stated, not assumed. flight_watch treats a missing --return as one-way, and a
+                # blank cell would read as "the return is coming" rather than "there is none".
+                when.append("**one way**")
+            return f"✈️ {route} · " + " · ".join(when) if when else f"✈️ {route} · *no dates in it*"
+        fare = self._it_fare_watch(prompt)
+        if fare == "declared":
+            return ("⚠️ **no itinerary** — this fare watch names no origin, destination or dates, "
+                    "so every run refuses instead of quoting a fare. A fare exists only for one "
+                    "route on one set of dates.")
+        if fare == "mislabelled":
+            return ("⚠️ **watching a flight as if it were a product** — this job has no dates in "
+                    "it, so there is no itinerary for a fare to belong to, and it is not set to "
+                    "the fare kind that would refuse. It will read whatever number a flight search "
+                    "page shows and compare that against your threshold. Those pages quote "
+                    "\"from\" teasers and lists of unrelated trips, so the number it texts you may "
+                    "not be bookable — or be a real fare for dates you never asked for.")
+        return ""
+
     def _jobs_notes(self, jobs):
-        """Legend, plus the failures. last_error is multi-line and belongs BELOW the table: in a
-        cell it would blow the columns apart, and it is the one field a user most needs to read."""
+        """Legend, plus the trips and the failures. Both are multi-line and belong BELOW the table:
+        in a cell they would blow the columns apart, and they are the fields a user most needs."""
         # Blank line first: markdown needs one to close the table, or the legend is swallowed into
         # it as a malformed row.
         out = ["\n\n▶ active · 🔄 running now · ⏸ paused · ✓ finished · ⚠️ scheduling error"]
+        # Trips before failures: this says what the job IS, the failure block says what it did. Both
+        # capped at 3 and the remainder COUNTED — a silently truncated list reads as "that is all of
+        # them", which is the one thing a listing must never imply.
+        trips = [(i, t) for i, t in ((i, self._job_trip(j))
+                                     for i, j in enumerate(jobs[:JOBS_MAX], 1)) if t]
+        for i, t in trips[:3]:
+            out.append(f"\n**{i}** {t}")
+        if len(trips) > 3:
+            out.append(f"\n*…and {len(trips) - 3} more with a trip attached.*")
         bad = [(i, j) for i, j in enumerate(jobs[:JOBS_MAX], 1)
                if str(j.get("last_status") or "").lower() == "error" and j.get("last_error")]
         for i, j in bad[:3]:
@@ -4624,7 +4848,7 @@ class Pipe:
             return None
         return "both" if (in_ids and stamped) else ("stamp" if stamped else "filter_ids")
 
-    async def _task_mode_turn(self, cid, text, msgs, user, src):
+    async def _task_mode_turn(self, cid, text, msgs, user, src, ref=None):
         """The whole turn, given that the user asked for the background-task agent.
 
         The control settles WHETHER to delegate. It does not settle WHAT the request is, so every
@@ -4663,6 +4887,17 @@ class Pipe:
                 self._mark_bg(cid)
                 return answered
 
+        # 2a. A reply to the flight form, BEFORE the manage block for the same load-bearing reason
+        #     as the normal path (:6064): _MANAGE_VERB anchors cancel|stop|pause at position 0, and
+        #     `referring` below fires whenever a job table was rendered recently — so a bare "stop"
+        #     meant to abandon this form would act on a real job instead.
+        if FLIGHT_ROUTE and not ref and cid in self._flight_draft:
+            done = self._flight_turn(cid, text, self._ollama_messages(msgs), resume=True)
+            if done is not None:
+                row("flight.slots", "chip_flight_resume")
+                self._mark_bg(cid)
+                return done
+
         # 3. Anything the deterministic path can answer, it should: it reads the scheduler over
         #    HTTP and never loads the agent, so listing stays instant even with the control on.
         pconf = self._pending_confirm(cid, omsgs, handle=handle if scoped else None)
@@ -4691,6 +4926,32 @@ class Pipe:
                     "I can't look up your background tasks right now — task listing is switched "
                     "off on this assistant. An admin can list and change jobs for you in the "
                     "meantime.")
+
+        # 3a. A FLIGHT ask, before the agent gets it. This control means "make this a background
+        #     job", and for a fare that is a promise this host cannot keep: measured across all 19
+        #     sites the user named, 11 block automated clients, 6 expose no fetchable URL, 2 are deal
+        #     feeds, 0 are readable (docs/FLIGHT_RECON.md). Delegating anyway is not neutral — it
+        #     produces exactly the job the user reported on 2026-08-09, 0cf56b8c3afd: a fare watched
+        #     as a product, which reads whatever number a flight page shows and texts it as if it
+        #     were their fare.
+        #
+        #     So this is not the control being overridden, it is the control being honoured: the
+        #     docstring above says the control settles WHETHER to delegate and never WHAT the
+        #     request is, and the same exception already exists for anything the pipe can answer
+        #     from the scheduler itself (step 3). A flight ask is the second such case — the pipe
+        #     answers it deterministically, with the user's real itinerary and a prefilled link,
+        #     and no agent is loaded. What the user loses by coming here is a watch that never
+        #     worked; what they get is the dates they asked about and a link that does.
+        if FLIGHT_ROUTE:
+            ftier, frule = self._is_flight_request(text)
+            if ftier:
+                done = self._flight_turn(cid, text, omsgs, resume=False)
+                if done is not None:
+                    # flight_tier, not tier: row() already passes tier positionally as 0 (this is a
+                    # declaration, not a guess), so reusing the name is a TypeError.
+                    row("flight.ask", f"chip_{frule}", flight_tier=ftier)
+                    self._mark_bg(cid)
+                    return done
 
         # 4. Continuing the previous agent turn.
         if self._is_bg_followup(text, omsgs, cid):
@@ -5189,6 +5450,18 @@ class Pipe:
                                         # countable and malformation gets its own column, rather
                                         # than a new outcome class that silently shrinks the first.
                                         yield shape
+                                    # The trip, read back out of the stored command rather than
+                                    # taken from the agent's prose. This is the one part of a fare
+                                    # watch the reader cannot check any other way — the confirmation
+                                    # above is written by the model, and on 2026-08-08 it said
+                                    # "Flight price watch set up" over a job with no dates in it.
+                                    # Silence on a well-formed creation is still the rule elsewhere;
+                                    # this speaks because the dates ARE the deliverable (the same
+                                    # argument scripts/alert_templates.py:449 makes for alerts), and
+                                    # because their absence is a defect no other check reports.
+                                    for trip in (self._job_trip(j) for j in new_jobs):
+                                        if trip:
+                                            yield f"\n\n{trip}"
                                     yield self._alert_setup_block(uname)
                                 elif new_jobs is not None and self._changed_jobs(
                                         before, after, owner=uname if scoped else None,
@@ -5729,7 +6002,7 @@ class Pipe:
         # it falls through to normal routing rather than becoming an empty request.
         tm_src = self._task_mode(__metadata__)
         if BG_TASKS and tm_src and (text or "").strip():
-            done = await self._task_mode_turn(cid, text, msgs, __user__, tm_src)
+            done = await self._task_mode_turn(cid, text, msgs, __user__, tm_src, ref=ref)
             if done is not None:
                 return done
         # What media does this conversation currently revolve around? History first, then the

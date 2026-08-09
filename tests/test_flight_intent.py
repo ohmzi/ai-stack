@@ -20,9 +20,11 @@ act on it. The parser's job is to be right or to ASK.
 
 Usage:  python3 tests/test_flight_intent.py [pipe_path]
 """
+import asyncio
 import datetime
 import importlib.util
 import sys
+import time
 
 PIPE = sys.argv[1] if len(sys.argv) > 1 else "/home/ohmz/ai-stack/pipes/live/auto_assistant.py"
 spec = importlib.util.spec_from_file_location("aa_flight", PIPE)
@@ -122,6 +124,48 @@ NO = [
     ("there's only one way to do this properly", "one-way idiom"),
 ]
 
+# A flight ask does not have to name a flight. Every one of these is a request frame plus two
+# airports and NO flight noun, which is the band that used to fall straight through to the
+# scheduler. The live miss is first: it created job ba2a91e18def on 2026-08-08 as a fare watch with
+# no dates in it. YES already carried the same sentence one word away ("track Toronto to Vancouver
+# flights under $600") — the word was "flights".
+#
+# These are decided DETERMINISTICALLY, and that is a measurement, not a preference. The band was
+# first routed to the gemma3:1b tier on the theory that a bare route is ambiguous; measured against
+# it the same day, that scored 7 of 11 and answered OTHER for the live message itself, because the
+# classifier's own prompt puts "any other kind of price watching" under OTHER. A reworded prompt
+# reached 9 of 11 and began leaking a moving quote. So the ambiguity is NAMED instead — two
+# resolvable airports, a request frame, and no other-mode word — and the checks below assert the
+# classifier is never consulted for any of them.
+ROUTE_NO_NOUN = [
+    "track price from Toronto to Vancouver and text me if the price is under 1000, "
+    "check every 15 mins next 2 hours",
+    "watch the price toronto to vancouver, alert me under 900",
+    "monitor prices from montreal to lisbon in october",
+    "find me something from toronto to karachi in december",
+    "check prices toronto to calgary next friday",
+]
+
+# Route-shaped and still never worth a classifier call. Each names the guard that stops it, and the
+# guards are different on purpose: two of these have a perfectly good route and are rejected on the
+# frame, which is the cheap check that keeps a ~0.3 ms airport scan off every message in every chat.
+ROUTE_NEVER_ASKED = [
+    ("the drive from toronto to vancouver takes four days", "no request frame"),
+    ("how far is toronto from vancouver", "no request frame"),
+    ("track price from toronto to toronto", "same airport both ends"),
+    ("track the price of the rtx 5090 on newegg", "no route"),
+    ("the price of eggs is crazy right now", "no route, no frame"),
+    ("cancel the toronto to vancouver watch", "deny arm runs first"),
+    # A route travelled some other way. These are the whole reason the band was thought to need a
+    # model: each is a request frame plus two real airports, and none of them is about flying.
+    ("how much does it cost to ship a package from toronto to vancouver", "other mode: ship"),
+    ("find me a moving company from toronto to vancouver", "other mode: moving"),
+    ("check the train prices from toronto to montreal", "other mode: train"),
+    ("check driving costs from toronto to vancouver", "other mode: driving"),
+    ("find a hotel from toronto to vancouver", "other mode: hotel"),
+    ("compare cruise prices from vancouver to tokyo", "other mode: cruise"),
+]
+
 
 def main():
     print("--- a flight ask reaches the flight path (was 0 of 8; see the docstring) ---")
@@ -152,6 +196,30 @@ def main():
           p._is_flight_request("flights to tokyo") == (3, "flight_classifier"))
     check("developer vocabulary is suppressed before the classifier",
           p._is_flight_request("build me a flight search api endpoint") == (None, None))
+    p._classify_flight = lambda t: False
+
+    print("\n--- a route with no flight noun routes WITHOUT a model (job ba2a91e18def) ---")
+    # Fail-loud stub: this band must never reach the 1B, because the 1B was measured wrong about it.
+    p._classify_flight = lambda t: (_ for _ in ()).throw(AssertionError("must not be consulted"))
+    for t in ROUTE_NO_NOUN:
+        try:
+            got = p._is_flight_request(t)
+            check(f"tier 2, deterministic: {t[:52]!r}", got == (2, "flight_route"), f"got {got}")
+        except AssertionError:
+            check(f"tier 2, deterministic: {t[:52]!r}", False, "consulted the classifier")
+    for t, guard in ROUTE_NEVER_ASKED:
+        try:
+            got = p._is_flight_request(t)
+            check(f"[{guard}] {t[:44]!r}", got == (None, None), f"LEAKED as {got}")
+        except AssertionError:
+            check(f"[{guard}] {t[:44]!r}", False, "reached the classifier; the guard is gone")
+    check("_fl_route needs BOTH ends", not p._fl_route("track the price to vancouver"))
+    check("_fl_route rejects a same-airport pair", not p._fl_route("from toronto to toronto"))
+    check("_fl_route reads a real route", p._fl_route("from montreal to lisbon"))
+    # The other-mode arm must subtract from a route, not from everything: a message that names a
+    # flight AND a train is still a flight ask, and is claimed by the noun band above it.
+    check("an other-mode word does not veto the noun band",
+          p._is_flight_request("find flights to tokyo in march, or should i take the train")[0] == 1)
     p._classify_flight = lambda t: False
 
     print("\n--- the other routers are untouched ---")
@@ -237,6 +305,95 @@ def main():
     b = p._flight_slots("from toronto in march", prev=a, today=TODAY)
     check("turn 2 fills what turn 1 left open", p._flight_missing(b) == [], b)
     check("...without losing turn 1's destination", b["dest"][0] == "YVR")
+
+    # REPORTED LIVE, 2026-08-09. The form asked "when?", said "a month like March is fine", and then
+    # could not read "leaving October and returning nov" — _FL_BAREMON required a PREPOSITION, so a
+    # departure/return cue parsed to nothing. _flight_turn returned None, the turn fell through to
+    # the background-task path, and the agent replied about flying to Astana and searching
+    # Amazon.ca. Both halves are pinned here: the cue must parse, and a reply the parser cannot read
+    # must never reach a model that will invent an itinerary from it.
+    print("\n--- a month named by a departure/return CUE, not a preposition ---")
+    for text, want in [
+        ("leaving October and returning nov", ["2026-10", "2026-11"]),
+        ("depart october return november", ["2026-10", "2026-11"]),
+        ("out in october back in november", ["2026-10", "2026-11"]),
+        ("going october, home november", ["2026-10", "2026-11"]),
+        ("leaving in October and returning in nov", ["2026-10", "2026-11"]),
+    ]:
+        got = p._fl_find_dates(text, TODAY)
+        check(f"{text[:44]!r} -> {want}",
+              [d.get("month") for d in got] == want and all(d["kind"] == "month" for d in got), got)
+    check("a cue does not swallow an exact date",
+          [d.get("date") for d in p._fl_find_dates("leaving oct 15 returning nov 3", TODAY)]
+          == ["2026-10-15", "2026-11-03"])
+    check("a cue does not beat a part-month",
+          p._fl_find_dates("leaving early october", TODAY)[0]["kind"] == "range")
+
+    print("\n--- a BARE month answers the form, and only the form ---")
+    for text in ("October", "october and november", "may", "march"):
+        check(f"{text!r} stays unparsed in free text", p._fl_find_dates(text, TODAY) == [],
+              p._fl_find_dates(text, TODAY))
+    check("...but 'October' is an answer once the form is open",
+          [d.get("month") for d in p._fl_find_dates("October", TODAY, bare=True)] == ["2026-10"])
+    check("...and two bare months are depart then return, in document order",
+          [d.get("month") for d in p._fl_find_dates("october and november", TODAY, bare=True)]
+          == ["2026-10", "2026-11"])
+    check("the modal 'may' is why bare is off by default",
+          p._fl_find_dates("may i ask what this costs", TODAY) == [])
+
+    print("\n--- the reported two-turn exchange, end to end ---")
+
+    def drain(gen):
+        async def go():
+            return "".join([c async for c in gen])
+        return asyncio.run(go())
+
+    def form_turn(reply, prev):
+        """Turn 2: a live draft, then the user's answer."""
+        q = P.__new__(P)
+        q._flight_draft = {"c": {"t": time.time(), "turns": 1, "slots": dict(prev)}}
+        q._route_metric = lambda *a, **k: None
+        out = q._flight_turn("c", reply, [], resume=True)
+        return None if out is None else drain(out)
+
+    OPEN = {"origin": ["YTO", "Toronto"], "dest": ["YVR", "Vancouver"], "target": 1000.0}
+    out = form_turn("leaving October and returning nov", OPEN)
+    check("the reply is ANSWERED, not passed on", out is not None, "returned None")
+    check("...with October as the departure", out and "October 2026" in out, (out or "")[:220])
+    check("...and November as the return", out and "November 2026" in out, (out or "")[:220])
+    check("...and a link built from those months",
+          out and "October%202026" in out, (out or "")[:400])
+    out = form_turn("October", OPEN)
+    check("a one-word month answers too", out is not None and "October 2026" in out,
+          (out or "")[:160])
+
+    print("\n--- a date attempt the parser cannot read re-asks; it never escapes ---")
+    for reply in ("sometime around the 3rd quarter", "5ish weeks out",
+                  "the week after next month maybe"):
+        out = form_turn(reply, OPEN)
+        check(f"unreadable dates re-ask: {reply[:38]!r}",
+              out is not None and "couldn't read" in out, (out or "RETURNED NONE")[:160])
+    check("...and the re-ask quotes what it could not read",
+          "3rd quarter" in (form_turn("sometime around the 3rd quarter", OPEN) or ""))
+    check("...and lists forms that do work",
+          "Oct 15" in (form_turn("5ish weeks out", OPEN) or ""))
+    # The wildcard that made this necessary: 'next month' used to resolve to a next-Monday date and
+    # complete the form on a departure the user never named.
+    check("'next month' names no day of the week",
+          p._fl_find_dates("next month", TODAY) == [], p._fl_find_dates("next month", TODAY))
+    check("...nor does 'this month'", p._fl_find_dates("this month", TODAY) == [])
+    for dow, want in (("next monday", "2026-08-10"), ("next mon", "2026-08-10"),
+                      ("next thursday", "2026-08-13"), ("next tues", "2026-08-11"),
+                      ("next wednesday", "2026-08-12"), ("next sun", "2026-08-09")):
+        got = p._fl_find_dates(dow, TODAY)
+        check(f"...and a real day still resolves: {dow!r} -> {want}",
+              got and got[0].get("date") == want, got)
+    # The other direction: moving on must stay cheap. No month, no digit, no duration word.
+    for reply in ("what's the weather like", "who won the game", "thanks"):
+        check(f"a topic change still routes normally: {reply!r}", form_turn(reply, OPEN) is None,
+              (form_turn(reply, OPEN) or "")[:120])
+    check("abandoning still wins over everything",
+          "dropped" in (form_turn("never mind", OPEN) or ""))
 
     print("\n--- the Google Flights link is built from the slots, never typed by a model ---")
     u = p._gflights_url(b)
