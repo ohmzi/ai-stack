@@ -638,33 +638,28 @@ def main():
     print("\n--- the trip is read out of the job's own command, never invented ---")
     T = make()._job_trip
 
-    def fw(args):
-        return {"id": "x", "prompt": "python3 /home/ohmz/ai-stack/scripts/flight_watch.py " + args}
+    def fc(route_id):
+        return {"id": "x", "prompt":
+                "Run this terminal command and print its output verbatim as your entire response. "
+                "Add nothing.\npython3 /home/ohmz/ai-stack/scripts/flightclaw_watch.py "
+                f"--route-id {route_id} --state fc-x --alert-to ohmz "
+                "--below 1000 --monitor 'YYZ→YVR fare watch' --schedule 'every 1d'"}
 
-    t = T(fw("--origin YYZ --dest YVR --depart 2026-09-15 --return 2026-09-22 --below 600"))
+    t = T(fc("YYZ-YVR-2026-09-15-RT-2026-09-22"))
     check("an exact round trip shows both ends of the timeline",
           "YYZ → YVR" in t and "Tue 15 Sep 2026" in t and "Tue 22 Sep 2026" in t, t)
     check("...departure is labelled depart and the other one return",
           "depart **Tue 15 Sep 2026**" in t and "return **Tue 22 Sep 2026**" in t, t)
-    t = T(fw("--origin YYZ --dest YVR --depart-month 2026-10 --return-month 2026-11 --below 1000"))
-    check("a month-mode ROUND TRIP shows both ends (job bada3ce6c0d4)",
-          "any time in **2026-10**" in t and "back any time in **2026-11**" in t, t)
-    t = T(fw("--origin YYZ --dest YVR --depart-month 2027-03 --trip-days 7"))
-    check("a month watch says the window and the trip length",
-          "any time in **2027-03**" in t and "about **7 days**" in t, t)
-    t = T(fw("--origin YYZ --dest YYC --depart 2026-09-12"))
-    check("a missing return reads as one way, not as a blank",
+    t = T(fc("YYZ-YYC-2026-09-12"))
+    check("a missing RT tail reads as one way, not as a blank",
           "**one way**" in t and "return" not in t, t)
-    t = T(fw("--origin YYZ --dest YVR"))
-    check("a built watch with no dates says so rather than showing an empty timeline",
-          "no dates in it" in t, t)
-    t = T(fw("--depart 2026-09-15 --return 2026-09-22"))
-    check("a missing route is named, and the dates still render",
-          "route not stated" in t and "Tue 15 Sep 2026" in t, t)
-    check("a date the creator did not write in ISO is quoted, never reinterpreted",
-          "next tuesday" in T(fw("--origin YYZ --dest YVR --depart 'next tuesday'")), "")
-    check("quoted and = forms of a flag are both read",
-          "YYZ → YVR" in T(fw("--origin='YYZ' --dest=\"YVR\" --depart 2026-09-15")), "")
+    check("a quoted route id parses the same",
+          "YYZ → YVR" in T({"id": "q", "prompt":
+                            "python3 /home/ohmz/ai-stack/scripts/flightclaw_watch.py "
+                            "--route-id 'YYZ-YVR-2026-10-02-RT-2026-11-02' --state s"}), "")
+    check("a flightclaw command with a malformed route id grows no trip line",
+          T({"id": "m", "prompt": "python3 scripts/flightclaw_watch.py --route-id nonsense"})
+          == "")
 
     # The live failure: price_search has nowhere to put an itinerary, so a fare watch built on it
     # cannot have one — and the run refuses (scripts/price_search.py:360) while the confirmation
@@ -707,7 +702,7 @@ def main():
     notes = make()._jobs_notes([dict(dateless, name="fare watch", state="scheduled",
                                      enabled=True, schedule_display="every 15m")])
     check("the listing carries the warning below the table", "no itinerary" in notes, notes[:200])
-    many = [dict(fw(f"--origin YYZ --dest YVR --depart 2026-09-1{i}"), name=f"w{i}",
+    many = [dict(fc(f"YYZ-YVR-2026-09-1{i}-RT-2026-09-2{i}"), name=f"w{i}",
                  state="scheduled", enabled=True, schedule_display="every 6h") for i in range(5)]
     notes = make()._jobs_notes(many)
     check("at most three trips are shown", notes.count("✈️") == 3, notes)

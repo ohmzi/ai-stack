@@ -1,5 +1,9 @@
 # A flight path of its own: deterministic flight routing, and a fare capability that is measured before it ships
 
+> **SUPERSEDED 2026-08-09.** The plan below gated shipping on a readable HTML fare source and
+> correctly stopped at zero. FlightClaw (docs/FLIGHTCLAW.md) reads the protobuf API instead;
+> the watcher this plan specified was deleted. Kept for the reasoning and the gate discipline.
+
 > ## ⛔ THE PHASE 1D GATE RETURNED ZERO. PHASE 2 IS ON HOLD; PHASE 3 SHIPPED ROUTING ONLY.
 >
 > *(This heading read "PHASES 2 AND 3 ARE ON HOLD" until 2026-08-08. Phase 3's routing — 3a, 3b, 3c and

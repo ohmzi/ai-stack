@@ -1,5 +1,11 @@
 # Flight site reconnaissance — what 19 sites actually gave an automated client
 
+> **SUPERSEDED 2026-08-09.** Fares are read by FlightClaw now (docs/FLIGHTCLAW.md) — Google
+> Flights' protobuf API, a surface this recon never measured. Everything below stays true for
+> what it DID measure: the HTML of these 19 sites is unreadable to automation, and the
+> scripts this document describes (flight_probe, flight_render, flight_watch,
+> flight_deeplink_recon, flight_sites.json) were deleted with that conclusion intact.
+
 Measured 2026-08-07 against the live web, plain tier, `YYZ→YVR 2026-09-15/2026-09-22`, from this
 host's IP. Instrument: `scripts/flight_probe.py`. Raw record:
 `docs/flight-recon/20260807T184200Z/probe.json`, with the served bodies under `pages/` (gitignored).

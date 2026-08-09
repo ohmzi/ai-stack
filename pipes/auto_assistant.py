@@ -4691,9 +4691,6 @@ class Pipe:
     # READ-ONLY and quotable: every value below was typed into the job by whoever created it, and
     # the failure mode is showing nothing, never showing a trip nobody scheduled. Same rule the
     # slot parser keeps at :1391 — a model may supply a category, never a date or an airport.
-    _IT_FLAG = re.compile(r"--(origin|dest|depart-month|depart-range|depart|return-month|return"
-                          r"|trip-days|one-way|below)(?:=|\s+)"
-                          r"(?:'([^']*)'|\"([^\"]*)\"|(\S+))")
     _IT_FARE = re.compile(r"--kind[=\s]+'?fare\b")
     _IT_VETTED = re.compile(r"\bprice_(?:search|watch)\.py\b")
 
@@ -4760,32 +4757,8 @@ class Pipe:
             when = f"depart **{cls._it_day(dep)}**"
             when += f" · return **{cls._it_day(ret)}**" if ret else " · **one way**"
             return f"✈️ **{o} → {d}** · {when}"
-        if "flight_watch.py" in prompt:
-            got = {}
-            for m in cls._IT_FLAG.finditer(prompt):
-                got[m.group(1)] = (m.group(2) or m.group(3) or m.group(4) or "").strip()
-            o, d = got.get("origin"), got.get("dest")
-            route = (f"**{cls._md_cell(o, 8)} → {cls._md_cell(d, 8)}**" if o and d
-                     else "**route not stated**")
-            when = []
-            if got.get("depart"):
-                when.append(f"depart **{cls._it_day(got['depart'])}**")
-            elif got.get("depart-month"):
-                when.append(f"any time in **{cls._md_cell(got['depart-month'], 16)}**")
-            # --return-month belongs here beside --return: a month-mode round trip is the shape
-            # the pipe's own builder emits, and leaving it out printed the departure alone — the
-            # exact "show me the departure AND return timeline" this line exists to answer.
-            if got.get("return"):
-                when.append(f"return **{cls._it_day(got['return'])}**")
-            elif got.get("return-month"):
-                when.append(f"back any time in **{cls._md_cell(got['return-month'], 16)}**")
-            elif got.get("trip-days"):
-                when.append(f"about **{cls._md_cell(got['trip-days'], 4)} days**")
-            elif "--one-way" in prompt or got.get("depart") or got.get("depart-month"):
-                # Stated, not assumed. flight_watch treats a missing --return as one-way, and a
-                # blank cell would read as "the return is coming" rather than "there is none".
-                when.append("**one way**")
-            return f"✈️ {route} · " + " · ".join(when) if when else f"✈️ {route} · *no dates in it*"
+        # (The flight_watch.py arm lived here until 2026-08-09. That script left with the
+        # old scraping stack — FlightClaw watches fares now, parsed above.)
         fare = self._it_fare_watch(prompt)
         if fare == "declared":
             return ("⚠️ **no itinerary** — this fare watch names no origin, destination or dates, "
@@ -5606,8 +5579,7 @@ class Pipe:
     # ALERT lines, so a job running it needs no protocol instruction and must not be given one —
     # appending would make a run whose entire contract is "print this verbatim, add nothing" add
     # something. Caught by a test asserting the pipe's own generated command passes its own checks.
-    # flight_watch is still listed while its generator exists; it leaves with the old stack.
-    _JOB_VETTED_RE = re.compile(r"\b(?:price_(?:watch|search)|flight_watch|flightclaw_watch)\.py\b")
+    _JOB_VETTED_RE = re.compile(r"\b(?:price_(?:watch|search)|flightclaw_watch)\.py\b")
     _JOB_PROTOCOL_TAIL = (
         "\n\nFinish your response with these lines, exactly this shape:\n"
         "LOG: <one-line summary of this run, leading with the key number>\n"
