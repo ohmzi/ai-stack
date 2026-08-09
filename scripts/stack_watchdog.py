@@ -12,6 +12,8 @@ Checks, each fail-safe (a probe error is a FAIL for that check, never a crash):
             catches wedged-but-active, which is-active cannot)
   delivery  hermes-delivery.timer last trigger < 10 min (it fires every minute)
   backup    /media/SandiskSSD/ai-stack-backups/LAST_OK newer than 26 h
+  flightclaw  systemctl --user is-active flightclaw + GET 127.0.0.1:8765/mcp answers HTTP
+            at all (406 to a bare GET is a live MCP server refusing politely)
 Report-only (logged, never alerted — they have their own recovery stories and the pipe
 already surfaces them to the user): comfyui /system_stats, ollama /api/version.
 
@@ -84,6 +86,23 @@ def check_delivery():
         return False, "hermes-delivery.timer (unreadable)"
 
 
+def check_flightclaw():
+    """The fare engine. Same wedged-but-active reasoning as check_api: is-active proves the
+    process, an HTTP answer proves the server. /mcp answers 406 to a bare GET (streamable HTTP
+    wants POST + SSE accept), and a 406 from it is a LIVE server refusing politely."""
+    r = _run(["systemctl", "--user", "is-active", "flightclaw"])
+    if not (r and r.stdout.strip() == "active"):
+        return False, "flightclaw service"
+    try:
+        req = urllib.request.Request("http://127.0.0.1:8765/mcp")
+        with urllib.request.urlopen(req, timeout=5):
+            return True, "flightclaw API"
+    except urllib.error.HTTPError:
+        return True, "flightclaw API"   # 406/405 is still a live server answering
+    except Exception:
+        return False, "flightclaw API (no HTTP answer on :8765)"
+
+
 def check_backup():
     try:
         age = time.time() - os.path.getmtime(BACKUP_LAST_OK)
@@ -107,7 +126,8 @@ def report_only():
 def main():
     dry = "--dry-run" in sys.argv
     checks = {"gateway": check_gateway, "api": check_api,
-              "delivery": check_delivery, "backup": check_backup}
+              "delivery": check_delivery, "backup": check_backup,
+              "flightclaw": check_flightclaw}
     try:
         with open(STATE_FILE) as f:
             state = json.load(f)
