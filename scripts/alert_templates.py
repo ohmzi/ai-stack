@@ -432,7 +432,14 @@ def render_subject(payload, limit=120):
     elif payload.get("kind") in PROBLEM_KINDS:
         subj = f"{headline}: {thing}"
     else:
-        subj = f"{headline}: {thing} {sentence}"
+        # The lead clause only — "is $46.99", not "is $46.99, under your $50.00 target (was
+        # $49.99)". The target and the previous price are already in the body one tap away, and
+        # every clause here costs characters of the item name in a crowded inbox line. Commas in
+        # this module's sentences only ever introduce subordinate clauses (the item name, which
+        # can contain real commas, is `thing`), so cutting at the first one is safe.
+        short = re.sub(r"\s*\(was [^)]*\)", "", sentence)
+        short = re.split(r",\s", short)[0]
+        subj = f"{headline}: {thing} {short}"
     subj = re.sub(r"\s{2,}", " ", subj).strip()
     return subj[:limit - 1] + "…" if len(subj) > limit else subj
 
@@ -444,6 +451,27 @@ def _pretty_day(iso):
     except Exception:
         return iso
     return f"{d.strftime('%a')} {d.day} {d.strftime('%b')} {d.year}"
+
+
+# One map, used by the plain text and the HTML alike, so the two surfaces cannot drift into
+# describing the same date_basis with different words.
+_DATE_BASIS_HOW = {
+    "native_month": "using its own whole-month search",
+    "explicit_range": "over the date range I asked for",
+    "calendar_cheapest": "read off its price calendar",
+    "assumed_month_bounds": "the only dates it would quote - NOT the cheapest in the month",
+    "exact": "for the dates you gave me",
+}
+
+
+def _nights(dep, ret):
+    """Nights between two ISO dates, or None when they don't parse or aren't positive."""
+    try:
+        n = (_dt.datetime.strptime(ret, "%Y-%m-%d")
+             - _dt.datetime.strptime(dep, "%Y-%m-%d")).days
+        return n if n > 0 else None
+    except Exception:
+        return None
 
 
 def _dates_lines(payload):
@@ -460,22 +488,13 @@ def _dates_lines(payload):
     line = f"  dates found: {_pretty_day(dep)}"
     if ret:
         line += f"  ->  {_pretty_day(ret)}"
-        try:
-            n = (_dt.datetime.strptime(ret, "%Y-%m-%d")
-                 - _dt.datetime.strptime(dep, "%Y-%m-%d")).days
-            if n > 0:
-                line += f"   ({n} night{'s' if n != 1 else ''})"
-        except Exception:
-            pass
+        n = _nights(dep, ret)
+        if n:
+            line += f"   ({n} night{'s' if n != 1 else ''})"
     out = [line]
     src = payload.get("source")
     if src:
-        how = {"native_month": "using its own whole-month search",
-               "explicit_range": "over the date range I asked for",
-               "calendar_cheapest": "read off its price calendar",
-               "assumed_month_bounds": "the only dates it would quote - NOT the cheapest in the "
-                                       "month",
-               "exact": "for the dates you gave me"}.get(payload.get("date_basis"), "")
+        how = _DATE_BASIS_HOW.get(payload.get("date_basis"), "")
         out.append(f"  found on: {src}" + (f", {how}" if how else ""))
     return out
 
@@ -566,18 +585,123 @@ def _footer_lines(payload):
     return out
 
 
-def render_html(payload):
-    """A self-contained HTML email: inline styles only, no external assets, mobile-friendly.
+# ---------------------------------------------------------------- the html email's brand
+#
+# The OhmzAI brand language, as branding/ohmz.css defines it and home.ohmz.cloud typesets it:
+# warm near-black surfaces, ONE amber accent spent on the action, depth from flat panels and 1px
+# hairlines — no gradients, no shadows, never pure #fff or #000. The email is dark in both of the
+# reader's themes because the brand is dark-first and email offers no way to follow a client theme;
+# a dark email also survives dark-mode clients, which force-invert light ones.
+#
+# Values are copied from branding/ohmz.css, the same snapshot ohmz-cloud's tokens.css carries.
+# Every text/surface pair below was measured against WCAG AA (4.5:1 for normal text):
+# fg on panel 14.09, secondary on panel 9.60, amber on panel 6.49, on-amber on amber 6.46,
+# secondary on raise 9.04. --ohmz-muted (#8b857e) measures 4.50 on the panel — exactly on the
+# line — so, like the site's semantic layer, this file does not use it at all.
+_OHMZ = {
+    "canvas": "#1a1917", "panel": "#211f1d", "raise": "#262421",
+    "line": "#3a3733", "line_soft": "#302d2a",
+    "fg": "#f0edea", "secondary": "#cbc5be",
+    "amber": "#e0913f", "on_amber": "#241f18",
+}
+# The real fonts cannot ride along: an email with no external assets (a strict client blocks them
+# anyway) cannot load a webfont, so the stacks lead with the brand face for readers who have it
+# installed and fall back exactly the way tokens.css does.
+_FONT = ("'Space Grotesk',ui-sans-serif,system-ui,-apple-system,'Segoe UI',"
+         "Helvetica,Arial,sans-serif")
+_MONO = "'IBM Plex Mono',ui-monospace,SFMono-Regular,Menlo,monospace"
 
-    Inline styles and a table shell because email clients strip <style> blocks and do not implement
-    flexbox. Colours are chosen to stay legible if a client force-inverts for dark mode.
+
+def _lockup_html(assistant):
+    """The wordmark row, or "" when no assistant name is configured.
+
+    The brand lockup sets the stem in the text colour and the last word in amber — OhmzAI does
+    "Ohmz"+"AI", the site does "Ohmz"+".cloud" — so this rebuilds that grammar from the CONFIGURED
+    assistant name rather than hard-coding a brand string a rename would orphan. The Ω is the text
+    character, not the favicon SVG: Gmail strips <svg>, and the mark is drawn from the Space
+    Grotesk Ω outline anyway, so the glyph in the same stack is the honest email-safe rendering.
     """
     e = _html.escape
+    name = (assistant or "").strip()
+    if not name:
+        return ""
+    parts = name.split()
+    stem, suffix = (" ".join(parts[:-1]), parts[-1]) if len(parts) > 1 else (name, "")
+    text = e(stem) + (f'<span style="color:{_OHMZ["amber"]};font-weight:600;">&nbsp;{e(suffix)}'
+                      f'</span>' if suffix else "")
+    return (f'<div style="padding-bottom:16px;border-bottom:1px solid {_OHMZ["line_soft"]};">'
+            f'<span style="color:{_OHMZ["amber"]};font-weight:600;font-size:19px;">&Omega;</span>'
+            f'&nbsp;<span style="font-size:16px;font-weight:500;letter-spacing:-0.02em;'
+            f'color:{_OHMZ["fg"]};">{text}</span></div>')
+
+
+def _details_html(payload):
+    """The dates a fare was found on and what the other sites said, as a raised mono panel.
+
+    The plain text has always carried these (_dates_lines calls the dates "the deliverable, not a
+    detail"), but the HTML used to drop them — the surface most people read omitted the one thing
+    that lets them book the deal. Set in the mono face because it is the site's treatment for
+    metadata runs, and on the raised surface because that is how the brand does depth.
+    """
+    e = _html.escape
+    C = _OHMZ
+    rows = []
+    dep = payload.get("depart_found")
+    if dep:
+        line = e(_pretty_day(dep))
+        ret = payload.get("ret_found")
+        if ret:
+            line += f" &rarr; {e(_pretty_day(ret))}"
+            n = _nights(dep, ret)
+            if n:
+                line += (f' <span style="color:{C["secondary"]};">({n} night'
+                         f'{"s" if n != 1 else ""})</span>')
+        rows.append(f'<div style="font-size:14px;color:{C["fg"]};">{line}</div>')
+        src = payload.get("source")
+        if src:
+            how = _DATE_BASIS_HOW.get(payload.get("date_basis"), "")
+            rows.append(f'<div style="margin-top:4px;font-size:12px;color:{C["secondary"]};">'
+                        f'found on {e(src)}{", " + e(how) if how else ""}</div>')
+    srcs = payload.get("sources") or []
+    if len(srcs) >= 2:
+        rows.append(f'<div style="margin-top:12px;font-size:10px;font-weight:500;'
+                    f'letter-spacing:.12em;text-transform:uppercase;color:{C["secondary"]};">'
+                    f'also checked</div>')
+        for s in srcs[1:]:
+            v = money(s.get("value"), payload.get("unit")) or "-"
+            when = ""
+            if s.get("depart_found"):
+                when = f'&nbsp;&nbsp;{e(_pretty_day(s["depart_found"]))}'
+                if s.get("ret_found"):
+                    when += f' &rarr; {e(_pretty_day(s["ret_found"]))}'
+            tag = (" (only dates this site would quote)"
+                   if s.get("date_basis") == "assumed_month_bounds" else "")
+            rows.append(f'<div style="margin-top:4px;font-size:12px;color:{C["secondary"]};">'
+                        f'{e(s.get("site") or "?")}&nbsp;&nbsp;{e(v)}{when}{e(tag)}</div>')
+    if not rows:
+        return ""
+    return (f'<div style="margin-top:18px;padding:14px 16px;background:{C["raise"]};'
+            f'border:1px solid {C["line"]};border-radius:10px;font-family:{_MONO};">'
+            + "".join(rows) + "</div>")
+
+
+def render_html(payload):
+    """A self-contained HTML email in the OhmzAI brand language: inline styles only, no external
+    assets, mobile-friendly.
+
+    Inline styles and a table shell because email clients strip <style> blocks and do not implement
+    flexbox. The layout is home.ohmz.cloud's card translated to what email can hold: canvas behind
+    a hairline-bordered panel, the mono uppercase label as the kind eyebrow, the value set like a
+    heading (600, tight tracking, text colour), and amber spent once — on the button. That single
+    accent replaced the old green/problem-amber pair on purpose: the brand has one accent, and the
+    headline and advice copy already say whether this is good news or a problem.
+    """
+    e = _html.escape
+    C = _OHMZ
     who = (payload.get("to") or "").strip()
     headline, sentence = describe(payload)
     thing, noun = _thing(payload), _noun(payload)
     problem = payload.get("kind") in PROBLEM_KINDS
-    accent = "#b45309" if problem else "#047857"
     v = money(payload.get("value"), payload.get("unit"))
     prev = money(payload.get("prev"), payload.get("unit"))
     target = money(payload.get("target"), payload.get("unit"))
@@ -588,8 +712,8 @@ def render_html(payload):
         try:
             if payload.get("prev") is not None and float(payload["prev"]) != float(payload["value"]):
                 arrow = "▼" if float(payload["value"]) < float(payload["prev"]) else "▲"
-                delta = (f'<span style="font-size:14px;color:#6b7280;font-weight:400;">'
-                         f'&nbsp;&nbsp;{arrow} was {e(prev)}</span>')
+                delta = (f'<span style="font-size:14px;color:{C["secondary"]};font-weight:400;'
+                         f'letter-spacing:0;">&nbsp;&nbsp;{arrow} was {e(prev)}</span>')
         except (TypeError, ValueError):
             pass
         sub = f"under your {e(target)} target" if (target and payload.get("kind") in
@@ -598,43 +722,52 @@ def render_html(payload):
             sub = f"over your {e(target)} threshold"
         if target and payload.get("kind") == "inventory":
             sub = f"at or below your {e(target)} left"
-        big = (f'<div style="margin:18px 0 4px;font-size:34px;line-height:1.1;font-weight:700;'
-               f'color:{accent};">{e(v)}{delta}</div>'
-               + (f'<div style="font-size:14px;color:#6b7280;">{sub}</div>' if sub else ""))
+        big = (f'<div style="margin:18px 0 4px;font-size:34px;line-height:1.15;font-weight:600;'
+               f'letter-spacing:-0.02em;color:{C["fg"]};">{e(v)}{delta}</div>'
+               + (f'<div style="font-size:14px;color:{C["secondary"]};">{sub}</div>' if sub else ""))
 
     # e() because a phrase lifted off a page is untrusted input, exactly like a page title.
-    said = (f'<div style="margin:6px 0 0;font-size:14px;color:#6b7280;">the page says: '
+    said = (f'<div style="margin:6px 0 0;font-size:14px;color:{C["secondary"]};">the page says: '
             f'{e(payload["state_text"])}</div>' if payload.get("state_text") else "")
 
     cl = _conf_long(payload)
-    conf_html = (f'<div style="margin-top:10px;font-size:13px;color:#92400e;background:#fffbeb;'
-                 f'border-left:3px solid #f59e0b;padding:8px 10px;">{e(cl)}</div>' if cl else "")
+    # The raised surface and a hairline, not a warning-yellow block: the house style has no second
+    # colour to spend, and the words "Unconfirmed reading" carry the caveat on their own.
+    conf_html = (f'<div style="margin-top:14px;padding:10px 14px;background:{C["raise"]};'
+                 f'border:1px solid {C["line"]};border-radius:10px;font-size:13px;'
+                 f'line-height:1.6;color:{C["secondary"]};">{e(cl)}</div>' if cl else "")
 
     btn = ""
     if payload.get("url"):
-        btn = (f'<div style="margin:22px 0 6px;"><a href="{e(payload["url"])}" '
-               f'style="display:inline-block;background:{accent};color:#ffffff;text-decoration:none;'
-               f'padding:11px 20px;border-radius:6px;font-size:15px;font-weight:600;">'
-               f'View the {e(noun)} &rarr;</a></div>')
+        btn = (f'<div style="margin:24px 0 6px;"><a href="{e(payload["url"])}" '
+               f'style="display:inline-block;background:{C["amber"]};color:{C["on_amber"]};'
+               f'text-decoration:none;padding:10px 18px;border-radius:10px;font-size:15px;'
+               f'font-weight:500;">View the {e(noun)} &rarr;</a></div>')
 
     advice = ADVICE.get(payload.get("kind"))
-    advice_html = (f'<div style="margin-top:16px;font-size:14px;color:#374151;">{e(advice)}</div>'
-                   if advice else "")
+    advice_html = (f'<div style="margin-top:16px;font-size:14px;line-height:1.6;'
+                   f'color:{C["secondary"]};">{e(advice)}</div>' if advice else "")
 
     assistant = (payload.get("assistant") or "").strip()
     lead = ("One of your monitors needs a look." if problem
             else f"{e(_phrase(noun)).capitalize()} just hit your condition.")
-    footer = " ".join(_footer_lines(payload))
+    # _footer_lines writes LINES; joined into one run of text they need the periods the line
+    # breaks were providing ("Checked every 6h Reply in the assistant..." is not a sentence).
+    footer = " ".join(x if x.endswith(".") else x + "." for x in _footer_lines(payload))
 
-    return f"""<div style="margin:0;padding:0;background:#f3f4f6;">
-<table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background:#f3f4f6;padding:24px 12px;">
+    # No background on the wrapper, deliberately: the brand canvas belongs to the site, and a
+    # full-bleed near-black made the email claim the reader's whole viewport. The dark panel
+    # floats on whatever the mail client shows behind it instead.
+    return f"""<div style="margin:0;padding:0;">
+<table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="padding:24px 12px;">
 <tr><td align="center">
-<table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="max-width:520px;background:#ffffff;border-radius:10px;padding:28px 26px;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Helvetica,Arial,sans-serif;color:#111827;">
+<table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="max-width:520px;background:{C["panel"]};border:1px solid {C["line_soft"]};border-radius:12px;padding:30px 28px;font-family:{_FONT};color:{C["fg"]};">
 <tr><td>
-<div style="font-size:12px;letter-spacing:.08em;text-transform:uppercase;color:{accent};font-weight:700;">{e(headline)}</div>
-<div style="margin-top:14px;font-size:15px;color:#374151;">Hi {e(who) or 'there'}{f", {e(assistant)} here!" if assistant else ""} {lead}</div>
-{f'<div style="margin-top:14px;font-size:17px;font-weight:600;line-height:1.35;">{e(thing)}</div>' if thing else ''}
-{big}{said}{conf_html}{btn}{advice_html}
-<div style="margin-top:26px;padding-top:16px;border-top:1px solid #e5e7eb;font-size:12px;color:#9ca3af;line-height:1.6;">{e(footer)}</div>
+{_lockup_html(assistant)}
+<div style="margin-top:20px;font-family:{_MONO};font-size:11px;font-weight:500;letter-spacing:.12em;text-transform:uppercase;color:{C["amber"]};">{e(headline)}</div>
+<div style="margin-top:12px;font-size:15px;line-height:1.6;color:{C["secondary"]};">Hi {e(who) or 'there'}{f", {e(assistant)} here!" if assistant else ""} {lead}</div>
+{f'<div style="margin-top:14px;font-size:19px;font-weight:600;letter-spacing:-0.02em;line-height:1.35;color:{C["fg"]};">{e(thing)}</div>' if thing else ''}
+{big}{said}{_details_html(payload)}{conf_html}{btn}{advice_html}
+<div style="margin-top:28px;padding-top:16px;border-top:1px solid {C["line_soft"]};font-size:12px;line-height:1.6;color:{C["secondary"]};">{e(footer)}</div>
 </td></tr></table>
 </td></tr></table></div>"""
