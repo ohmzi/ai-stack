@@ -5428,11 +5428,12 @@ class Pipe:
     # so a job whose prompt is one of those commands needs no LOG instruction of its own and must
     # not have one appended — its whole contract is "print this command's output verbatim, add
     # nothing", and appending would make the run add something.
-    # flight_watch belongs here for the same reason the other two do: it prints its own LOG and
+    # flightclaw_watch belongs here for the same reason the others do: it prints its own LOG and
     # ALERT lines, so a job running it needs no protocol instruction and must not be given one —
     # appending would make a run whose entire contract is "print this verbatim, add nothing" add
     # something. Caught by a test asserting the pipe's own generated command passes its own checks.
-    _JOB_VETTED_RE = re.compile(r"\b(?:price_(?:watch|search)|flight_watch)\.py\b")
+    # flight_watch is still listed while its generator exists; it leaves with the old stack.
+    _JOB_VETTED_RE = re.compile(r"\b(?:price_(?:watch|search)|flight_watch|flightclaw_watch)\.py\b")
     _JOB_PROTOCOL_TAIL = (
         "\n\nFinish your response with these lines, exactly this shape:\n"
         "LOG: <one-line summary of this run, leading with the key number>\n"
