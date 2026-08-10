@@ -163,7 +163,7 @@ self-preference, format, and calibration drift. Mitigations applied:
 
 ### 1.5 The deploy check, and why a green suite was not enough
 
-Every pipe test in this repo loads its pipe from disk — 22 of the 38 suites under `tests/` load
+Every pipe test in this repo loads its pipe from disk — 22 of the 40 suites under `tests/` load
 `pipes/live/auto_assistant.py` (21 by that literal path, plus `tests/test_contention.py:42`, which
 assembles the same path with `os.path.join`). OpenWebUI does not: it executes a copy of the source
 stored in its own SQLite `function` table, reachable only by pasting into Workspace → Functions. So a
@@ -395,11 +395,16 @@ at eleven times the scale. Counted as its own gap in §4.
 | `tests/test_contention.py` | What a chat turn actually costs while a video render holds the card — the number three deferred decisions were waiting on. *Opt-in: `--live`, ~5 min, can OOM the render by design.* |
 | `tests/test_identity_drift.py` | The end-to-end counterpart to `test_photoreal_edit.py`: actually submits the edit and scores whether the face came back as the same person, on a synthetic fixed-seed subject. *Needs ComfyUI.* |
 
-**Measured 2026-08-08, against the tracked sources** (not `pipes/live/`): **1998 checks across 30
+**Measured 2026-08-10, against the tracked sources** (not `pipes/live/`): **2443 checks across 36
 offline suites that print a count**, plus `test_manifold.py` and `test_router.py`, which pass but
-print no count — 32 offline suites in total. **29 of the 30 are green.** `test_deployed.py` is red on
-1 of its 33 checks, by design: the pipe was edited after the last deploy, so `pipes/live/` is behind.
-Passing it the tracked source cannot clear that — comparing the two *is* what the suite does (§1.5).
+print no count — 38 offline suites in total, all green. Two more need a live service and fail
+rather than skip without one: `test_identity_drift.py` (ComfyUI + a free GPU, red this run) and
+`test_contention.py`'s live case (opt-in `--live`, not run). Three others carry the same live
+dependency — `test_websearch.py` (SearXNG), `test_alert_transports.py`'s resolver checks (`dig`),
+`test_retrieval_quality.py` (a running OpenWebUI) — but were reachable and green this run.
+`test_deployed.py` goes red exactly when the pipe was edited after the last deploy; comparing the
+two *is* what the suite does (§1.5), so passing it the tracked source cannot clear that on its own —
+deploying does.
 There is no aggregate runner; each suite is its own program:
 
 ```bash

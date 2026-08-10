@@ -182,11 +182,12 @@ rather than shared by import, since an email cannot load the site's own styleshe
   the pipe leaves a note in a file the host-side delivery watcher already polls every 60s and picks
   up from there.
 
-Both are documented in [docs/HERMES_AGENT.md](docs/HERMES_AGENT.md), including the concurrency bug
-each surfaced live during its own development: the delivery tick's "nothing new" early return ran
-*before* the code that would have drained a fresh confirmation, and `.alerts.json` had no lock
-across processes, on an assumption a manual test run and the 60-second systemd timer overlapping in
-the same minute disproved. Both are fixed and pinned by tests now, not hypothetically.
+Both are documented in [docs/HERMES_AGENT.md](docs/HERMES_AGENT.md), including two concurrency bugs
+the confirmation feature surfaced live during its own development, not in review: the delivery
+tick's "nothing new" early return ran *before* the code that would have drained a fresh
+confirmation, silently starving it forever, and `.alerts.json` had no lock across processes at all
+— an assumption a manual test run and the 60-second systemd timer overlapping in the same minute
+disproved outright. Both are fixed and pinned by tests now, not hypothetically.
 
 ## Models
 
@@ -316,7 +317,7 @@ python3 tests/test_manage_path.py                  # one suite
 for t in tests/test_*.py; do python3 "$t"; done    # all of them
 ```
 
-**2440 checks across 36 offline suites that print a count**, measured 2026-08-10 against the tracked
+**2443 checks across 36 offline suites that print a count**, measured 2026-08-10 against the tracked
 sources, plus `test_manifold.py` and `test_router.py`, which pass without printing a count — 38 of
 40 suites in total. All 38 are green, `test_deployed.py` included: it goes red exactly when the
 pipe was edited after the last deploy, which is the check's job, not a standing exception — see
@@ -343,11 +344,12 @@ Both directions of the trap have now been observed on the same day. A suite for 
 the tracked source does not), and before that the same staleness let suites **pass** against code
 696 lines behind the repo. A green run and a red run can both be reporting on the wrong file.
 
-`tests/` is 38 suites covering routing and the manage path, media intent and the confirm gate, GPU
-diagnosis and lock admission, alert setup/templating/transports/delivery, price and
-stock/availability watching, no-URL price discovery, the background-monitor search layer, flight
-intent and the two flight scripts, job-shape enforcement, the Task filter, task ownership, branding,
-and the deploy chain. Beyond unit tests:
+`tests/` is 40 suites covering routing and the manage path, media intent and the confirm gate, GPU
+diagnosis and lock admission, alert setup/templating/transports/delivery, the cancel-link token and
+service, the subscription-confirmation path on both creation routes, price and stock/availability
+watching, no-URL price discovery, the background-monitor search layer, flight intent and the two
+flight scripts, job-shape enforcement, the Task filter, task ownership, branding, and the deploy
+chain. Beyond unit tests:
 
 - `tests/eval/` — a repeatable evaluation suite with objective graders and a
   checked-in baseline. The judge honours `cases.json`; self-grading was removed.
