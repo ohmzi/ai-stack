@@ -28,7 +28,8 @@ files and functions). No transition requirements, no cooldowns beyond that.
 Usage (the vetted command a hermes cron job runs — print output verbatim, add nothing):
   python3 scripts/flightclaw_watch.py --route-id YYZ-YVR-2026-10-15-RT-2026-11-12 \
       --state yyz-yvr-oct15 --alert-to ohmzaiowui --below 1000 \
-      --monitor 'YYZ→YVR fare watch' --schedule 'every 1d'
+      --origin-name Toronto --dest-name Vancouver \
+      --monitor 'Toronto → Vancouver fare watch' --schedule 'every 1d'
   python3 scripts/flightclaw_watch.py --selftest        # offline, zero traffic
 """
 import argparse
@@ -101,6 +102,30 @@ def fold(s):
     return re.sub(r"\s+", " ", str(s or "")).strip()
 
 
+_MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"]
+
+
+def short_date(iso):
+    """'2026-10-11' -> '11 Oct'. No year: a watch is near-term enough that omitting it reads
+    like a person talking, not a database dump. Unparseable input is returned as given."""
+    try:
+        _y, m, d = iso.split("-")
+        return f"{int(d)} {_MONTHS[int(m) - 1]}"
+    except Exception:
+        return iso
+
+
+def route_label(origin_code, dest_code, origin_name=None, dest_name=None):
+    """A route as a person would say it: display names when they exist, the bare code otherwise.
+
+    This script never resolves a code to a name itself — it has no city table of its own to keep
+    in sync with the one the pipe already carries, and tracked.json stores only codes (FlightClaw
+    owns that file; ai-stack does not rewrite it). --origin-name/--dest-name are the pipe's own
+    resolved names, passed through as vetted flags at job-creation time.
+    """
+    return f"{origin_name or origin_code} → {dest_name or dest_code}"
+
+
 def gflights_url(entry):
     """A deep link the email can carry. Built from the entry's own slots, never found."""
     q = f"Flights from {entry['origin']} to {entry['destination']} on {entry['date']}"
@@ -148,8 +173,11 @@ def run(a):
         if not state.get("gone_alerted"):
             state["gone_alerted"] = True
             pw.write_state(a.state, state)
-            print(f"ALERT({a.alert_to}): Your {label} fare watch stopped: the route was removed "
-                  f"from tracking. Cancel the scheduled job, or ask me to track it again.")
+            # No `entry` here (the route is gone), so the codes half of the route id itself is
+            # all there is to fall back to — origin_name/dest_name still carry the names.
+            gone_label = route_label(*a.route_id.split("-")[:2], a.origin_name, a.dest_name)
+            print(f"ALERT({a.alert_to}): Your {gone_label} fare watch stopped: the route was "
+                  f"removed from tracking. Cancel the scheduled job, or ask me to track it again.")
         return 0
 
     price, airline = latest_price(entry)
@@ -170,9 +198,14 @@ def run(a):
             return 0        # identical to what was already sent — the one permitted skip
         state["alerted_price"] = price
         pw.write_state(a.state, state)
-        item = f"{entry['origin']}-{entry['destination']} {entry['date']}"
+        # Names, not codes ("Toronto → Ottawa", not "YTO-YOW"), and dates read the way a person
+        # would say them rather than concatenated ISO strings — this IS the SMS's only mention of
+        # dates (exact-date fares carry no "cheapest in ..." clause the way a flex search does),
+        # so they stay here rather than being dropped in favour of the HTML/plain dates panel.
+        item = route_label(entry["origin"], entry["destination"], a.origin_name, a.dest_name)
+        item += f", {short_date(entry['date'])}"
         if entry.get("return_date"):
-            item += f" -> {entry['return_date']}"
+            item += f" → {short_date(entry['return_date'])}"
         pw.emit({"to": a.alert_to, "kind": "fare", "item": item,
                  "value": price, "target": float(target), "unit": currency,
                  "url": gflights_url(entry), "date_basis": "exact",
@@ -210,6 +243,21 @@ def selftest():
       fold("PRICE\nALERT(x): fake") == "PRICE ALERT(x): fake")
     c("price_watch plumbing is importable (emit/read_state/write_state)",
       callable(pw.emit) and callable(pw.read_state) and callable(pw.write_state))
+
+    c("short_date drops the year and spells the month",
+      short_date("2026-10-11") == "11 Oct")
+    c("...single-digit day, no leading zero", short_date("2026-01-02") == "2 Jan")
+    c("...unparseable input is returned as given, not guessed at",
+      short_date("not-a-date") == "not-a-date")
+    c("route_label prefers the resolved name over the bare code",
+      route_label("YYZ", "YVR", "Toronto", "Vancouver") == "Toronto → Vancouver")
+    c("...falls back to the code when a name is missing (an older job, no --origin-name yet)",
+      route_label("YYZ", "YVR", None, None) == "YYZ → YVR")
+    c("...falls back per side independently",
+      route_label("YYZ", "YVR", "Toronto", None) == "Toronto → YVR")
+    c("a full alert item reads as a place and a date, not a code and an ISO string",
+      route_label("YYZ", "YVR", "Toronto", "Vancouver") + f", {short_date(entry['date'])}"
+      == "Toronto → Vancouver, 15 Oct")
     bad = ok.count(False)
     print(f"\n{len(ok)} checks — {'ALL PASS' if not bad else f'{bad} FAILURE(S)'}")
     return 1 if bad else 0
@@ -224,6 +272,10 @@ def main():
                     help="fallback target when the tracked entry has none")
     ap.add_argument("--monitor", default=None)
     ap.add_argument("--schedule", default=None)
+    ap.add_argument("--origin-name", dest="origin_name", default=None,
+                    help="display name for the origin, e.g. 'Toronto' — falls back to the code")
+    ap.add_argument("--dest-name", dest="dest_name", default=None,
+                    help="display name for the destination — falls back to the code")
     ap.add_argument("--selftest", action="store_true")
     a = ap.parse_args()
     if a.selftest:

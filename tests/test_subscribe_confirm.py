@@ -184,7 +184,11 @@ def main():
     got = inbox(inbox_path)
     check("the watch's own confirmation enqueued exactly once", len(got) == 1, str(got))
     fp = got[0]["payload"] if got else {}
-    check("the route rides along, no prompt-parsing needed", "YTO" in (fp.get("item") or ""), fp)
+    check("the route rides along as its DISPLAY name, no prompt-parsing needed",
+          "Toronto" in (fp.get("item") or "") and "Vancouver" in (fp.get("item") or ""), fp)
+    check("...not the airport code — s['origin']/s['dest'] are [code, name] pairs and the code "
+          "half is never what a person reading an email wants to see",
+          "YTO" not in fp.get("item", "") and "YVR" not in fp.get("item", ""), fp)
     check("...with the target already IN the name, not repeated as a separate field — a "
           "flight watch's own name always says 'under $N' when a target exists, and restating "
           "it cost the SMS the route itself to a 140-char truncation, live, during development",

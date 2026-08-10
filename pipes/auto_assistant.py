@@ -2118,13 +2118,24 @@ class Pipe:
             rid += f"-RT-{s['ret']['date']}"
         return rid
 
-    def _fc_watch_cmd(self, route_id, state, handle, name, sched, target):
+    def _fc_watch_cmd(self, route_id, state, handle, name, sched, target, origin_name=None,
+                      dest_name=None):
         """The vetted command a hermes job runs. Every value parsed, none inferred — the two fare
-        jobs an agent authored carried no dates at all and a --monitor whose spaces broke argparse."""
+        jobs an agent authored carried no dates at all and a --monitor whose spaces broke argparse.
+
+        origin_name/dest_name ride along as their own flags rather than making the watcher
+        re-derive a city from the code: this pipe already resolved "YOW" -> "Ottawa" once, at the
+        moment the slots were parsed, and flightclaw_watch.py has no code->name table of its own
+        to keep in sync with this one — the vetted command is the one place both sides agree.
+        """
         import shlex
         args = ["--route-id", route_id, "--state", state, "--alert-to", handle]
         if target:
             args += ["--below", f"{target:.0f}"]
+        if origin_name:
+            args += ["--origin-name", origin_name]
+        if dest_name:
+            args += ["--dest-name", dest_name]
         args += ["--monitor", name, "--schedule", sched]
         return ("Run this terminal command and print its output verbatim as your entire response. "
                 "Add nothing.\n"
@@ -2147,7 +2158,12 @@ class Pipe:
         # alert has somewhere to go. Never overwrites a number already on file.
         if s.get("phone") and not (self._contact(handle) or {}).get("phone"):
             self._save_phone(handle, s["phone"])
-        name = (f"{s['origin'][0]}→{s['dest'][0]} fare watch"
+        # Display names, not codes — s['origin']/s['dest'] are [code, name] pairs the slot parser
+        # already resolved ("YOW" -> "Ottawa"), and this string becomes the job's own title AND
+        # the subscribed-confirmation headline. _flight_table and the live-search banner already
+        # show the name; this was the one place in the file still showing the code instead,
+        # producing confirmations that read "YTO→YOW fare watch" rather than "Toronto → Ottawa".
+        name = (f"{s['origin'][1]} → {s['dest'][1]} fare watch"
                 + (f" under ${s['target']:,.0f}" if s.get("target") else ""))[:80]
         route_id = self._fc_route_id(s)
         track_args = {"origin": self._fc_code(s["origin"][0]),
@@ -2165,7 +2181,8 @@ class Pipe:
         horizon = self._fl_horizon_days(s)
         sched, repeat, defaulted = self._fl_schedule(s.get("cadence"), horizon_days=horizon)
         slug = re.sub(r"[^a-z0-9]+", "-", f"fc-{route_id}".lower()).strip("-")
-        prompt = self._fc_watch_cmd(route_id, slug, handle, name, sched, s.get("target"))
+        prompt = self._fc_watch_cmd(route_id, slug, handle, name, sched, s.get("target"),
+                                    origin_name=s["origin"][1], dest_name=s["dest"][1])
         status, data, err = await asyncio.to_thread(
             self._hermes_api, "POST", "/api/jobs",
             {"name": name, "schedule": sched, "prompt": prompt, "deliver": "local",
