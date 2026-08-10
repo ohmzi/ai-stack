@@ -264,6 +264,18 @@ def main():
     check("subject says something happened, not a value",
           t.render_subject(generic).startswith("You're all set:"), t.render_subject(generic))
 
+    # The message actually sent live during development, reproduced verbatim: a long flight-watch
+    # name plus a restated target, sms_body's own way. "You're set - " alone was fine at 137/140;
+    # combined with a target the item name already stated, it truncated the ROUTE ITSELF to make
+    # room for a number the route already carried. The fix moved to the pipe (Path B no longer
+    # sends target/unit when the name already states it) — this pins the surface it broke on.
+    tight = {"to": "ohmzaiowui", "assistant": "Ohmz AI", "kind": "subscribed",
+             "item": "YTO->YYT fare watch under $1,000", "schedule": "every 15m"}
+    check("a realistic long flight-watch confirmation fits in one SMS segment",
+          len(at.sms_body(t.render_sms(tight))) <= 140, at.sms_body(t.render_sms(tight)))
+    check("...with the route intact, not truncated",
+          "YTO->YYT" in at.sms_body(t.render_sms(tight)), at.sms_body(t.render_sms(tight)))
+
     flight = dict(BASE, kind="subscribed", item="YTO→YVR fare watch under $1,000",
                   monitor="YTO→YVR fare watch under $1,000", schedule="every 15m",
                   target=1000, unit="CAD", depart_found="2026-10-02", ret_found="2026-11-02",

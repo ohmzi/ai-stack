@@ -2188,10 +2188,15 @@ class Pipe:
             # dates panel reads (alert_templates._details_html): the itinerary the user asked
             # for. Deliberately no "source" — that field means a fare was FOUND on those dates,
             # and nothing has been searched for yet.
+            #
+            # Deliberately no target/unit either, even when s['target'] is set: `name` is built
+            # a few lines up as "{origin}->{dest} fare watch under ${target:,.0f}" whenever a
+            # target exists, so the confirmation sentence restating it is not extra information —
+            # it is the same three words twice, at the cost of the item name itself. A short-lived
+            # regression: adding it here pushed a 137-char SMS to 160+ and truncated the ROUTE to
+            # make room for a number the route already carried.
             sub_payload = {"kind": "subscribed", "item": name, "monitor": name, "schedule": sched,
                            "depart_found": s["depart"]["date"]}
-            if s.get("target"):
-                sub_payload["target"], sub_payload["unit"] = s["target"], "CAD"
             if not s.get("one_way") and (s.get("ret") or {}).get("date"):
                 sub_payload["ret_found"] = s["ret"]["date"]
             self._enqueue_subscription(handle, jid, sub_payload)

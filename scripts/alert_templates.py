@@ -312,7 +312,10 @@ def _subscribed(p):
     """
     t = money(p.get("target"), p.get("unit"))
     op = "over" if p.get("op") == "over" else "under"
-    return "You're all set", (f"is now being tracked — I'll alert you {op} {t}" if t
+    # A comma, not the em-dash the rest of this file favours: render_sms prefixes the SMS surface
+    # with its own "You're set - " head, and two dash-separated clauses back to back read like a
+    # stutter once the em-dash folds to a plain "-" for the handset.
+    return "You're all set", (f"is now being tracked, and I'll alert you {op} {t}" if t
                               else "is now being tracked")
 
 
@@ -406,6 +409,7 @@ def render_sms(payload, limit=140):
     sentence = _ascii(sentence)
     thing, noun = _ascii(_thing(payload) or "") or None, _noun(payload)
     problem = payload.get("kind") in PROBLEM_KINDS
+    announce = payload.get("kind") in ANNOUNCE_KINDS
     pointer = "Details in email." if not payload.get("url") else "Link in email."
 
     # The previous value belongs in the email, not the buzz — it cost 13 characters and pushed the
@@ -422,7 +426,9 @@ def render_sms(payload, limit=140):
         lead = f"Hi {who}, " if (greet and who) else ""
         if ident and assistant:
             lead += f"{assistant} here! "
-        head = "Heads up - " if problem else ""
+        # "X is now being tracked" reads as a status report, not as the confirmation it is — a
+        # user who just asked for a tracker wants the text to say plainly that the ask landed.
+        head = "Heads up - " if problem else "You're set - " if announce else ""
         conf = "" if problem else _conf_short(payload)
         # With a greeting and an identity in front, "the listing you're tracking" is ceremony the
         # 140 characters cannot afford — the user knows why they are being texted. The item name

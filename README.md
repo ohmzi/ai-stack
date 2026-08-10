@@ -163,6 +163,31 @@ domain with no MX but an A record is flagged `implicit` rather than silently tru
 5321 says mail falls back there and it usually still bounces. The resolver check fails **open** — a
 missing `dig` must never be what stops an alert.
 
+The email is set in the OhmzAI brand, not a stock white template — same warm-dark palette and one
+amber accent as the rest of the stack, `branding/ohmz.css` copied into `scripts/alert_templates.py`
+rather than shared by import, since an email cannot load the site's own stylesheet.
+
+**Two more things an alert can now do, added 2026-08-10:**
+
+- **Cancel or pause from the email itself.** The footer link opens `cancel.ohmz.cloud`, a small
+  loopback service (`scripts/cancel_service.py`, behind the same Cloudflare tunnel as everything
+  else) authorized by a stateless signed token — no login, no session, one job. GET only ever
+  renders the page (mail clients prefetch links; a mutating GET would cancel a monitor before
+  anyone read the alert); Cancel and Pause/Resume are POST-only. Cancelling does the full cleanup
+  the chat path never did: the Hermes job, the ownership record, queued retries, watcher state,
+  and a fare watch's FlightClaw route.
+- **A confirmation when a monitor is created**, not just when it fires — "cat board watch is now
+  being tracked, and I'll alert you under $50.00," by email and text, through the same template
+  and the same cancel link. The container that creates a job holds no SMTP/Twilio credentials, so
+  the pipe leaves a note in a file the host-side delivery watcher already polls every 60s and picks
+  up from there.
+
+Both are documented in [docs/HERMES_AGENT.md](docs/HERMES_AGENT.md), including the concurrency bug
+each surfaced live during its own development: the delivery tick's "nothing new" early return ran
+*before* the code that would have drained a fresh confirmation, and `.alerts.json` had no lock
+across processes, on an assumption a manual test run and the 60-second systemd timer overlapping in
+the same minute disproved. Both are fixed and pinned by tests now, not hypothetically.
+
 ## Models
 
 One 24 GB RTX 3090, and as of the 2026-07-26 consolidation almost everything
@@ -291,17 +316,21 @@ python3 tests/test_manage_path.py                  # one suite
 for t in tests/test_*.py; do python3 "$t"; done    # all of them
 ```
 
-**1998 checks across 30 offline suites that print a count**, measured 2026-08-08 against the tracked
-sources, plus `test_manifold.py` and `test_router.py`, which pass without printing a count — 32
-offline suites in total. 29 of the 30 are green. `test_deployed.py` is red right now on 1 of its 33
-checks, **by design**: the pipe was edited after the last deploy, so `pipes/live/` is behind. Passing
-it the tracked source cannot clear that — comparing the two *is* the suite's job. See **Deploying**.
+**2440 checks across 36 offline suites that print a count**, measured 2026-08-10 against the tracked
+sources, plus `test_manifold.py` and `test_router.py`, which pass without printing a count — 38 of
+40 suites in total. All 38 are green, `test_deployed.py` included: it goes red exactly when the
+pipe was edited after the last deploy, which is the check's job, not a standing exception — see
+**Deploying**.
 
-Six further suites need a live service (SearXNG, ComfyUI, a DNS resolver, a running OpenWebUI) and
-**fail rather than skip** without it, so a red run is not automatically a regression —
-[QA_TEST_PLAN.md](docs/QA_TEST_PLAN.md) lists which.
+The other two need a live service and **fail rather than skip** without one, so a red run is not
+automatically a regression: `test_identity_drift.py` (ComfyUI + a free GPU) was red this run for
+exactly that reason, and `test_contention.py`'s live GPU-contention case is opt-in (`--live`) and
+was not run. Three more suites — `test_websearch.py` (SearXNG), `test_alert_transports.py`'s
+resolver checks (`dig`), and `test_retrieval_quality.py` (a running OpenWebUI) — carry the same
+live dependency but happened to be green this run, which is a property of what was reachable on
+this box that day, not a guarantee. [QA_TEST_PLAN.md](docs/QA_TEST_PLAN.md) has the full list.
 
-**Nineteen suites — half of them — take a pipe path and default to the gitignored `pipes/live/`
+**Nineteen of the forty suites take a pipe path and default to the gitignored `pipes/live/`
 copy.** When that copy is stale they test the *deployed* code, not what you just wrote, and say
 nothing about which one they read. Give them the tracked source explicitly:
 

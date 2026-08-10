@@ -184,9 +184,11 @@ def main():
     got = inbox(inbox_path)
     check("the watch's own confirmation enqueued exactly once", len(got) == 1, str(got))
     fp = got[0]["payload"] if got else {}
-    check("the route and target ride along, no prompt-parsing needed",
-          fp.get("target") == 1000.0 and fp.get("unit") == "CAD"
-          and "YTO" in (fp.get("item") or ""), fp)
+    check("the route rides along, no prompt-parsing needed", "YTO" in (fp.get("item") or ""), fp)
+    check("...with the target already IN the name, not repeated as a separate field — a "
+          "flight watch's own name always says 'under $N' when a target exists, and restating "
+          "it cost the SMS the route itself to a 140-char truncation, live, during development",
+          "1,000" in fp.get("item", "") and "target" not in fp, fp)
     check("the itinerary dates ride along too",
           fp.get("depart_found") == "2026-10-02" and fp.get("ret_found") == "2026-11-02", fp)
     check("no 'found on' claim — nothing was searched for, this is what was asked for",
