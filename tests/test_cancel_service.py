@@ -218,10 +218,34 @@ def main():
     old = ct.mint(JID, "ohmz", SECRET, now=time.time() - 40 * 86400)
     st, body = get(f"/c?t={old}")
     check("expired token is a 404 that says expired", st == 404 and "expired" in body)
+    print("--- arriving with no link at all is a signpost, not an error ---")
+    st, body = get("/")
+    check("the bare hostname is a 200, not a 404", st == 200, str(st))
+    check("...saying there is nothing here rather than 'link isn't valid'",
+          "Nothing to manage here" in body and "isn't valid" not in body, body[:400])
+    check("...redirecting to the assistant without needing scripts",
+          'http-equiv="refresh"' in body and "5;url=https://ai.ohmz.cloud" in body, body[:400])
+    check("...and offering a link for anyone who won't wait",
+          'href="https://ai.ohmz.cloud"' in body)
     st, body = get("/c")
-    check("missing token is a 404", st == 404)
+    check("a link with the token missing lands there too", st == 200
+          and "Nothing to manage here" in body, str(st))
+    before = len(Fake.calls)
+    check("no Hermes call for a tokenless visit", len(Fake.calls) == before)
     st, body = get("/elsewhere")
-    check("unknown path is a 404", st == 404)
+    check("an unknown path is still a 404", st == 404, str(st))
+    check("...but shows the same way out", "Nothing to manage here" in body)
+    st, body = get("/c?t=garbage.token")
+    check("a forged token page offers the assistant too",
+          'href="https://ai.ohmz.cloud"' in body and "isn't valid" in body, body[:300])
+    check("...but does NOT auto-redirect away from the explanation",
+          'http-equiv="refresh"' not in body)
+    st, body = get(f"/c?t={old}")
+    check("the expired page offers it as well", 'href="https://ai.ohmz.cloud"' in body)
+    open(conf, "w").write(f"CANCEL_SECRET={SECRET}\nASSISTANT_URL=https://elsewhere.example\n")
+    st, body = get("/")
+    check("the destination is configurable", "https://elsewhere.example" in body, body[:300])
+    open(conf, "w").write(f"CANCEL_SECRET={SECRET}\n")
 
     print("--- cancel does the FULL cleanup ---")
     canary = os.path.join(d, "canary.txt")

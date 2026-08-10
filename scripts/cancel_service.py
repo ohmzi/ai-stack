@@ -57,6 +57,11 @@ STATE_DIR = os.path.expanduser("~/.hermes/monitor-state")
 FC_MCP = "http://127.0.0.1:8765/mcp"
 BIND, PORT = "127.0.0.1", 8096
 TIMEOUT = 10
+# Where someone who arrived here without a link should actually be going. Overridable with
+# ASSISTANT_URL in alert_transports.env, because the hostname is deployment trivia and this file
+# should not have to be edited to move it.
+ASSISTANT_URL = "https://ai.ohmz.cloud"
+REDIRECT_S = 5
 
 _JOB_ID_RE = re.compile(r"^[a-f0-9]{12}$")
 # The watcher's --state slug comes out of a job prompt, which an agent wrote — semi-trusted at
@@ -323,11 +328,17 @@ def full_cancel(jid, handle):
 
 # ---------------------------------------------------------------- pages
 
-def _page(title, inner, label="MONITOR"):
+def _assistant_url():
+    """The configured assistant address, or the default. Never taken from the request — a
+    redirect target that a visitor can set is an open redirect with this domain's name on it."""
+    return _env(CONF).get("ASSISTANT_URL", ASSISTANT_URL)
+
+
+def _page(title, inner, label="MONITOR", head=""):
     e = html.escape
     return f"""<!doctype html><html lang="en"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<meta name="robots" content="noindex"><title>{e(title)}</title><style>
+<meta name="robots" content="noindex"><title>{e(title)}</title>{head}<style>
 body{{margin:0;min-height:100vh;background:{C["canvas"]};color:{C["fg"]};
 font-family:'Space Grotesk',ui-sans-serif,system-ui,-apple-system,'Segoe UI',Helvetica,Arial,sans-serif;
 display:flex;align-items:center;justify-content:center;padding:24px 12px;box-sizing:border-box;}}
@@ -345,6 +356,9 @@ button{{font:inherit;font-size:15px;font-weight:500;padding:10px 18px;border-rad
 border:1px solid transparent;cursor:pointer;}}
 .primary{{background:{C["amber"]};color:{C["on_amber"]};}}
 .ghost{{background:transparent;border-color:{C["line"]};color:{C["fg"]};}}
+a.btn{{display:inline-block;margin-top:20px;font-size:15px;font-weight:500;padding:10px 18px;
+border-radius:10px;border:1px solid transparent;text-decoration:none;}}
+.count{{font-variant-numeric:tabular-nums;}}
 .foot{{margin-top:26px;padding-top:14px;border-top:1px solid {C["line_soft"]};font-size:12px;
 line-height:1.6;color:{C["secondary"]};}}
 </style></head><body><div class="card"><div class="label">{e(label)}</div>
@@ -408,13 +422,47 @@ def page_result(outcome, name, details, token=None, state=None):
                               "Try again in a minute.</p>", label="UNAVAILABLE")
 
 
+def _assistant_button(text="Open the assistant"):
+    """The way out of every dead end here. A page that tells someone their link is no good and
+    then leaves them on it has only described the problem."""
+    return (f'<a class="btn primary" href="{html.escape(_assistant_url())}">'
+            f'{html.escape(text)} &rarr;</a>')
+
+
+def page_landing():
+    """For someone who typed the hostname, or followed a link with no token in it.
+
+    They are not looking at a broken link — they are in the wrong place, and the right place is
+    the assistant, where every monitor can be seen and changed rather than just this one. So the
+    page says that and takes them there, with the redirect declared in a <meta> so it does not
+    depend on scripts, and a button for anyone who would rather not wait.
+    """
+    url = html.escape(_assistant_url())
+    head = f'<meta http-equiv="refresh" content="{REDIRECT_S};url={url}">'
+    return _page(
+        "Ohmz AI",
+        f'<h1>Nothing to manage here</h1>'
+        f'<p>This page opens from a link in an alert email, and manages the one monitor that '
+        f'email was about. There is no link, so there is nothing to show.</p>'
+        f'<p>Taking you to the assistant in <span class="count" id="n">{REDIRECT_S}</span> '
+        f'seconds, where you can see and change every monitor you have.</p>'
+        f'{_assistant_button("Go now")}'
+        f'<script>(function(){{var e=document.getElementById("n"),s={REDIRECT_S};'
+        f'setInterval(function(){{if(--s>=0)e.textContent=s;}},1000);}})();</script>',
+        label="OHMZ AI", head=head)
+
+
 def page_invalid(why):
     if why == "expired":
-        return _page("Link expired", "<h1>This link has expired</h1><p>Cancel links stop working "
-                                     "after a while on purpose. Ask the assistant to cancel or "
-                                     "change the monitor instead.</p>", label="EXPIRED")
-    return _page("Not found", "<h1>This link isn't valid</h1><p>It may be damaged or out of "
-                              "date. Ask the assistant to manage your monitors instead.</p>",
+        return _page("Link expired",
+                     "<h1>This link has expired</h1><p>Cancel links stop working after a while "
+                     "on purpose, so an old email cannot act on a monitor you have since "
+                     "changed. Your monitors are all still there.</p>"
+                     + _assistant_button("Manage them in the assistant"), label="EXPIRED")
+    return _page("Not found",
+                 "<h1>This link isn't valid</h1><p>It may be damaged, or from an email older "
+                 "than the last time the keys changed. Nothing has happened to your "
+                 "monitors.</p>" + _assistant_button("Manage them in the assistant"),
                  label="NOT FOUND")
 
 
@@ -480,7 +528,7 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_HEAD(self):
         path = urllib.parse.urlsplit(self.path).path
-        if path == "/healthz":
+        if path in ("/healthz", "/"):
             self._send(200, "ok", ctype="text/plain; charset=utf-8", head_only=True)
         else:
             self._send(404, "", ctype="text/plain; charset=utf-8", head_only=True)
@@ -489,9 +537,15 @@ class Handler(BaseHTTPRequestHandler):
         parts = urllib.parse.urlsplit(self.path)
         if parts.path == "/healthz":
             return self._send(200, "ok", ctype="text/plain; charset=utf-8")
+        token = (urllib.parse.parse_qs(parts.query).get("t") or [""])[0]
+        # No token at all is a person, not a forged link: someone typed the hostname or followed
+        # a truncated link. Answered BEFORE the token gate so it neither reads as "your link is
+        # broken" nor counts against the failed-verify limiter. A wrong path lands here too —
+        # it says the same true thing, with the same way out.
+        if not token:
+            return self._send(200 if parts.path in ("/", "/c") else 404, page_landing())
         if parts.path != "/c":
             return self._send(404, page_invalid("bad"))
-        token = (urllib.parse.parse_qs(parts.query).get("t") or [""])[0]
         gate = self._token_gate(token)
         if not gate:
             return
