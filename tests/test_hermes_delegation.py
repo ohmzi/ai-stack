@@ -149,9 +149,11 @@ def owners_now():
 
 
 def drive(reply, snapshots, verify=True, status=200, brief=None, exc=None, post_exc=None,
-          scoped=False, uname="ohmz"):
+          scoped=False, uname="ohmz", drop_done=False):
     """Run one delegation turn. `snapshots` is what _hermes_jobs returns on successive calls.
-    `exc` kills the SSE stream before [DONE]; `post_exc` kills the connection attempt itself."""
+    `exc` kills the SSE stream before [DONE]; `post_exc` kills the connection attempt itself.
+    `drop_done` truncates the stream with NO exception at all — a clean EOF that never sent
+    [DONE], independent of `exc` (which always implies a dropped DONE too)."""
     p = mod.Pipe()
     seq = list(snapshots)
     released = []
@@ -185,8 +187,8 @@ def drive(reply, snapshots, verify=True, status=200, brief=None, exc=None, post_
         return None
 
     lines = sse(reply)
-    if exc is not None:
-        lines = lines[:-1]   # a dying stream never delivers its [DONE]
+    if exc is not None or drop_done:
+        lines = lines[:-1]   # a dying (or truncated) stream never delivers its [DONE]
     mod.aiohttp = _Aiohttp(real_aiohttp, lines, status, exc, post_exc)
     mod.asyncio.sleep = no_sleep
     chunks = []
@@ -366,6 +368,37 @@ def main():
     out = drive("never sent", [before, before], verify=False, post_exc=dead)
     check("a dead gateway names the fix", "hermes-gateway" in out, out[:160])
     check("...without leaking a marker", "<!--" not in out, repr(out[-60:]))
+
+    print("--- a stream that ends WITHOUT [DONE] and without raising is not silent ---")
+    # The gap this closes: unlike a timeout or a dead connector, a clean EOF that simply never
+    # sent [DONE] raises NOTHING — the async-for loop just runs out of lines. Before this fix,
+    # outcome stayed at its initial "incomplete" and NOTHING was appended: whatever text had
+    # already streamed (true or fabricated) stood as the ENTIRE reply, un-verified and
+    # un-flagged. This is one layer deeper than the live "change it to daily" bug (that turn
+    # never even reached _hermes_stream), but it is the same failure shape ONE STEP further in —
+    # an agent turn that streams real prose and then the connection drops before the tool-backed
+    # verdict ever gets appended.
+    out = drive("I updated the schedule", [before, before], verify=True, drop_done=True)
+    check("the raw streamed text still reaches the user", "I updated the schedule" in out, out)
+    check("...but is explicitly marked unverified, not left to stand alone",
+          "⚠️" in out and "Unverified" in out and "UNCONFIRMED" in out, out)
+    check("...and points at how to actually check", "list tasks" in out, out)
+    # verify=False (a follow-up/research turn) never wanted a verdict in the first place, so a
+    # dropped stream there is unremarkable — it must NOT gain a warning it never asked for.
+    out2 = drive("looked it up", [before, before], verify=False, drop_done=True)
+    check("a turn that never wanted verification stays quiet about a dropped stream",
+          "Unverified" not in out2, out2)
+
+    print("--- a stream that RAISES mid-reply (not a dead connector, not a timeout) also warns ---")
+    payload_err = mod.aiohttp.ClientPayloadError("truncated chunked body")
+    out = drive("partial fare data", [before, before], verify=True, exc=payload_err)
+    check("the partial text still reaches the user", "partial fare data" in out, out)
+    check("...and is marked unverified, naming what broke",
+          "⚠️" in out and "ClientPayloadError" in out and "UNCONFIRMED" in out, out)
+    out2 = drive("partial", [before, before], verify=False, exc=payload_err)
+    check("a real connection error still warns even with no verdict wanted — same precedent "
+          "as the pre-existing timeout/dead-gateway handlers, which warn unconditionally too",
+          "UNCONFIRMED" in out2, out2)
 
     print("--- continuity is held on the pipe, so it survives a stream that never finishes ---")
     pc = mod.Pipe()

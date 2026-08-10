@@ -6322,6 +6322,25 @@ class Pipe:
                         if tok:
                             reply += tok
                             yield tok
+                    # The loop ran out of lines WITHOUT ever seeing "data: [DONE]" — the stream
+                    # closed clean (no exception at all) rather than erroring, so nothing above
+                    # ever ran the verdict machinery. `outcome` is still its initial "incomplete",
+                    # and without this, NOTHING gets appended: whatever the agent had streamed so
+                    # far — true or fabricated — stands as the entire reply with no verification
+                    # and no warning that there was none. Measured live, 2026-08-10: a chat-only
+                    # turn (not even this code path) fabricated a full "✅ Switched to daily
+                    # checks" confirmation with zero tool access; this is the same failure mode
+                    # ONE LAYER DEEPER — an agent turn that streamed real prose and then the
+                    # connection dropped before its tool-verified truth ever got appended.
+                    if verify_creation:
+                        try:
+                            _attribute(self._hermes_jobs(), src_hint="dropped_stream")
+                        except Exception:
+                            pass
+                        yield ("\n\n⚠️ **Unverified**: the connection to hermes-agent closed before "
+                               "this could be checked against the real scheduler. Treat the reply "
+                               "above as UNCONFIRMED — ask me to list tasks to see what is "
+                               "actually scheduled.")
         except asyncio.TimeoutError:
             outcome = "timeout"
             # The advice line below says the job may still have been created — so claim it before
@@ -6339,6 +6358,22 @@ class Pipe:
             outcome = "unreachable_gateway"
             yield ("⚠️ hermes-agent is not reachable on 127.0.0.1:8642. "
                    "Start it with: `systemctl --user start hermes-gateway`")
+        except aiohttp.ClientError as e:
+            # Everything else aiohttp can raise mid-stream (a truncated chunked body, the socket
+            # reset partway through) — distinct from ClientConnectorError above, which means the
+            # gateway was never reached at all. Without this, one of these left the SAME silent
+            # gap the missing-[DONE] case above closes: an uncaught exception here still reaches
+            # `finally` (Python guarantees that), but propagates past every yield, so the user
+            # sees whatever OpenWebUI does with a raised exception instead of an honest message.
+            outcome = "stream_error"
+            if verify_creation:
+                try:
+                    _attribute(self._hermes_jobs(), src_hint="stream_error")
+                except Exception:
+                    pass
+            yield (f"\n\n⚠️ hermes-agent's connection broke mid-reply ({type(e).__name__}). "
+                  "Treat anything above as UNCONFIRMED — ask me to list tasks to see what is "
+                  "actually scheduled.")
         finally:
             # One row per delegation with the verification CLASS — the ready-made outcome signal
             # ("created" vs "failed" vs "timeout") that until now existed only as chat prose.
@@ -7007,6 +7042,35 @@ class Pipe:
                     if done is not None:
                         self._mark_bg(cid)
                         return done
+            # An edit to a job that ALREADY EXISTS ("change/adjust the alert to 15 mins"), not a
+            # request for a new one. Checked BEFORE _is_bg_task_request below, for the same
+            # reason _task_mode_turn's equivalent check runs before its own create test: a
+            # duration phrase ("for 2 hours") is exactly the kind of thing _BG_RECURRENCE also
+            # matches, so an edit request that spells its duration correctly could otherwise be
+            # caught by the CREATION path instead, which has no idea an existing job is meant.
+            #
+            # Without ANY check here, "change it to checking every day for next 2 weeks" matched
+            # no predicate in this whole cascade at all: _BG_VERB requires an opening verb like
+            # track/watch/monitor, which this doesn't have, so _is_bg_task_request is unconditionally
+            # false regardless of the recurrence wording, and the message fell straight through to
+            # the plain CHAT MODEL at the very bottom of pipe() — no tool access, no view of the
+            # real scheduler. It fabricated "✅ Switched to daily checks" from the job id and
+            # schedule visible earlier in the conversation while the real job sat byte-for-byte
+            # unchanged (confirmed live, 2026-08-10: `hermes cron list` still showed the original
+            # "every 15m" schedule and "0/8" repeat count afterward). _task_mode_turn's own edit
+            # step only fires when the Task control is explicitly on — this is its counterpart for
+            # every OTHER turn, which is most of them.
+            if self._EDIT_VERB.search((text or "").strip().lower()):
+                if not await self._confirm_render(
+                        confirm, "background task",
+                        f"Change a background task: “{(text or '')[:120]}”"):
+                    return self._say(
+                        "Okay — nothing changed. If you just wanted an answer rather than a job "
+                        "change, ask it directly and I'll answer here.")
+                self._route_metric("task.edit", 0, "chip_edit", text, deterministic=False)
+                self._mark_bg(cid)
+                return self._hermes_stream(text, handle, verify_creation=True,
+                                           brief=self._EDIT_BRIEF, scoped=scoped)
             followup = self._is_bg_followup(text, omsgs, cid)
             if followup or self._is_bg_task_request(text):
                 raw_l = (text or "").strip().lower()
