@@ -36,6 +36,10 @@ Configuration (~/.hermes/alert_transports.env, 0600, never in git):
     SMTP_USER=you@gmail.com
     SMTP_PASS=app-password            # an APP password, not the account password
     SMTP_FROM=you@gmail.com           # optional; defaults to SMTP_USER
+    CANCEL_SECRET=64-hex              # optional; enables the email cancel link. Mint with
+                                      #   python3 -c "import secrets;print(secrets.token_hex(32))"
+                                      # Rotating it kills every outstanding link at once.
+    CANCEL_BASE_URL=https://cancel.ohmz.cloud   # optional; where cancel_service is reachable
 
 Contacts (~/.hermes/alert_contacts.json): {"ohmz": {"phone": "+15551234567"}}
 Email is looked up from OpenWebUI automatically; an "email" key here overrides it.
@@ -557,6 +561,28 @@ def send_alert(handle, message, subject=None, job=None, job_id=None, when=None, 
         if phone:
             # So the email can say where the text went without the job having to know.
             payload["texted_to"] = phone
+        # The cancel link, minted here and nowhere earlier ON PURPOSE. This is the one seam where
+        # all three inputs exist (the job id arrives as a kwarg, the secret and base URL live in
+        # conf), and minting into this COPY of the payload keeps the token out of the caller's
+        # dict — which hermes_delivery persists to its retry queue. A token at rest in that file
+        # would be a capability lying on disk for 20 minutes per alert; a token minted per send
+        # attempt is not. Guarded like _templates: a broken token module degrades to an email
+        # without a cancel link, never to an alert that failed to send.
+        # A payload arrives as JSON printed by a job's own run output, so cancel_url is only ever
+        # trustworthy when THIS function put it there. Dropping any inbound one first means a
+        # crafted ALERT_DATA line cannot get an arbitrary link rendered as "Cancel this monitor"
+        # in an email the user has every reason to trust.
+        payload.pop("cancel_url", None)
+        if job_id and conf.get("CANCEL_SECRET") and conf.get("CANCEL_BASE_URL"):
+            try:
+                sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+                import cancel_tokens
+                token = cancel_tokens.mint(job_id, handle, conf["CANCEL_SECRET"])
+                if token:
+                    base = conf["CANCEL_BASE_URL"].rstrip("/")
+                    payload["cancel_url"] = f"{base}/c?t={token}"
+            except Exception:
+                pass
 
     if "sms" in channels:
         if not phone:

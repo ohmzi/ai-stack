@@ -302,6 +302,52 @@ def main():
     check("a missing map file is not an error either",
           hd._read_map(os.path.join(d, "nope.json")) == {})
 
+    print("--- cancel tombstones kill queued alerts, and the kill sticks ---")
+    # The email cancel link deletes a job out-of-band. This tick has no lock on .alerts.json, so
+    # the service's own purge can be overwritten by an in-flight tick (last writer wins) — the
+    # tombstone is what makes the cancellation stick regardless of write order.
+    import tempfile as _tf3
+    d = _tf3.mkdtemp()
+    hd.OUT_DIR = d
+    hd.ALERT_LEDGER = os.path.join(d, "ledger.jsonl")
+    hd.CANCELLED = os.path.join(d, ".cancelled.json")
+    now_iso = hd._iso(hd._now())
+    old_iso = hd._iso(hd._now() - 8 * 86400)
+    json.dump({"aaaa11112222": now_iso, "stale00000000": old_iso, "bad": "not-a-date"},
+              open(hd.CANCELLED, "w"))
+    state = {
+        "k1": {"status": "pending", "job_id": "aaaa11112222", "job": "cat board watch",
+               "recipient": "ohmz", "message": "price dropped", "attempts": []},
+        "k2": {"status": "pending", "job_id": "bbbb33334444", "job": "other watch",
+               "recipient": "ohmz", "message": "still live", "attempts": []},
+        "k3": {"status": "delivered", "job_id": "aaaa11112222", "job": "cat board watch",
+               "recipient": "ohmz", "message": "already sent", "attempts": []},
+    }
+    killed = hd.apply_cancel_tombstones(state)
+    check("the tombstoned pending entry is killed", killed == 1 and
+          state["k1"]["status"] == "cancelled", str(state["k1"]))
+    check("an unrelated pending entry is untouched", state["k2"]["status"] == "pending")
+    check("history is not rewritten", state["k3"]["status"] == "delivered")
+    ledger = [json.loads(x) for x in open(hd.ALERT_LEDGER)]
+    check("the kill is a ledger row, not a silence",
+          any("cancelled via email link" in " ".join(r.get("notes", [])) for r in ledger),
+          repr(ledger))
+    stones = json.load(open(hd.CANCELLED))
+    check("a fresh tombstone survives the prune", "aaaa11112222" in stones, repr(stones))
+    check("a stale tombstone is pruned", "stale00000000" not in stones, repr(stones))
+    check("an unparseable tombstone is pruned too", "bad" not in stones, repr(stones))
+    # Re-applying is a no-op: the entry is no longer pending, nothing double-writes the ledger.
+    n = len(ledger)
+    check("re-applying kills nothing twice",
+          hd.apply_cancel_tombstones(state) == 0
+          and len([x for x in open(hd.ALERT_LEDGER)]) == n)
+    hd.CANCELLED = os.path.join(d, "missing.json")
+    check("a missing tombstone file is a no-op", hd.apply_cancel_tombstones(state) == 0)
+    open(os.path.join(d, "corrupt.json"), "w").write("{ nope")
+    hd.CANCELLED = os.path.join(d, "corrupt.json")
+    check("a corrupt tombstone file is a no-op, not a crash",
+          hd.apply_cancel_tombstones(state) == 0)
+
     fails = results.count(False)
     print(f"\n{len(results)} checks — {'ALL PASS' if not fails else str(fails) + ' FAILURE(S)'}")
     return 1 if fails else 0

@@ -572,6 +572,13 @@ def render_plain(payload):
     return "\n".join(lines)
 
 
+# The plain-text wording of the cancel line, and the marker render_html uses to find that line
+# among the footer's lines. A prefix, not a search for the URL inside the text: matching on the
+# URL would turn ANY footer line that happened to contain it into the anchor, and silently drop
+# whatever else that line said.
+_CANCEL_PREFIX = "Cancel this monitor: "
+
+
 def _footer_lines(payload):
     bits = []
     sched = payload.get("schedule")
@@ -581,7 +588,14 @@ def _footer_lines(payload):
         bits.append(f"a text went to {payload['texted_to']}")
     tail = ". ".join(x[0].upper() + x[1:] for x in [", ".join(bits)] if x)
     out = [tail] if tail else []
-    out.append("Reply in the assistant to change or cancel this monitor.")
+    # A cancel link when the transport minted one (it needs the job id and a configured secret),
+    # the old dead-end sentence when it did not. No trailing period after the URL — a period glued
+    # to a link is the classic way to break a mail client's autolinking.
+    if payload.get("cancel_url"):
+        out.append(_CANCEL_PREFIX + payload["cancel_url"])
+        out.append("Or reply in the assistant to change it.")
+    else:
+        out.append("Reply in the assistant to change or cancel this monitor.")
     return out
 
 
@@ -753,7 +767,19 @@ def render_html(payload):
             else f"{e(_phrase(noun)).capitalize()} just hit your condition.")
     # _footer_lines writes LINES; joined into one run of text they need the periods the line
     # breaks were providing ("Checked every 6h Reply in the assistant..." is not a sentence).
-    footer = " ".join(x if x.endswith(".") else x + "." for x in _footer_lines(payload))
+    # The cancel line is the exception twice over: its URL must become an anchor rather than
+    # escaped text, and it is styled as a quiet underlined link in the footer's own colour — not
+    # a second amber button. The brand spends its one accent on the primary action above, and a
+    # destructive action has no business competing with it.
+    cancel_url = payload.get("cancel_url")
+    footer_bits = []
+    for x in _footer_lines(payload):
+        if cancel_url and x.startswith(_CANCEL_PREFIX):
+            footer_bits.append(f'<a href="{e(cancel_url)}" style="color:{C["secondary"]};'
+                               f'text-decoration:underline;">Cancel this monitor</a>.')
+        else:
+            footer_bits.append(e(x if x.endswith(".") else x + "."))
+    footer = " ".join(footer_bits)
 
     # No background on the wrapper, deliberately: the brand canvas belongs to the site, and a
     # full-bleed near-black made the email claim the reader's whole viewport. The dark panel
@@ -768,6 +794,6 @@ def render_html(payload):
 <div style="margin-top:12px;font-size:15px;line-height:1.6;color:{C["secondary"]};">Hi {e(who) or 'there'}{f", {e(assistant)} here!" if assistant else ""} {lead}</div>
 {f'<div style="margin-top:14px;font-size:19px;font-weight:600;letter-spacing:-0.02em;line-height:1.35;color:{C["fg"]};">{e(thing)}</div>' if thing else ''}
 {big}{said}{_details_html(payload)}{conf_html}{btn}{advice_html}
-<div style="margin-top:28px;padding-top:16px;border-top:1px solid {C["line_soft"]};font-size:12px;line-height:1.6;color:{C["secondary"]};">{e(footer)}</div>
+<div style="margin-top:28px;padding-top:16px;border-top:1px solid {C["line_soft"]};font-size:12px;line-height:1.6;color:{C["secondary"]};">{footer}</div>
 </td></tr></table>
 </td></tr></table></div>"""

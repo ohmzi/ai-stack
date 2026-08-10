@@ -209,7 +209,45 @@ def main():
     check("ampersands escaped", "&amp;" in html)
     check("no external assets (a strict client blocks them anyway)",
           "src=" not in html and "@import" not in html and "<link" not in html)
-    check("the link is the only href", html.count("href=") <= 1)
+    # Stronger than counting: every href must be a link this payload put there. A count of two
+    # would pass with one legitimate link replaced by an injected one.
+    hrefs = re.findall(r'href="([^"]*)"', html)
+    check("every href is a link we put there",
+          hrefs and set(hrefs) <= {evil.get("url"), evil.get("cancel_url")} - {None}, str(hrefs))
+
+    print("--- the cancel link reaches the email, and only the email ---")
+    curl = "https://cancel.ohmz.cloud/c?t=AbC123xyz.def-XYZ_45"
+    p = dict(BASE, kind="price_drop", value=46.99, target=50.0, unit="$", cancel_url=curl)
+    html, plain = t.render_html(p), t.render_plain(p)
+    check("html carries the cancel anchor", f'href="{curl}"' in html)
+    check("...worded as an action", "Cancel this monitor" in html)
+    check("...and drops the dead-end sentence", "Reply in the assistant to change or" not in html)
+    check("plain text carries the raw url on its own line",
+          f"Cancel this monitor: {curl}" in plain.splitlines(), plain[-200:])
+    check("...with no period glued to it", curl + "." not in plain)
+    sms = at.sms_body(t.render_sms(p))
+    check("the sms never sees it", "cancel.ohmz" not in sms and "http" not in sms, sms)
+    check("nor does the subject", "http" not in t.render_subject(p), t.render_subject(p))
+    hrefs = set(re.findall(r'href="([^"]*)"', html))
+    check("both hrefs accounted for", hrefs == {BASE["url"], curl}, str(hrefs))
+    # The one-accent rule: the cancel affordance is a footer text link, not a second button.
+    check("cancel is not dressed as a button",
+          "background" not in html.split(f'href="{curl}"')[1].split(">")[0])
+    nasty = dict(p, cancel_url='https://cancel.ohmz.cloud/c?t=a&b"c')
+    nhtml = t.render_html(nasty)
+    check("a hostile cancel url is escaped in the href",
+          'href="https://cancel.ohmz.cloud/c?t=a&amp;b&quot;c"' in nhtml)
+    # The anchor is found by the line's own prefix. Matching on the URL instead would turn any
+    # other footer line that happened to contain it into a link, dropping what that line said.
+    sneaky = dict(BASE, kind="price_drop", value=46.99, cancel_url=curl,
+                  texted_to=f"+1 514-557-9764 {curl}")
+    shtml = t.render_html(sneaky)
+    check("a url echoed elsewhere in the footer does not eat that line",
+          "a text went to" in shtml and shtml.count("Cancel this monitor</a>") == 1, shtml[-400:])
+    absent = t.render_html(dict(BASE, kind="price_drop", value=46.99))
+    check("without cancel_url the old sentence remains",
+          "Reply in the assistant to change or cancel this monitor." in absent)
+    check("...and no cancel host appears", "cancel.ohmz" not in absent)
 
     fails = results.count(False)
     print(f"\n{len(results)} checks — {'ALL PASS' if not fails else str(fails) + ' FAILURE(S)'}")

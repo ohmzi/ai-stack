@@ -25,6 +25,7 @@ Usage:  python3 tests/test_alert_transports.py
 import importlib.util
 import json
 import os
+import re
 import sys
 import tempfile
 
@@ -217,6 +218,75 @@ def main():
           "amazon" not in seen["sms"] and "46.99" in seen["sms"], repr(seen.get("sms")))
     check("email leg kept the full URL", "https://www.amazon.ca/dp/B0DP6D3TRB" in seen["email"],
           repr(seen.get("email")))
+
+    print("--- the cancel link is minted at the send seam, for the email only ---")
+    at6 = load()
+    secret = "d" * 64
+    at6.load_conf = lambda: {"SMS_GATEWAY": "msg.telus.com", "SMTP_HOST": "h", "SMTP_USER": "u",
+                             "SMTP_PASS": "p", "CANCEL_SECRET": secret,
+                             "CANCEL_BASE_URL": "https://cancel.ohmz.cloud/"}
+    at6.resolve = lambda h, c=None, k=None: ("to@test", "+15145579764")
+    at6.mail_domain_status = lambda addr, timeout=6: ("ok", "stubbed")
+    got = {}
+    at6.send_sms = lambda phone, msg, conf: got.__setitem__("sms", msg) or "gateway:x"
+
+    def _mail(to, subj, body, conf, html=None):
+        got.update(subject=subj, plain=body, html=html)
+        return True
+    at6.send_email = _mail
+    payload = {"to": "ohmz", "kind": "price_drop", "item": "Zakkart Board", "value": 46.99,
+               "target": 50.0, "unit": "$", "url": "https://www.amazon.ca/dp/B0DP6D3TRB"}
+    before = dict(payload)
+    ok, notes = at6.send_alert("ohmz", "fallback", job="cat board watch",
+                               job_id="ae57d3973b9f", payload=payload)
+    check("delivered", ok is True, repr(notes))
+    check("the html carries the link (trailing slash folded)",
+          "https://cancel.ohmz.cloud/c?t=" in (got.get("html") or "")
+          and "cloud//c" not in got["html"], repr(got.get("html"))[-200:])
+    check("the plain text carries it too", "cancel.ohmz.cloud/c?t=" in got["plain"])
+    check("the sms never sees it", "cancel.ohmz" not in got["sms"] and "http" not in got["sms"],
+          got["sms"])
+    check("nor does the subject", "http" not in got["subject"], got["subject"])
+    check("the caller's payload is untouched — the token never rests in the retry queue",
+          payload == before, str(payload))
+    tok = re.search(r'/c\?t=([^"\s]+)', got["html"]).group(1)
+    ctok = importlib.util.spec_from_file_location(
+        "ct", "/home/ohmz/ai-stack/scripts/cancel_tokens.py")
+    ct = importlib.util.module_from_spec(ctok)
+    ctok.loader.exec_module(ct)
+    check("the minted token verifies for exactly this job and handle",
+          ct.verify(tok, secret) == ("ae57d3973b9f", "ohmz", "ok"), tok)
+
+    # A payload is JSON printed by a job's own output, so a crafted ALERT_DATA line must not be
+    # able to put its own link behind the words "Cancel this monitor" in a trusted email.
+    got.clear()
+    at6.load_conf = lambda: {"SMTP_HOST": "h", "SMTP_USER": "u", "SMTP_PASS": "p",
+                             "ALERT_CHANNELS": "email", "CANCEL_SECRET": secret,
+                             "CANCEL_BASE_URL": "https://cancel.ohmz.cloud"}
+    evil = dict(payload, cancel_url="https://evil.example/steal")
+    at6.send_alert("ohmz", "fallback", job_id="ae57d3973b9f", payload=evil)
+    check("a job-supplied cancel_url is discarded, not rendered",
+          "evil.example" not in got["html"] and "cancel.ohmz.cloud/c?t=" in got["html"],
+          repr(got.get("html"))[-200:])
+    got.clear()
+    at6.send_alert("ohmz", "fallback", payload=dict(evil))   # no job_id -> nothing to mint
+    check("...even when there is no job id to mint a real one with",
+          "evil.example" not in got["html"], repr(got.get("html"))[-200:])
+
+    got.clear()
+    at6.load_conf = lambda: {"SMTP_HOST": "h", "SMTP_USER": "u", "SMTP_PASS": "p",
+                             "ALERT_CHANNELS": "email"}
+    ok, notes = at6.send_alert("ohmz", "fallback", job_id="ae57d3973b9f", payload=dict(payload))
+    check("without the conf keys: no link and no error",
+          ok is True and "cancel.ohmz" not in (got.get("html") or ""), repr(notes))
+
+    with tempfile.TemporaryDirectory() as td:
+        prof = os.path.join(td, "profile.json")
+        at6.load_conf = lambda: {"SMTP_USER": "u", "CANCEL_SECRET": secret,
+                                 "CANCEL_BASE_URL": "https://cancel.ohmz.cloud"}
+        at6.publish_profile(prof)
+        raw = open(prof).read()
+        check("publish_profile keeps its NO-credentials promise", secret not in raw, raw)
 
     print("--- SMTP acceptance is not deliverability (ohmz.com has no MX) ---")
     # The relay accepting a message says nothing about whether a mailbox exists. Gmail accepted

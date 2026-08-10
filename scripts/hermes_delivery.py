@@ -32,6 +32,7 @@ job is visible rather than silent. Files are processed exactly once, tracked in
 Usage:  python3 scripts/hermes_delivery.py [--dry-run]
 """
 import argparse
+import fcntl
 import glob
 import hashlib
 import json
@@ -64,6 +65,13 @@ OWNER_CHANNELS_FILE = os.environ.get(
 # channel, and exactly why it failed. MAX_ATTEMPTS counts the first try plus retries.
 ALERT_STATE = os.path.join(OUT_DIR, ".alerts.json")        # in-flight queue (mutable)
 ALERT_LEDGER = os.path.join(OUT_DIR, "alert_ledger.jsonl")  # append-only history (never rewritten)
+# Tombstones from out-of-band cancellation (the email cancel link): {job_id: iso_ts}, written by
+# cancel_service. This tick consults them because it CANNOT trust an external edit to .alerts.json:
+# the queue is loaded at tick start and saved at tick end with no lock, so a purge landing mid-tick
+# is silently overwritten — last writer wins, and the purged entries rise from the dead. A
+# tombstone the tick reads itself makes the kill stick no matter who wrote last.
+CANCELLED = os.path.join(OUT_DIR, ".cancelled.json")
+CANCELLED_TTL_S = 7 * 86400  # far past MAX_ATTEMPTS * RETRY_AFTER_S — no queue entry lives longer
 MAX_ATTEMPTS = 4          # initial + 3 retries, as requested
 RETRY_AFTER_S = 300       # 5 minutes between attempts
 
@@ -350,6 +358,68 @@ def attempt_alert(key, entry):
     return bool(ok)
 
 
+def apply_cancel_tombstones(state):
+    """Kill queued alerts for jobs cancelled out-of-band. Returns how many were killed.
+
+    Entries are marked "cancelled" rather than deleted so the queue file stays a legible history
+    of what happened, and each kill gets a ledger row — an alert that silently stopped retrying
+    would look exactly like the delivery bug this subsystem exists to prevent. Tombstones older
+    than CANCELLED_TTL_S are pruned here (the service only ever appends); an unparseable
+    timestamp is pruned too, since anything a week of retries cannot outlive protects nothing.
+    A missing or corrupt tombstone file is a no-op — cancellation is an optional feature and this
+    is the delivery path.
+    """
+    # The read and the prune-write both happen under the lock cancel_service takes: they are two
+    # unsynchronized read-modify-writes on the same file otherwise, and a prune that started
+    # before a cancel landed would write back the pre-image — erasing a tombstone before it was
+    # ever applied, which is the exact resurrection this file went to the trouble of preventing.
+    lock = None
+    try:
+        lock = open(CANCELLED + ".lock", "a+")
+        fcntl.flock(lock, fcntl.LOCK_EX)
+    except Exception:
+        pass
+    try:
+        return _apply_cancel_tombstones(state)
+    finally:
+        if lock:
+            lock.close()
+
+
+def _apply_cancel_tombstones(state):
+    try:
+        stones = json.load(open(CANCELLED))
+        stones = stones if isinstance(stones, dict) else {}
+    except Exception:
+        return 0
+    killed = 0
+    for entry in state.values():
+        if entry.get("status") == "pending" and entry.get("job_id") in stones:
+            entry["status"] = "cancelled"
+            killed += 1
+            ledger_write({"at": _iso(_now()), "job": entry.get("job"),
+                          "recipient": entry.get("recipient"), "ok": False,
+                          "notes": ["cancelled via email link before delivery"],
+                          "message": (entry.get("message") or "")[:200]})
+            print(f"  alert[{entry.get('recipient')}] cancelled via email link — not sent")
+    keep = {}
+    for jid, ts in stones.items():
+        try:
+            if _now() - time.mktime(time.strptime(ts, "%Y-%m-%dT%H:%M:%S")) < CANCELLED_TTL_S:
+                keep[jid] = ts
+        except Exception:
+            pass
+    if keep != stones:
+        try:
+            tmp = CANCELLED + ".tmp"
+            with open(tmp, "w") as f:
+                json.dump(keep, f, indent=1)
+            os.replace(tmp, CANCELLED)
+        except Exception as e:
+            print(f"  tombstone prune failed: {e}", file=sys.stderr)
+    return killed
+
+
 def process_alert_queue(state):
     """Retry every pending alert whose backoff has elapsed. Returns messages that just gave up."""
     gave_up = []
@@ -463,6 +533,9 @@ def main():
               f"alerts={'y' if st['alerts'] else 'RETRY'} ({len(alerts)})")
 
     if not a.dry_run:
+        # Tombstones first, THEN the drain: an entry parsed seconds ago for a job the user just
+        # cancelled from the email must die in this same tick, not send once and die later.
+        apply_cancel_tombstones(alert_state)
         # Drain the retry queue every tick, then persist both state files.
         for entry in process_alert_queue(alert_state):
             try:

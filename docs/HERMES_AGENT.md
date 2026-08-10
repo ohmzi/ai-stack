@@ -553,6 +553,40 @@ Decisions worth keeping:
   cannot inject.
 - **The ledger records the body that was SENT**, not the one that was meant.
 
+### The cancel link (cancel.ohmz.cloud)
+
+_Installed 2026-08-09._ The email footer's "Cancel this monitor" is a real control, not a
+sentence: `https://cancel.ohmz.cloud/c?t=<token>` renders a page for that ONE job — live name,
+schedule, paused/active state — with **Cancel** (filled, destructive, full cleanup) and
+**Pause/Resume** (quiet, reversible, cleans nothing). GET only ever shows the page; every
+mutation is a POST from a human press, because mail scanners prefetch links and a mutating GET
+would let Outlook cancel the monitor unread.
+
+**The token is the whole authorization.** Stateless HMAC (`scripts/cancel_tokens.py`):
+`b64url("1|job_id|handle|issued")` + 160-bit truncated HMAC-SHA256, minted in
+`alert_transports.send_alert` (the one seam where the job id, the secret, and the payload
+coexist), valid 30 days (`CANCEL_TOKEN_MAX_AGE_DAYS`). Two keys in
+`~/.hermes/alert_transports.env`: `CANCEL_SECRET` (64 hex; **rotating it kills every
+outstanding link at once — that is the kill switch**) and `CANCEL_BASE_URL`. The secret never
+reaches SMS, subject, ledger, the at-rest retry queue, or the container-readable
+`profile.json` — each absence is pinned by a test.
+
+**Cancel does the full cleanup** the chat path historically skipped
+(`scripts/cancel_service.py`, systemd user unit `cancel-service`, loopback `127.0.0.1:8096`
+behind the cloudflared tunnel): read the job first (the prompt is the only record of the
+watcher's `--state` slug and `--route-id`), DELETE in Hermes (404 = already gone; verified by
+re-listing), then drop the `job_owners.json` entry, flip queued retries in `.alerts.json` to
+`cancelled`, delete `~/.hermes/monitor-state/<slug>.*`, and untrack a fare watch's FlightClaw
+route. The queue flip alone would not survive the delivery tick's last-writer-wins rewrite, so
+the cancel also writes a **tombstone** to `~/.hermes/cron/output/.cancelled.json` that
+`hermes_delivery.apply_cancel_tombstones` consults at the top of every tick — that contract is
+what makes the kill stick regardless of write order.
+
+**Public routing is a Cloudflare Zero Trust dashboard setting** (the tunnel is token-based; no
+local ingress file): Public Hostname `cancel.ohmz.cloud` → `HTTP localhost:8096`. If
+`curl -sI https://cancel.ohmz.cloud/healthz` answers with a redirect to `cloudflareaccess.com`
+instead of `200`, a wildcard Access policy is covering the hostname and needs a bypass.
+
 ### When the monitor itself breaks
 
 A monitor that silently stops working is worse than one that never existed, because it is trusted.
