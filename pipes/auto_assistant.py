@@ -2045,7 +2045,17 @@ class Pipe:
         o, d = self._fc_code(s["origin"][0]), self._fc_code(s["dest"][0])
         dep, ret = s.get("depart") or {}, s.get("ret") or {}
         if dep.get("kind") == "exact":
-            args = {"origin": o, "destination": d, "date": dep["date"], "results": 3}
+            # sort_by=CHEAPEST, not FlightClaw's own default (BEST — Google's relevance ranking,
+            # which favours shorter/more-convenient itineraries over price). Left at the default,
+            # the options shown here could all be pricier than the fare search_dates just called
+            # "the cheapest in your window" one turn earlier — measured live: BEST showed a
+            # direct $873 option while the $703 fare search_dates found (a one-stop TAP Air
+            # Portugal routing) never appeared in the top 3 at all. The whole point of a fare
+            # WATCH is price, not convenience, so cheapest-first is correct here regardless of
+            # whether this call follows a date-resolution step or the user gave exact dates
+            # directly.
+            args = {"origin": o, "destination": d, "date": dep["date"], "results": 3,
+                    "sort_by": "CHEAPEST"}
             if not s.get("one_way") and ret.get("kind") == "exact":
                 args["return_date"] = ret["date"]
             return "search_flights", args

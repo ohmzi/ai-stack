@@ -582,6 +582,15 @@ def main():
           "Option 1: C$646 total" in r_out and "[Book option 1](https://g/b1)" in r_out, r_out)
     check("exact dates -> search_flights with both dates",
           plan[0] == "search_flights" and plan[1]["return_date"] == "2026-11-12", plan)
+    # Live, 2026-08-10: FlightClaw's own default is sort_by=BEST (Google's relevance ranking),
+    # which showed a $873 direct flight as every option while search_dates — one turn earlier,
+    # for the SAME dates — had just called $703 "the cheapest in your window". The $703 fare (a
+    # one-stop routing BEST ranks below the direct) never appeared in the top 3 at all. A price
+    # WATCH has to search cheapest-first; convenience is not what target_price means.
+    check("...and always cheapest-first, not FlightClaw's own BEST/relevance default",
+          plan[1].get("sort_by") == "CHEAPEST", plan)
+    check("...true for a bare exact-date plan with no return leg too",
+          tor_plan[1].get("sort_by") == "CHEAPEST", tor_plan)
     cmd = p._fc_watch_cmd("YYZ-YVR-2026-10-02-RT-2026-11-02", "fc-test", "tester",
                           "YYZ→YVR fare watch under $1,000", "every 15m", 1000.0)
     check("the watch command quotes every spaced value",
