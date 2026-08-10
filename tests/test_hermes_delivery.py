@@ -302,6 +302,167 @@ def main():
     check("a missing map file is not an error either",
           hd._read_map(os.path.join(d, "nope.json")) == {})
 
+    print("--- the subscribe inbox turns into a confirmation ready to send ---")
+    # The pipe (in the OpenWebUI container, no SMTP/Twilio credentials) can only leave a note in
+    # the shared alerts directory; this tick is what actually turns it into something that sends.
+    import tempfile as _tf4
+    d = _tf4.mkdtemp()
+    hd.SUBSCRIBE_INBOX = os.path.join(d, "pending_subscriptions.json")
+    state = {}
+    check("a missing inbox file is a no-op, not a crash", hd.drain_subscriptions(state) == 0
+          and state == {})
+    json.dump([
+        {"handle": "ohmz", "job_id": "aaaa11112222",
+         "payload": {"kind": "subscribed", "item": "cat board watch", "monitor": "cat board watch",
+                    "schedule": "every 6h"}, "enqueued_at": hd._now()},
+        {"handle": "ohmz", "job_id": "bbbb33334444",
+         "payload": {"kind": "subscribed", "item": "YTO->YVR fare watch", "target": 1000,
+                    "unit": "CAD", "schedule": "every 15m"}, "enqueued_at": hd._now()},
+    ], open(hd.SUBSCRIBE_INBOX, "w"))
+    n = hd.drain_subscriptions(state)
+    check("both entries merge into the queue", n == 2, str(state))
+    keys = list(state)
+    check("each gets a normal pending entry", all(
+        state[k]["status"] == "pending" and state[k]["attempts"] == []
+        and state[k]["recipient"] == "ohmz" and isinstance(state[k]["payload"], dict)
+        for k in keys), str(state))
+    check("the message is a readable line, not raw JSON",
+          all("{" not in state[k]["message"] for k in keys), str(state))
+    check("the inbox is emptied once merged", json.load(open(hd.SUBSCRIBE_INBOX)) == [])
+
+    print("--- re-draining a not-yet-cleared inbox never double-sends ---")
+    json.dump([{"handle": "ohmz", "job_id": "aaaa11112222",
+               "payload": {"kind": "subscribed", "item": "cat board watch",
+                          "monitor": "cat board watch", "schedule": "every 6h"},
+               "enqueued_at": hd._now()}], open(hd.SUBSCRIBE_INBOX, "w"))
+    before = dict(state)
+    n2 = hd.drain_subscriptions(state)
+    check("the already-merged key is recognized and skipped", n2 == 0, str(n2))
+    check("the queue is unchanged", state == before)
+
+    print("--- malformed inbox entries are dropped, not crashed on ---")
+    json.dump([{"handle": "ohmz", "job_id": "cccc55556666", "payload": None},
+              {"handle": "", "job_id": "dddd77778888", "payload": {"kind": "subscribed"}},
+              {"handle": "ohmz", "job_id": None, "payload": {"kind": "subscribed"}},
+              "not even a dict",
+              {"handle": "ohmz", "job_id": "eeee99990000",
+               "payload": {"kind": "subscribed", "item": "ok one"}}],
+              open(hd.SUBSCRIBE_INBOX, "w"))
+    state2 = {}
+    n3 = hd.drain_subscriptions(state2)
+    check("only the one well-formed entry survives", n3 == 1, str(state2))
+    open(hd.SUBSCRIBE_INBOX, "w").write("{}")
+    check("a non-list inbox file is a no-op", hd.drain_subscriptions({}) == 0)
+    hd.SUBSCRIBE_INBOX = os.path.join(d, "missing.json")
+    check("a missing file after being pointed elsewhere is still a no-op",
+          hd.drain_subscriptions({}) == 0)
+
+    print("--- a job cancelled before its confirmation ships dies the same way any alert does ---")
+    # Driven through hd.main() itself, not the two functions called by hand in the order the
+    # test author expects — a hand-ordered call proves the functions compose, not that main()
+    # actually calls them in that order. This is the same class of bug the "not stranded" test
+    # below exists to catch for drain_subscriptions vs. the early-return.
+    import tempfile as _tf6
+    d2 = _tf6.mkdtemp()
+    hd.OUT_DIR, hd.STATE = d2, os.path.join(d2, ".delivered.json")
+    hd.ALERT_STATE = os.path.join(d2, ".alerts.json")
+    hd.ALERT_LEDGER = os.path.join(d2, "ledger.jsonl")
+    hd.SUBSCRIBE_INBOX = os.path.join(d2, "pending_subscriptions.json")
+    hd.CANCELLED = os.path.join(d2, ".cancelled2.json")
+    json.dump({"ffff11112222": hd._iso(hd._now())}, open(hd.CANCELLED, "w"))
+    json.dump([{"handle": "ohmz", "job_id": "ffff11112222",
+               "payload": {"kind": "subscribed", "item": "short-lived watch"},
+               "enqueued_at": hd._now()}], open(hd.SUBSCRIBE_INBOX, "w"))
+    sent = []
+    hd.send_alert = lambda *a, **k: (sent.append((a, k)) or True, ["stubbed"])
+    sys.argv = ["hd"]
+    hd.main()
+    check("main() itself never attempts the send for an already-cancelled job", sent == [])
+    final = json.load(open(hd.ALERT_STATE))
+    check("...and records it cancelled, not silently dropped",
+          all(e["status"] == "cancelled" for e in final.values()) and final, str(final))
+
+    print("--- a queued subscription is not stranded when nothing else is due ---")
+    # The regression this guards: the tick used to check "any new output files, or anything
+    # already pending" and return early printing "nothing new" BEFORE ever looking at the
+    # subscribe inbox. An idle box with one brand-new monitor and nothing else going on hit that
+    # exact case every single tick — the confirmation would never have shipped.
+    import tempfile as _tf5
+    d = _tf5.mkdtemp()
+    hd.OUT_DIR = d
+    hd.STATE = os.path.join(d, ".delivered.json")
+    hd.ALERT_STATE = os.path.join(d, ".alerts.json")
+    hd.ALERT_LEDGER = os.path.join(d, "ledger.jsonl")
+    hd.CANCELLED = os.path.join(d, ".cancelled3.json")
+    hd.SUBSCRIBE_INBOX = os.path.join(d, "pending_subscriptions.json")
+    json.dump([{"handle": "ohmz", "job_id": "1234abcd5678",
+               "payload": {"kind": "subscribed", "item": "an idle-box regression check"},
+               "enqueued_at": hd._now()}], open(hd.SUBSCRIBE_INBOX, "w"))
+    sent = []
+    hd.send_alert = lambda *a, **k: (sent.append((a, k)) or True, ["stubbed"])
+    hd.post_channel = lambda *a, **k: True
+    sys.argv = ["hd"]
+    rc = hd.main()
+    check("the tick still exits cleanly", rc == 0, f"rc={rc}")
+    check("...and actually attempted the send, not 'nothing new'", len(sent) == 1, str(sent))
+    check("the inbox is drained either way", json.load(open(hd.SUBSCRIBE_INBOX)) == [])
+    final = json.load(open(hd.ALERT_STATE))
+    check("the entry is recorded delivered", any(
+        e.get("job_id") == "1234abcd5678" and e.get("status") == "delivered"
+        for e in final.values()), str(final))
+
+    print("--- a dry run never touches the real inbox ---")
+    json.dump([{"handle": "ohmz", "job_id": "5678efgh9012",
+               "payload": {"kind": "subscribed", "item": "should survive a dry run"},
+               "enqueued_at": hd._now()}], open(hd.SUBSCRIBE_INBOX, "w"))
+    sent.clear()
+    sys.argv = ["hd", "--dry-run"]
+    hd.main()
+    check("dry-run sends nothing", sent == [])
+    check("dry-run leaves the inbox exactly as it was",
+          len(json.load(open(hd.SUBSCRIBE_INBOX))) == 1)
+
+    print("--- a real tick serializes against another process running the same script ---")
+    # The bug this guards against: alert_state.json used to be loaded once and saved once with
+    # no lock of its own, so the 60s systemd timer firing while an operator ran the script by
+    # hand -- which happened live during this feature's own development -- could each load a
+    # stale snapshot and have whichever saved LAST silently erase whatever the other had just
+    # delivered. main() now holds ALERT_STATE + ".lock" for the whole non-dry-run tick.
+    import threading as _th
+    held = _th.Event()
+    release = _th.Event()
+
+    def hog():
+        with open(hd.ALERT_STATE + ".lock", "a+") as f:
+            hd.fcntl.flock(f, hd.fcntl.LOCK_EX)
+            held.set()
+            release.wait(5)
+
+    t = _th.Thread(target=hog, daemon=True)
+    t.start()
+    held.wait(2)
+    began = hd._now()
+    sys.argv = ["hd"]
+    hd.main()
+    waited = hd._now() - began
+    check("a real tick blocks while another process holds the lock", waited > 0.4, f"{waited:.2f}s")
+    release.set()
+    t.join(2)
+
+    held.clear()
+    release.clear()
+    t2 = _th.Thread(target=hog, daemon=True)
+    t2.start()
+    held.wait(2)
+    began = hd._now()
+    sys.argv = ["hd", "--dry-run"]
+    hd.main()
+    waited = hd._now() - began
+    check("but a dry run never blocks — it holds no lock and mutates nothing",
+          waited < 0.4, f"{waited:.2f}s")
+    release.set()
+    t2.join(2)
+
     print("--- cancel tombstones kill queued alerts, and the kill sticks ---")
     # The email cancel link deletes a job out-of-band. This tick has no lock on .alerts.json, so
     # the service's own purge can be overwritten by an in-flight tick (last writer wins) — the

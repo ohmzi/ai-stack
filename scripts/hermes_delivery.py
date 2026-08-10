@@ -72,6 +72,12 @@ ALERT_LEDGER = os.path.join(OUT_DIR, "alert_ledger.jsonl")  # append-only histor
 # tombstone the tick reads itself makes the kill stick no matter who wrote last.
 CANCELLED = os.path.join(OUT_DIR, ".cancelled.json")
 CANCELLED_TTL_S = 7 * 86400  # far past MAX_ATTEMPTS * RETRY_AFTER_S — no queue entry lives longer
+# A one-shot "send this confirmation" inbox. Same directory and reason as OWNERS_FILE: the
+# OpenWebUI container that creates a monitor holds no SMTP/Twilio credentials — this is the one
+# path both sides share, so the pipe drops a note here and this tick picks it up and sends it
+# exactly like any other alert, cancel link and all.
+SUBSCRIBE_INBOX = os.environ.get(
+    "SUBSCRIBE_INBOX", "/volume1/docker/openwebui/config/alerts/pending_subscriptions.json")
 MAX_ATTEMPTS = 4          # initial + 3 retries, as requested
 RETRY_AFTER_S = 300       # 5 minutes between attempts
 
@@ -358,6 +364,71 @@ def attempt_alert(key, entry):
     return bool(ok)
 
 
+def drain_subscriptions(state):
+    """Turn every pending "confirm this new monitor" note into a normal queue entry.
+
+    Returns how many were merged. The inbox is a LIST the pipe only ever appends to (two turns on
+    its one event loop cannot race each other, but this tick and the next one are different
+    processes in time, so re-reading a not-yet-cleared inbox after a crash must not double-send —
+    hence the alert_key dedup, the same guard the normal ALERT_DATA path already relies on).
+
+    Cleared here rather than left for the pipe to clear: the pipe writing this file has no way to
+    know when the entry was actually consumed, and a watcher that reads its own inbox is the one
+    that gets to decide it is empty.
+
+    The read and the clear-write happen under the SAME lock the pipe's _enqueue_subscription
+    takes for its own append: two processes, one on each side of the container boundary, doing
+    unsynchronized read-modify-write on one file is exactly the shape that drops a just-appended
+    entry when a clear lands in the middle of it — every OTHER queue this subsystem trusts
+    (.alerts.json, .cancelled.json) already had to close that same window.
+    """
+    lock = None
+    try:
+        lock = open(SUBSCRIBE_INBOX + ".lock", "a+")
+        fcntl.flock(lock, fcntl.LOCK_EX)
+    except Exception:
+        pass
+    try:
+        return _drain_subscriptions(state)
+    finally:
+        if lock:
+            lock.close()
+
+
+def _drain_subscriptions(state):
+    try:
+        pending = json.load(open(SUBSCRIBE_INBOX))
+        pending = pending if isinstance(pending, list) else []
+    except Exception:
+        return 0
+    if not pending:
+        return 0
+    merged = 0
+    for entry in pending:
+        if not isinstance(entry, dict):
+            continue
+        handle, job_id = entry.get("handle"), entry.get("job_id")
+        payload = entry.get("payload")
+        if not (handle and job_id and isinstance(payload, dict)):
+            continue
+        k = alert_key(f"sub:{job_id}", handle, json.dumps(payload, sort_keys=True))
+        if k in state:
+            continue                                       # already merged in an earlier tick
+        state[k] = {"job": payload.get("monitor") or payload.get("item") or job_id,
+                    "job_id": job_id, "recipient": handle, "message": _plain(payload),
+                    "payload": payload, "created": _iso(_now()), "attempts": [],
+                    "status": "pending", "next_attempt": 0}
+        merged += 1
+    try:
+        tmp = SUBSCRIBE_INBOX + ".tmp"
+        with open(tmp, "w") as f:
+            json.dump([], f)
+        os.replace(tmp, SUBSCRIBE_INBOX)
+    except Exception as e:
+        print(f"  subscribe inbox clear failed: {e}", file=sys.stderr)
+    return merged
+
+
 def apply_cancel_tombstones(state):
     """Kill queued alerts for jobs cancelled out-of-band. Returns how many were killed.
 
@@ -463,7 +534,40 @@ def main():
                   f"{_iso(v.get('next_attempt', 0))} ({len(v['attempts'])}/{MAX_ATTEMPTS} used)")
         return 0
 
+    if a.dry_run:
+        return _tick(a)         # read-only preview; nothing is written, so nothing to lock
+
+    # Everything _tick does past this point mutates ALERT_STATE, which is loaded once and saved
+    # once with no lock of its own — the module's own load_alert_state/save_alert_state never
+    # took one. That was fine when only ONE process ever touched it, which stopped being true the
+    # moment this file started being run both by hermes-delivery.timer (every 60s) AND by hand
+    # (an operator testing a change, exactly as happened live during this feature's own
+    # development) — two overlapping ticks each load a stale snapshot and whichever saves LAST
+    # wins, silently erasing whatever the other one just delivered, or independently re-sending
+    # whatever both still saw as pending. One lock around the whole tick is what a systemd
+    # Type=oneshot timer already assumes is true and nothing here ever actually enforced.
+    with open(ALERT_STATE + ".lock", "a+") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        return _tick(a)
+
+
+def _tick(a):
     alert_state = load_alert_state()
+    if not a.dry_run:
+        # BEFORE the early-return below, which fires on "no new output files AND nothing already
+        # pending" — a freshly-drained subscription is exactly the case that condition was written
+        # before this existed to catch, so a confirmation waiting with no OTHER alert due would
+        # have returned at line ~575 every tick without this ever running, silently starved
+        # forever. dry-run drains nothing: it must not clear or mutate the real inbox file.
+        n = drain_subscriptions(alert_state)
+        if n:
+            print(f"  {n} subscription confirmation(s) queued")
+            # Persisted right away, not only at the end: the source inbox entry is already gone
+            # (cleared under its own lock), so a crash or kill anywhere between here and the
+            # final save_alert_state() below — which comes AFTER real SMTP/SMS network sends,
+            # the likeliest place for a hang or a kill to land — would otherwise lose this
+            # confirmation for good, with nothing left anywhere to re-drain on the next tick.
+            save_alert_state(alert_state)
     state = {}
     if os.path.exists(STATE):
         try:
@@ -533,8 +637,11 @@ def main():
               f"alerts={'y' if st['alerts'] else 'RETRY'} ({len(alerts)})")
 
     if not a.dry_run:
-        # Tombstones first, THEN the drain: an entry parsed seconds ago for a job the user just
-        # cancelled from the email must die in this same tick, not send once and die later.
+        # Subscriptions were already merged in above, before the early-return that would
+        # otherwise have skipped this entire tick when nothing else was pending. Tombstones run
+        # NEXT, so a job cancelled in the same ~60s window it was created dies under the SAME
+        # check as any other pending alert — no special-casing a confirmation that would
+        # otherwise fire for a monitor that no longer exists.
         apply_cancel_tombstones(alert_state)
         # Drain the retry queue every tick, then persist both state files.
         for entry in process_alert_queue(alert_state):

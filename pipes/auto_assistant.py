@@ -5,7 +5,7 @@ version: 0.6.0
 required_open_webui_version: 0.5.0
 description: One model that decides - chats (with vision), makes a RedCraft image (with follow-up edits that stay anchored to the previous picture), or a Wan video. Background-task calls never render; QA checks edits against the original ask and the original image. Non-blocking (async). Never uses the uncensored model.
 """
-import asyncio, aiohttp, requests, time, base64, hashlib, os, random, re, json, sqlite3, sys, threading
+import asyncio, aiohttp, requests, time, base64, hashlib, fcntl, os, random, re, json, sqlite3, sys, threading
 import calendar, datetime, urllib.parse   # flight slots: month lengths, date arithmetic, deep links
 from pydantic import BaseModel, Field
 
@@ -338,6 +338,15 @@ ALERT_PROFILE_FILE = os.environ.get("ALERT_PROFILE", "/app/backend/data/alerts/p
 # `src` records HOW the job was attributed, so a stamp made on a weak signal is auditable and
 # repairable by hand rather than being indistinguishable from a certain one.
 TASK_OWNERS_FILE = os.environ.get("TASK_OWNERS", "/app/backend/data/alerts/job_owners.json")
+# A one-shot "send this confirmation" inbox, same directory and same reason as TASK_OWNERS_FILE:
+# the container holds no SMTP/Twilio credentials (deliberately — see alert_transports.py's
+# publish_profile), so the pipe cannot email or text anyone itself. It can only leave a note where
+# the host-side delivery watcher (scripts/hermes_delivery.py, every 60s) will find it. A LIST, not
+# a dict keyed by job id: two jobs can share an id only across restarts, never in the same tick,
+# but the failure mode of a dict — a second enqueue silently overwriting the first's fields before
+# the watcher ever reads either — costs nothing to avoid by just appending.
+SUBSCRIBE_INBOX_FILE = os.environ.get("SUBSCRIBE_INBOX",
+                                      "/app/backend/data/alerts/pending_subscriptions.json")
 # A finite job deletes itself from the scheduler on its last run, but the delivery watcher reads
 # that run's output up to a minute later and the results still have to reach the right person.
 # Keep the ownership record well past the disappearance rather than pruning on sight.
@@ -2173,6 +2182,19 @@ class Pipe:
             self._flight_draft.pop(cid, None)
         self._stamp_owner([jid], handle, src="flight")
         self._route_metric("flight.watch_created", 0, "flight_watch", "", deterministic=True)
+        if jid != "?":
+            # Everything a confirmation needs is already a local variable here — no prompt to
+            # parse, unlike Path A. depart_found/ret_found reuse the SAME fields a fare alert's
+            # dates panel reads (alert_templates._details_html): the itinerary the user asked
+            # for. Deliberately no "source" — that field means a fare was FOUND on those dates,
+            # and nothing has been searched for yet.
+            sub_payload = {"kind": "subscribed", "item": name, "monitor": name, "schedule": sched,
+                           "depart_found": s["depart"]["date"]}
+            if s.get("target"):
+                sub_payload["target"], sub_payload["unit"] = s["target"], "CAD"
+            if not s.get("one_way") and (s.get("ret") or {}).get("date"):
+                sub_payload["ret_found"] = s["ret"]["date"]
+            self._enqueue_subscription(handle, jid, sub_payload)
         # The baseline FlightClaw just recorded ("Tracking YYZ-...: C$338 (F8)") is the first
         # real number of this watch — show it.
         base = self._md_cell(tracked_reply.splitlines()[0] if tracked_reply else "", 90)
@@ -2493,6 +2515,94 @@ class Pipe:
 
     def _owner_of(self, owners, job):
         return ((owners or {}).get((job or {}).get("id")) or {}).get("h")
+
+    def _enqueue_subscription(self, handle, job_id, payload):
+        """Leave a note asking the host to confirm a new monitor by email and text. Never raises.
+
+        The container holds no SMTP/Twilio credentials — see SUBSCRIBE_INBOX_FILE — so the pipe
+        cannot send this itself. It can only append to the shared inbox and let
+        scripts/hermes_delivery.py pick it up on its next tick (at most 60s later) and hand the
+        payload to alert_transports.send_alert exactly the way a price-drop alert is sent, so a
+        subscription confirmation gets the SAME cancel link, the same brand template, the same
+        retry-on-failure — for free, by looking like one more alert rather than a special case.
+
+        MUST stay synchronous and await-free, exactly like _stamp_owner: the pipe runs on one
+        event loop, so a read-append-write with no await inside it cannot interleave with
+        ANOTHER TURN's enqueue. That does not cover the other writer, though — the host-side
+        watcher (scripts/hermes_delivery.py) reads this same file and clears it every ~60s in a
+        SEPARATE process, so an append landing between its read and its clear-write would be
+        silently discarded. An flock on a sidecar file closes that window on both sides; the
+        watcher takes the identical lock before its own read-modify-write.
+        """
+        try:
+            # dict(payload, to=handle) raises on a non-dict payload — inside the guard, not
+            # before it, so "never raises" is actually true rather than true of everything past
+            # the first line.
+            entry = {"handle": handle, "job_id": job_id, "payload": dict(payload, to=handle),
+                     "enqueued_at": time.time()}
+            os.makedirs(os.path.dirname(SUBSCRIBE_INBOX_FILE), exist_ok=True)
+            with open(SUBSCRIBE_INBOX_FILE + ".lock", "a+") as lock:
+                fcntl.flock(lock, fcntl.LOCK_EX)
+                pending = self._read_json(SUBSCRIBE_INBOX_FILE, [])
+                if not isinstance(pending, list):
+                    pending = []
+                pending.append(entry)
+                tmp = SUBSCRIBE_INBOX_FILE + ".tmp"
+                with open(tmp, "w") as f:
+                    json.dump(pending, f, indent=2)
+                os.replace(tmp, SUBSCRIBE_INBOX_FILE)
+            self._metric(job="subscribe", outcome="enqueued", handle=handle, job_id=job_id)
+        except Exception as e:
+            # A failed confirmation must never cost the user the monitor itself — the job already
+            # exists in Hermes by the time this runs. Log and move on.
+            self._metric(job="subscribe", outcome="enqueue_failed", handle=handle,
+                         job_id=job_id, error=str(e)[:160])
+
+    def _enqueue_subscriptions_for(self, jobs, handle):
+        """Queue one confirmation per newly-created job, Path A's side of the split with
+        _fc_make_watch (Path B, which already holds structured slots and enqueues inline).
+
+        Unlike Path B, nothing here already knows what the job watches — the agent wrote the
+        prompt, not this pipe. Best-effort enrichment from the job's own vetted command line; a
+        value not found is simply left out, per alert_templates' own rule that every field here
+        is optional. Pulled out as its own method (rather than left inline in the streaming
+        generator that calls it) so this logic is unit-testable without driving an SSE stream.
+        """
+        for j in jobs:
+            jid = j.get("id")
+            if not jid:
+                continue
+            prompt = j.get("prompt") or ""
+            # Collapsed like every other item name that reaches an email (alert_templates.
+            # item_label does the same for scraped page titles) — a job NAME is agent-written
+            # free text too, and an embedded newline reaches EmailMessage's Subject header
+            # unescaped, which the stdlib raises on rather than silently mangling.
+            jname = re.sub(r"\s+", " ", (j.get("name") or "your monitor")).strip()
+            sub_payload = {"kind": "subscribed", "item": jname, "monitor": jname}
+            sched = j.get("schedule_display") or str(j.get("schedule") or "") or None
+            if sched:
+                sub_payload["schedule"] = sched
+            url = self._job_flag_value(prompt, "--url")
+            if url:
+                sub_payload["url"] = url
+            # --below/--above and their direction ("under"/"over" the number), whichever the
+            # command actually carries — a price_rise watch is authored with --above (rule
+            # :4531), never --below, and showing no target at all for it was the bug.
+            below, above = self._job_flag_value(prompt, "--below"), self._job_flag_value(prompt, "--above")
+            raw, op = (below, "under") if below is not None else (above, "over")
+            if raw is not None:
+                try:
+                    sub_payload["target"] = float(raw)
+                    sub_payload["op"] = op
+                    # --mode stock means the number is a COUNT ("fewer than 3 left"), never
+                    # money — rule :4568 forbids --unit on a stock watch for exactly that
+                    # reason, so fabricating "$" here would be a currency symbol on a count.
+                    mode = self._job_flag_value(prompt, "--mode")
+                    sub_payload["unit"] = ("" if mode == "stock" else
+                                           self._job_flag_value(prompt, "--unit") or "$")
+                except ValueError:
+                    pass
+            self._enqueue_subscription(handle, jid, sub_payload)
 
     @staticmethod
     def _pretty_phone(e164):
@@ -5639,24 +5749,40 @@ class Pipe:
                        "--alert-to", "--kind", "--unit", "--prefer-domain")
 
     @classmethod
+    def _job_vetted_argv(cls, prompt):
+        """argv AFTER the vetted script's own filename, on the one line that invokes it — or None.
+
+        Shared by _job_stray_args and _job_flag_value so both agree on what counts as THE
+        command. The slice past the ".py" filename is load-bearing, not cosmetic: without it, a
+        flag written anywhere else in the prompt — a decoy ahead of the real invocation, a
+        comment, an earlier draft the agent left in — would read as if it were part of the
+        vetted command. _job_flag_value shipped without this slice at first and a prompt like
+        "note --url http://evil.example ; python3 .../price_watch.py --url https://real --below
+        50" returned the DECOY url; _job_stray_args already had the slice and was unaffected.
+        """
+        line = next((ln for ln in (prompt or "").splitlines()
+                     if cls._JOB_VETTED_RE.search(ln)), None)
+        if not line:
+            return None
+        try:
+            import shlex
+            argv = shlex.split(line.strip())
+        except ValueError:
+            return None                # unbalanced quotes is a different defect; do not guess
+        try:
+            return argv[argv.index(next(a for a in argv if a.endswith(".py"))) + 1:]
+        except StopIteration:
+            return None
+
+    @classmethod
     def _job_stray_args(cls, prompt):
         """(stray tokens, the flag they belong after) for a vetted command, else ([], None).
 
         Only ever run against the extractors this repo ships, because only there is "no positional
         arguments exist" a fact rather than an assumption.
         """
-        line = next((ln for ln in (prompt or "").splitlines()
-                     if cls._JOB_VETTED_RE.search(ln)), None)
-        if not line:
-            return [], None
-        try:
-            import shlex
-            argv = shlex.split(line.strip())
-        except ValueError:
-            return [], None            # unbalanced quotes is a different defect; do not guess
-        try:
-            argv = argv[argv.index(next(a for a in argv if a.endswith(".py"))) + 1:]
-        except StopIteration:
+        argv = cls._job_vetted_argv(prompt)
+        if argv is None:
             return [], None
         stray, last, owner, i = [], None, None, 0
         while i < len(argv):
@@ -5675,6 +5801,29 @@ class Pipe:
             stray.append(a)
             i += 1
         return stray, owner
+
+    @classmethod
+    def _job_flag_value(cls, prompt, flag):
+        """The value bound to one flag in a job's own vetted command line — `--flag value` or
+        `--flag=value` — or None.
+
+        Only ever looks at argv AFTER the vetted script's filename (_job_vetted_argv), the same
+        restriction _job_stray_args already enforced — so text elsewhere in the prompt can never
+        be read as this job's own instruction. Used to enrich a subscription confirmation with
+        whatever the job was actually told to watch — best-effort, never guessed: a value not
+        found here is simply left out of the confirmation rather than invented.
+        """
+        argv = cls._job_vetted_argv(prompt)
+        if not argv:
+            return None
+        prefix = flag + "="
+        for i, a in enumerate(argv):
+            if a == flag:
+                return (argv[i + 1] if i + 1 < len(argv) and not argv[i + 1].startswith("--")
+                        else None)
+            if a.startswith(prefix):
+                return a[len(prefix):]
+        return None
 
     @classmethod
     def _job_patch(cls, job, uname):
@@ -5976,6 +6125,7 @@ class Pipe:
                                         if trip:
                                             yield f"\n\n{trip}"
                                     yield self._alert_setup_block(uname)
+                                    self._enqueue_subscriptions_for(new_jobs, uname)
                                 elif new_jobs is not None and self._changed_jobs(
                                         before, after, owner=uname if scoped else None,
                                         owners=owners):

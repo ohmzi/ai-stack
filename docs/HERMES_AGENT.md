@@ -587,6 +587,54 @@ local ingress file): Public Hostname `cancel.ohmz.cloud` → `HTTP localhost:809
 `curl -sI https://cancel.ohmz.cloud/healthz` answers with a redirect to `cloudflareaccess.com`
 instead of `200`, a wildcard Access policy is covering the hostname and needs a bypass.
 
+### The subscription confirmation
+
+_Installed 2026-08-10._ Creating a monitor now sends a confirmation the moment it exists —
+"Zakkart Cat Scratching Board is now being tracked" by email and text — the OTHER end of a
+monitor's life from the cancel link above. It exists on the same two creation paths every other
+task-mode feature does: the deterministic flight watch (`pipes/auto_assistant.py::_fc_make_watch`)
+already holds the structured itinerary (route, target, dates) at the moment it creates the job, so
+the confirmation carries all of it; the agent-delegated general watch
+(`_enqueue_subscriptions_for`, fired from `_hermes_stream`'s attribution success branch) only has
+the job's name, schedule and its own vetted command line to work with, so `_job_flag_value` pulls
+`--url`/`--below`/`--unit` out of the prompt best-effort — a value not found is simply left off,
+never guessed.
+
+**Why this isn't a direct send.** The OpenWebUI container holds no SMTP/Twilio credentials —
+deliberately, the same reason `alert_transports.publish_profile` exists — so the pipe cannot email
+or text anyone itself. It can only append to a shared one-shot inbox,
+`SUBSCRIBE_INBOX_FILE`/`SUBSCRIBE_INBOX` (`.../alerts/pending_subscriptions.json`, same directory
+as `job_owners.json`), and `hermes_delivery.drain_subscriptions` picks it up on its very next tick
+(≤60s) and hands the payload to `alert_transports.send_alert` exactly like a price-drop alert —
+same brand template, same cancel link, same retry-on-failure, for free, by looking like one more
+alert rather than a special case.
+
+**The drain runs BEFORE the tick's early-return**, not after: a brand-new monitor with nothing
+else due that minute is exactly the case "no new output files and nothing already pending" was
+written to catch, so draining anywhere later would have silently starved every confirmation on an
+otherwise-idle box. A dry run drains nothing — it must never mutate the real inbox.
+
+**Two writers, one file, one lock.** The pipe (container) appends and the watcher (host) reads and
+clears, in separate processes with no shared Python state — an flock on a `.lock` sidecar, taken
+by both sides for the full read-modify-write, is what stops a clear from landing between another
+process's read and write and silently discarding a fresh append. The queue key is a hash of the
+job id and the payload, so a not-yet-cleared inbox re-read after a crash can never double-send.
+
+**Cancelled before it ever ships?** The drain runs ahead of `apply_cancel_tombstones` in the same
+tick, so a job cancelled in the same window it was created dies under the identical tombstone
+check as any other pending alert — no special-casing a confirmation for a monitor that is already
+gone.
+
+**The whole tick is now one lock, not just the inbox.** `main()` used to load and save
+`.alerts.json` with no lock of its own — safe only as long as exactly one process ever touched it.
+Building this feature broke that assumption live: the 60s systemd timer and a manual
+`python3 hermes_delivery.py` run overlapped in the same minute during development, and whichever
+saved last would have silently erased whatever the other had just delivered. `main()` now holds
+`.alerts.json.lock` for the entire non-dry-run tick (`--dry-run` performs no writes, so it takes no
+lock and never blocks). A freshly-drained confirmation is also persisted immediately, not only at
+the tick's end — the end-of-tick save comes after the real SMTP/SMS sends, the likeliest place for
+a hang or a kill to land, and the source inbox entry is already gone by then.
+
 ### When the monitor itself breaks
 
 A monitor that silently stops working is worse than one that never existed, because it is trusted.

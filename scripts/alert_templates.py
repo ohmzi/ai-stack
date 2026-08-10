@@ -106,7 +106,8 @@ def _noun(p):
             "price_rise": "listing", "unreachable": "page", "blocked": "page",
             "no_value": "page", "not_found": "item", "fare_unsupported": "fare",
             "fare_unreadable": "fare", "fare_needs_itinerary": "fare watch",
-            "recovered": "page"}.get(p.get("kind"), "task you assigned me")
+            "recovered": "page", "subscribed": "monitor"}.get(p.get("kind"),
+                                                              "task you assigned me")
 
 
 def _phrase(noun):
@@ -297,6 +298,24 @@ def _recovered(p):
     return "Back to normal", (f"is readable again, now {v}" if v else "is reachable again")
 
 
+def _subscribed(p):
+    """Confirms a monitor was just CREATED — the one kind here that reports what the user did,
+    not what a watched value did. Fired once, from the pipe, the moment Hermes confirms the job
+    is real; everything else in this file describes a later check on that same job.
+
+    The sentence stays honest about what is actually known at creation time: a target, when the
+    payload carries one, because "I'll tell you when it crosses your line" is the one promise
+    worth repeating back before the first real check ever runs. `op` names the DIRECTION that
+    line is crossed in — "under" for a price drop or a stock count, "over" for a price rise —
+    the same vocabulary _threshold() already uses; a payload with a target but no op defaults to
+    "under", which is every kind but a rise.
+    """
+    t = money(p.get("target"), p.get("unit"))
+    op = "over" if p.get("op") == "over" else "under"
+    return "You're all set", (f"is now being tracked — I'll alert you {op} {t}" if t
+                              else "is now being tracked")
+
+
 KINDS = {
     "price_drop": _price_drop, "price_rise": _price_rise,
     "back_in_stock": _back_in_stock, "out_of_stock": _out_of_stock,
@@ -305,7 +324,12 @@ KINDS = {
     "unreachable": _unreachable, "blocked": _blocked, "no_value": _no_value,
     "not_found": _not_found, "fare_unsupported": _fare_unsupported, "recovered": _recovered,
     "fare_unreadable": _fare_unreadable, "fare_needs_itinerary": _fare_needs_itinerary,
+    "subscribed": _subscribed,
 }
+# Kinds that announce something the user just DID, rather than a result on the thing they're
+# watching. The ordinary lead line ("...just hit your condition") would be false for these, so
+# render_html/render_plain check this set for their own opening line instead.
+ANNOUNCE_KINDS = {"subscribed"}
 # Kinds that report a PROBLEM with the monitor rather than a result from it. They read differently
 # (something needs your attention, rather than something you asked for happened) and they carry an
 # instruction, because an error the user cannot act on is just noise.
@@ -356,7 +380,11 @@ def describe(payload):
 # under-counts and lets the transport's own truncation fire — which cut the pointer to the email,
 # the one part that must always survive. Fold first, then count.
 _SMS_ASCII = {"\u2026": "...", "\u2014": "-", "\u2013": "-", "\u2018": "'", "\u2019": "'",
-              "\u201c": '"', "\u201d": '"', "\u00a0": " "}
+              "\u201c": '"', "\u201d": '"', "\u00a0": " ", "\u2192": "->"}
+# The arrow is mapped explicitly because a flight watch's own name is built as "YTO\u2192YVR fare
+# watch" (pipes/auto_assistant.py's _fc_make_watch) and item names are never rewritten before
+# they reach here -- ascii encode-and-ignore was silently deleting it, so "YTO\u2192YVR" read as
+# "YTOYVR" on the handset, a typo rather than a route.
 
 
 def _ascii(text):
@@ -546,8 +574,12 @@ def render_plain(payload):
     assistant = (payload.get("assistant") or "").strip()
     hello = f"Hi {who}," if who else "Hi,"
     lines = [f"{hello} {assistant} here!" if assistant else hello, ""]
-    lines.append(f"{_phrase(noun).capitalize()} {sentence}." if not problem
-                 else f"One of your monitors needs a look - the {noun} {sentence}.")
+    if problem:
+        lines.append(f"One of your monitors needs a look - the {noun} {sentence}.")
+    elif payload.get("kind") in ANNOUNCE_KINDS:
+        lines.append(f"You're set. The {noun} you asked for {sentence}.")
+    else:
+        lines.append(f"{_phrase(noun).capitalize()} {sentence}.")
     lines[-1] = re.sub(r"\s{2,}", " ", lines[-1])
     if thing:
         lines += ["", f"  {thing}"]
@@ -764,6 +796,8 @@ def render_html(payload):
 
     assistant = (payload.get("assistant") or "").strip()
     lead = ("One of your monitors needs a look." if problem
+            else f"You're set. The {e(noun)} you asked for {e(sentence)}."
+            if payload.get("kind") in ANNOUNCE_KINDS
             else f"{e(_phrase(noun)).capitalize()} just hit your condition.")
     # _footer_lines writes LINES; joined into one run of text they need the periods the line
     # breaks were providing ("Checked every 6h Reply in the assistant..." is not a sentence).

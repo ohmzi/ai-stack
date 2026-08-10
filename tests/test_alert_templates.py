@@ -249,6 +249,59 @@ def main():
           "Reply in the assistant to change or cancel this monitor." in absent)
     check("...and no cancel host appears", "cancel.ohmz" not in absent)
 
+    print("--- 'subscribed' confirms creation, not a result ---")
+    # Every other kind here reports something a WATCHED VALUE did; this one reports something the
+    # USER did, and the generic lead line ("...just hit your condition") would be a flat lie about
+    # a monitor that has not run its first check yet.
+    generic = dict(BASE, kind="subscribed", item="Zakkart Cat Scratching Board",
+                   monitor="cat board watch", schedule="every 6h")
+    check("no fabricated 'just hit your condition'",
+          "just hit your condition" not in t.render_html(generic))
+    check("...nor in the plain text", "just hit your condition" not in t.render_plain(generic))
+    check("the sms reads as a plain confirmation, not a problem",
+          "Heads up" not in t.render_sms(generic), t.render_sms(generic))
+    check("the item still names itself", "Zakkart Cat Scratching Board" in t.render_sms(generic))
+    check("subject says something happened, not a value",
+          t.render_subject(generic).startswith("You're all set:"), t.render_subject(generic))
+
+    flight = dict(BASE, kind="subscribed", item="YTO→YVR fare watch under $1,000",
+                  monitor="YTO→YVR fare watch under $1,000", schedule="every 15m",
+                  target=1000, unit="CAD", depart_found="2026-10-02", ret_found="2026-11-02",
+                  date_basis="exact")
+    check("a target price is repeated back, so the promise is on record before the first check",
+          "1,000.00 CAD" in t.render_html(flight) and "1,000.00 CAD" in t.render_plain(flight))
+    check("...and in the sms too", "1,000.00" in t.render_sms(flight), t.render_sms(flight))
+    fsms = t.render_sms(flight)
+    check("the sms carries no web address (still)",
+          "http" not in fsms and "amazon" not in fsms, fsms)
+    check("a flight watch's arrow survives ascii-folding, not vanishing",
+          "YTO->YVR" in fsms and "YTOYVR" not in fsms, fsms)
+    check("no 'found on' claim for dates nobody searched for",
+          "found on" not in t.render_plain(flight), t.render_plain(flight))
+    check("but the itinerary dates ARE shown", "2 Oct 2026" in t.render_plain(flight))
+    check("no fabricated dates line when none were given",
+          "dates found" not in t.render_plain(generic))
+    check("without a target, the sentence still stands on its own",
+          "None" not in t.render_html(generic) and "None" not in t.render_plain(generic))
+    check("the cancel-link machinery still works alongside it",
+          "Cancel this monitor" in t.render_html(dict(generic, cancel_url=curl)))
+
+    print("--- 'subscribed' direction: under a price drop, over a price rise ---")
+    rise = dict(BASE, kind="subscribed", item="resale watch", target=500, unit="$", op="over")
+    check("a price-RISE confirmation says 'over', not 'under'",
+          "over $500.00" in t.render_sms(rise) and "over $500.00" in t.render_html(rise), rise)
+    check("no unrendered op leaks through as text", "over over" not in t.render_sms(rise))
+    drop_default = dict(BASE, kind="subscribed", item="cat board watch", target=50, unit="$")
+    check("no op at all defaults to 'under', the common case",
+          "under $50.00" in t.render_sms(drop_default))
+    explicit_under = dict(drop_default, op="under")
+    check("an explicit 'under' reads the same as the default",
+          t.render_sms(explicit_under) == t.render_sms(drop_default))
+    stock = dict(BASE, kind="subscribed", item="ticket count watch", target=3, unit="")
+    check("a bare count (empty unit) renders without a stray currency symbol",
+          "under 3." in t.render_sms(stock) or "under 3 " in t.render_sms(stock), t.render_sms(stock))
+    check("...and no naked '$3' appears anywhere", "$3" not in t.render_sms(stock))
+
     fails = results.count(False)
     print(f"\n{len(results)} checks — {'ALL PASS' if not fails else str(fails) + ' FAILURE(S)'}")
     return 1 if fails else 0
