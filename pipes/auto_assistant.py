@@ -1122,6 +1122,17 @@ class Pipe:
         r"the first|the second|that one|this one|both|neither|new one|a new one|"
         r"cancel|stop|pause|remove|delete|no)\b[\s\S]{0,80}$", re.I)
 
+    # A change to an EXISTING job, not a request for a new one — "change/adjust the alert to
+    # 15 mins", not "create an alert". Distinct from _MANAGE_VERB (cancel/pause/resume take no
+    # new value) and from _BG_VERB (which describes what to watch, not how to change one already
+    # running). The gap between verb and target is bounded so an unrelated "change" and "schedule"
+    # far apart in a long message do not pair up; "the" is not required — "change alert timing"
+    # is just as much an edit as "change the alert timing".
+    _EDIT_VERB = re.compile(
+        r"\breschedule\b|"
+        r"\b(?:change|adjust|update|modify|switch)\b.{0,40}?"
+        r"\b(?:the\s+)?(?:alert|schedule|frequency|interval|timing|cadence|check(?:s|ing)?)\b",
+        re.I)
     # A task that should TEXT the user needs a number on file. Without this check the job is
     # created, runs, fires, and the alert is skipped with "no phone for 'ohmz'" in a log nobody
     # reads — the user believes they are being watched and hears nothing.
@@ -4688,6 +4699,13 @@ class Pipe:
                 diffs.append("enabled" if a.get("enabled", True) else "disabled")
             if (a.get("state") or "") != (b.get("state") or ""):
                 diffs.append(f"now {a.get('state')}")
+            # A rename is never innocuous the way next_run_at ticking forward is — a job's name is
+            # static unless something explicitly set it, so any diff here IS a real event. Measured
+            # live 2026-08-10: an edit turn asked only for a schedule change and the agent silently
+            # renamed the job to the user's own typo'd duration phrase ("2 Horus") in the same PATCH
+            # — nothing downstream compared names, so nothing ever told the user it happened.
+            if (a.get("name") or "") != (b.get("name") or ""):
+                diffs.append(f"renamed to '{a.get('name')}'")
             if diffs:
                 out.append((jid, ", ".join(diffs)))
         return out
@@ -5524,6 +5542,34 @@ class Pipe:
             self._mark_bg(cid)
             return self._hermes_stream(sent, handle, scoped=scoped, verify_creation=False)
 
+        # 4b. Not a new watch — a CHANGE to one that already exists ("change/adjust the alert to
+        #     15 mins for 2 hours"). Checked BEFORE step 5's create test, not after: "for 2 hours"
+        #     is exactly the kind of phrase _BG_RECURRENCE matches (it has to, for genuine
+        #     creation requests like "watch this for 2 hours"), so an edit request that happens to
+        #     spell its duration correctly would otherwise be caught by step 5 first and handed
+        #     the CREATION brief — which has no idea an existing job is meant and no rule against
+        #     making a second one. A verb that names an existing thing ("the alert", "the
+        #     schedule") is a more specific signal than mere recurrence wording and has to win.
+        #
+        #     This also has to be its own step rather than falling to step 6's research brief:
+        #     that brief flatly forbids touching cron jobs ("Do NOT create, modify or mention cron
+        #     jobs") — correct for an actual one-off question, wrong for an edit request. Live,
+        #     2026-08-10, this exact phrasing (with the duration misspelled as "2 Horus", which
+        #     _BG_RECURRENCE does NOT match) fell all the way to that research brief, and the
+        #     agent ignored the prohibition rather than declining — then edited with no rules at
+        #     all: it silently renamed the job to the user's own typo and dropped the "for 2
+        #     hours" bound entirely, leaving a 15-minute check running unbounded.
+        #
+        #     verify_creation=True is what turns on _changed_jobs, so an edit turn now reports a
+        #     rename even if the brief below is somehow still violated — ground truth, not the
+        #     agent's word, same discipline as every other verified outcome here.
+        edit = bool(self._EDIT_VERB.search(raw))
+        if edit:
+            row("task.edit", "chip_edit")
+            self._mark_bg(cid)
+            return self._hermes_stream(text, handle, verify_creation=True,
+                                       brief=self._EDIT_BRIEF, scoped=scoped)
+
         # 5. Scheduling, on positive evidence only — but ANY one signal is enough. Outside this
         #    control a monitoring verb must be accompanied by evidence of recurrence, because the
         #    pair is what distinguishes a request from a sentence. Here the user already said which
@@ -5575,6 +5621,36 @@ class Pipe:
         "retailer pages (amazon.ca, bestbuy.ca, walmart.ca), and answer with the price AND the "
         "link to the page you read it from. Rule 4 still holds: no page read, no number.\n"
         "6. Answer in prose for the user, not as a report to a machine. Be concise."
+    )
+
+    _EDIT_BRIEF = (
+        "The user wants to CHANGE something about a background job that ALREADY EXISTS — this is "
+        "not a request for a new one. Use your cronjob tool.\n"
+        "1. First call cronjob(action='list') and find the job the user means. If the "
+        "conversation just created or discussed one, that is almost certainly it — use its real "
+        "id from the tool result, never one you recall from earlier in the conversation without "
+        "re-checking. If more than one job plausibly matches and you cannot tell which, ask which "
+        "one instead of guessing.\n"
+        "2. cronjob(action='update', ...) is a PARTIAL update: only the fields you include change; "
+        "everything else on the job is left exactly as it already was. Include ONLY the fields "
+        "the user actually asked to change.\n"
+        "3. NEVER include 'name' unless the user explicitly asked to rename the job — 'call it "
+        "X' or 'rename it to X', not implied by anything else in the message. A duration or "
+        "schedule phrase (even a typo, e.g. 'for 2 Horus' meaning 'for 2 hours') describes "
+        "TIMING, not a new name, and must never become one. When in doubt, omit 'name' entirely; "
+        "the job keeps the name it already has.\n"
+        "4. SCHEDULE AND DURATION — same mapping as creating a job: 'every N minutes/hours/days' "
+        "is RECURRING, pass 'every Nm' / 'every Nh' / 'every Nd'. A bound in the same request "
+        "('for 2 hours', 'for the next 20 minutes') becomes a repeat count on the SAME update: "
+        "'every 15 minutes for 2 hours' = schedule 'every 15m' with repeat 8. Never drop the "
+        "bound — leaving a fast schedule to run unbounded is the exact mistake this rule exists "
+        "to prevent. If the user gave a new interval but no new duration, leave 'repeat' alone.\n"
+        "5. After updating, call cronjob(action='list') again and state back the REAL schedule "
+        "and repeat count from that fresh result, not what you intended to set — the same "
+        "discipline creating a job uses. Say plainly what changed and, briefly, that nothing else "
+        "about the job did.\n"
+        "Reply to the user in plain language: what changed, to what, and until when. Keep it "
+        "short."
     )
 
     def _release_chat_tenant(self):

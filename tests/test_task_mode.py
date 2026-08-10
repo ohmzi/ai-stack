@@ -76,6 +76,7 @@ def stack(owners=None, phone="+15145550123"):
     def hermes(text, uname="user", verify_creation=False, brief=None, scoped=False):
         SENT.append({"text": text, "uname": uname, "verify": verify_creation, "scoped": scoped,
                      "brief": ("research" if brief is mod.Pipe._RESEARCH_BRIEF
+                               else "edit" if brief is mod.Pipe._EDIT_BRIEF
                                else "cron" if brief is None else "other")})
         async def go():
             yield "[agent]"
@@ -151,6 +152,38 @@ def main():
           SENT and SENT[0]["brief"] == "research" and SENT[0]["verify"] is False, repr(SENT[:1])[:200])
     check("the research contract still forbids creating jobs",
           "not create" in mod.Pipe._RESEARCH_BRIEF.lower())
+
+    print("--- ON: 'change the alert to X' edits, it does not research or create ---")
+    # Live, 2026-08-10: this exact phrasing matched neither _MANAGE_VERB (cancel/pause/resume take
+    # no new value) nor _BG_VERB/_BG_RECURRENCE (create-a-new-watch signals) — the typo "2 Horus"
+    # doesn't even match \d+\s+hours. It fell to the research brief, which flatly forbids touching
+    # cron jobs ("Do NOT create, modify or mention cron jobs") — and the agent edited anyway, with
+    # no rules at all: it renamed the job to "2 Horus" and dropped the "for 2 hours" bound.
+    for t in ("change the alert to 15 mins for 2 Horus",       # the literal live message, typo included
+              "change the alert to 15 mins for 2 hours",       # the same request, spelled correctly
+              "adjust the schedule to every 6 hours",
+              "please can you update the frequency to daily",
+              "reschedule it to run hourly"):
+        p = stack()
+        say(p, t)
+        check(f"routes to the edit brief, verified: {t[:46]!r}",
+              SENT and SENT[0]["brief"] == "edit" and SENT[0]["verify"] is True,
+              repr(SENT[:1])[:220])
+    check("the edit brief tells the agent PATCH is partial and never to rename unasked",
+          "partial" in mod.Pipe._EDIT_BRIEF.lower()
+          and "never include 'name'" in mod.Pipe._EDIT_BRIEF.lower(), mod.Pipe._EDIT_BRIEF[:400])
+    check("...and to translate a bound into a repeat count, the same as creating one",
+          "repeat" in mod.Pipe._EDIT_BRIEF.lower() and "8" in mod.Pipe._EDIT_BRIEF,
+          mod.Pipe._EDIT_BRIEF[:800])
+
+    print("--- ON: edit phrasing does not steal messages that are actually about something else ---")
+    for t, why in [("track the item https://x.example/y when the price is under 10",
+                    "a genuine new-watch request — _BG_VERB/_BG_RECURRENCE already claim it"),
+                   ("cancel my price alert", "a manage verb — _MANAGE_VERB already claims it")]:
+        p = stack()
+        say(p, t)
+        check(f"{why}: {t[:42]!r}",
+              not SENT or SENT[0]["brief"] != "edit", repr(SENT[:1])[:200])
 
     print("--- ON: what the pipe can answer itself, it answers — without loading the agent ---")
     p = stack()

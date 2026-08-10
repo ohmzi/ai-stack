@@ -215,6 +215,16 @@ def main():
     noisy = {"a": dict(job("a"), next_run_at="2026-08-01T00:00:00", last_status="ok")}
     check("a ticking next_run_at is NOT a change", cj(base, noisy) == [], repr(cj(base, noisy)))
     check("a job that did not exist before is not an update", cj({}, base) == [])
+    renamed = {"a": dict(job("a"), name="new name")}
+    named_before = {"a": dict(job("a"), name="old name")}
+    check("a rename alone is a change",
+          cj(named_before, renamed) == [("a", "renamed to 'new name'")], cj(named_before, renamed))
+    check("no name on either side is not a rename (job() carries none by default)",
+          cj(base, {"a": job("a")}) == [], cj(base, {"a": job("a")}))
+    both_changed = {"a": dict(job("a", "every 10m"), name="new name")}
+    check("a reschedule AND a rename together report both, in one diff string",
+          cj(named_before, both_changed) == [("a", "rescheduled, renamed to 'new name'")],
+          cj(named_before, both_changed))
 
     print("--- the six verdicts ---")
     before = {"old": job("old")}
@@ -284,6 +294,24 @@ def main():
     check("a reschedule is Verified updated, not 'nothing created'",
           "✅ **Verified updated**" in out and "Verification failed" not in out, out[-200:])
     check("...reports what actually changed", "rescheduled" in out, out[-200:])
+
+    # Live, 2026-08-10: an edit turn asked only to change the schedule, and the agent's PATCH
+    # ALSO silently renamed the job to the user's own typo'd duration phrase ("2 Horus", from
+    # "for 2 hours"). Nothing compared names before this, so the reply agreed with the agent and
+    # the rename reached the user unannounced. _changed_jobs now tracks name too, and a rename is
+    # never silent the way a pure reschedule is — the whole point is that it is NOT expected.
+    renamed_before = {"job1": dict(job("job1"), name="Toronto → Dallas fare watch under $1,000")}
+    renamed_after = {"job1": dict(job("job1", "every 15m"), name="2 Horus")}
+    out = drive("changed it", [renamed_before, renamed_after])
+    check("a rename alongside a reschedule is reported, not agreed with silently",
+          "✅ **Verified updated**" in out and "renamed to '2 Horus'" in out, out[-260:])
+    check("...and the reschedule is still named too", "rescheduled" in out, out[-260:])
+
+    same_name_before = {"job1": dict(job("job1"), name="cat board watch")}
+    same_name_after = {"job1": dict(job("job1", "every 15m"), name="cat board watch")}
+    out = drive("changed it", [same_name_before, same_name_after])
+    check("a reschedule that keeps the SAME name reports no rename",
+          "renamed to" not in out, out[-200:])
 
     # The job must be present BEFORE as well as after — a row that only appears afterwards is a
     # creation, which is a different verdict entirely.
