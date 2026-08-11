@@ -380,8 +380,11 @@ html.dark body #splash-screen {
   background: radial-gradient(ellipse 40rem 20rem at 50% 12%, rgb(224 145 63 / 14%), transparent 70%);
 }
 
+/* Deeper and more opaque than the dark bloom. Dark adds light to a near-black
+   canvas, where a little goes a long way; the same wash on an off-white canvas
+   is all but invisible. --ohmz-l-amber at nearly twice the alpha. */
 html.light .fixed.min-h-screen.font-primary::before {
-  background: radial-gradient(ellipse 40rem 20rem at 50% 12%, rgb(168 99 29 / 10%), transparent 70%);
+  background: radial-gradient(ellipse 40rem 20rem at 50% 12%, rgb(168 99 29 / 18%), transparent 72%);
 }
 
 /* Keep the form above the bloom layer. */
