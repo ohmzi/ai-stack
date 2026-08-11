@@ -298,6 +298,75 @@ else ever reaches `:80`.
    re-run both after any recreate or image pull, same as the private instance for the first one; see
    [Trimming the chat UI](#trimming-the-chat-ui) for why the second is a separate step.
 
+## The message quota
+
+The gate has always carried `limit_req` on chat, but that is a **rate** limit — 20 requests a
+minute, refilled every minute, forever. It stops a burst and does nothing about someone patiently
+holding a free GPU all day. `owui-public-quota`
+([`compose/public/quota/guest_quota.py`](../compose/public/quota/guest_quota.py)) is the ceiling:
+**20 messages per IP per rolling 24 hours**, after which the visitor is asked, in-chat, to sign up.
+
+Both numbers are env vars on the service in `docker-compose.yml` — `GUEST_QUOTA_LIMIT` and
+`GUEST_QUOTA_WINDOW_HOURS`. Changing one needs only
+`docker compose -p owui-public -f compose/public/docker-compose.yml up -d owui-public-quota`;
+nothing else in the stack reads them.
+
+**nginx asks, it doesn't proxy.** The quota service is never in the request path for a chat that is
+allowed:
+
+```
+POST /api/chat/completions ─► auth_request /_quota_check ─► owui-public-quota /check
+                                   204 ─► proxied to open-webui-public as normal
+                                   403 ─► error_page @quota_limited ─► /limited
+```
+
+So the hot path costs one tiny subrequest, nginx still does all the streaming, and a bug in the
+quota service cannot corrupt a chat response — only wrongly allow or wrongly deny. Three details
+that make this work and are easy to break:
+
+- The location is an **exact** match (`= /api/chat/completions`), which outranks the `/api/chat/`
+  prefix block. `/api/chat/completed` and friends are per-turn bookkeeping calls; counting those
+  would burn several quota units per actual message.
+- `auth_request` treats **only** 204 and 403 as a verdict. Anything else — service down, an
+  unhandled exception — becomes a 500, so the quota **fails closed**: guests see an error rather
+  than an unlimited demo. That is the right direction, but it means the service dying takes chat
+  with it, which is why the watchdog has a `pubquota` check separate from `pubgate` (`/api/config`
+  doesn't go through `auth_request`, so `pubgate` stays green through exactly this failure).
+- `error_page 403` can only ever catch nginx's **own** 403 from the subrequest, never one from
+  OpenWebUI, because `proxy_intercept_errors` is off by default and upstream errors pass straight
+  through. That is what makes it safe to hang the limit notice on a single status code.
+
+**The notice is a chat message, not an error.** `/limited` answers 200 with a valid OpenAI-shaped
+SSE stream, so the frontend renders it as an ordinary assistant turn — markdown, a signup link, and
+how long until the window lifts — instead of the red toast a bare 403 produces. The parser it has
+to satisfy is `src/lib/apis/streaming/index.ts`: `choices[0].delta.content` per `data:` line,
+terminated by `data: [DONE]`. This assumes the request was streaming, which on this instance it
+always is — title/tag/autocomplete generation are all disabled, so the chat UI is the only caller.
+
+**Keyed on IP, and IPs are not stored.** The `ohmzgid` cookie identifies a session and clearing it
+is one click, so a cookie quota would be decorative; IP is the only identifier a casual abuser
+doesn't trivially control. The stored key is an HMAC of the address under a secret generated on
+first run and kept on the data volume — the table is a set of opaque digests, enough to count
+against and useless as a record of who visited. Two accepted consequences: visitors behind one NAT
+share a quota, and anyone with an address pool can still cycle it. This is a speed bump for casual
+abuse, not a defense against a determined attacker — Cloudflare's own WAF/rate limiting is the
+layer for that, and it sits in front.
+
+Note that `$client_ip` is `CF-Connecting-IP` when the request came through Cloudflare and
+`$remote_addr` otherwise — and on the direct `:4568` path Docker's NAT masquerades every LAN client
+to the bridge gateway, so **local testing shares one bucket**. Only the Cloudflare path
+distinguishes real visitors.
+
+Inspecting and resetting, both from the host:
+
+```bash
+# who is currently counted (opaque keys, truncated) — no nginx route points here
+docker exec owui-public-quota python3 -c "import urllib.request;print(urllib.request.urlopen('http://127.0.0.1:9099/stats').read().decode())"
+
+# forgive everyone at once: delete the HMAC secret, every key becomes unreachable
+docker exec owui-public-quota rm -f /data/quota_secret && docker restart owui-public-quota
+```
+
 ## Operating it
 
 **Guest accounts accumulate — the purge job is load-bearing, not optional.** "Fresh every visit"

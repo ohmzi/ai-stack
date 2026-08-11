@@ -18,6 +18,9 @@ Checks, each fail-safe (a probe error is a FAIL for that check, never a crash):
             owui-public-gate and open-webui-public are both up. Does NOT cover the Ollama
             pinhole (owui-public-ollama) — verified 2026-08-11 this endpoint answers 200
             regardless of that container's state, since it doesn't touch Ollama
+  pubquota  owui-public-quota's container healthcheck. Separate from pubgate because the guest
+            quota fails CLOSED and invisibly to it: auth_request turns any non-204/403 into a
+            500, so guest chat breaks while /api/config keeps answering and pubgate stays green
 Report-only (logged, never alerted — they have their own recovery stories and the pipe
 already surfaces them to the user): comfyui /system_stats, ollama /api/version.
 
@@ -118,6 +121,22 @@ def check_public_gate():
         return False, "public gate (no HTTP answer on :4568)"
 
 
+def check_public_quota():
+    """The guest message quota (docs/PUBLIC_INSTANCE.md). Worth its own check because it fails
+    CLOSED and INVISIBLY to the check above: nginx's auth_request turns any non-204/403 answer into
+    a 500, so if this service dies every guest chat breaks while /api/config — which does not go
+    through auth_request — keeps answering 200 and `pubgate` stays green.
+
+    Read off the container's own healthcheck rather than probing directly: the service publishes no
+    host port (only the gate talks to it, over the compose network), and docker is already polling
+    it every 30s."""
+    r = _run(["docker", "inspect", "-f", "{{.State.Health.Status}}", "owui-public-quota"])
+    if not r or r.returncode != 0:
+        return False, "guest quota (container missing)"
+    status = r.stdout.strip()
+    return status == "healthy", f"guest quota ({status})"
+
+
 def check_backup():
     try:
         age = time.time() - os.path.getmtime(BACKUP_LAST_OK)
@@ -142,7 +161,8 @@ def main():
     dry = "--dry-run" in sys.argv
     checks = {"gateway": check_gateway, "api": check_api,
               "delivery": check_delivery, "backup": check_backup,
-              "flightclaw": check_flightclaw, "pubgate": check_public_gate}
+              "flightclaw": check_flightclaw, "pubgate": check_public_gate,
+              "pubquota": check_public_quota}
     try:
         with open(STATE_FILE) as f:
             state = json.load(f)

@@ -240,6 +240,49 @@ services:
       - ./nginx:/etc/nginx/conf.d:ro
     depends_on:
       - open-webui-public
+      - owui-public-quota
+    logging:
+      driver: json-file
+      options:
+        max-size: "5m"
+        max-file: "3"
+
+  # Per-IP message quota — the ceiling `limit_req` in guest-gate.conf cannot express. That one is a
+  # RATE limit (20/min, refilled every minute, forever): it stops a burst and does nothing about
+  # someone patiently holding a free GPU all day. This caps total messages per rolling window and
+  # then asks, in-chat, for a signup. Full rationale and the auth_request wiring: the module
+  # docstring in quota/guest_quota.py and docs/PUBLIC_INSTANCE.md.
+  #
+  # Stock python image with the script mounted — no Dockerfile, because the service is stdlib-only
+  # (http.server + sqlite3) and adding a build step would mean a rebuild for every one-line tweak.
+  owui-public-quota:
+    image: python:3.12-alpine
+    container_name: owui-public-quota
+    restart: unless-stopped
+    networks:
+      - owui-public
+    # No published port: only owui-public-gate talks to it, over this network. /stats is owner
+    # -facing and deliberately has no nginx route — reach it with `docker exec` (see the doc).
+    volumes:
+      - ./quota/guest_quota.py:/app/guest_quota.py:ro
+      - /volume1/docker/openwebui-public/quota:/data
+    command: ["python3", "/app/guest_quota.py"]
+    environment:
+      # The two knobs worth touching. Raising the limit needs only `up -d owui-public-quota`;
+      # nothing else in the stack reads these.
+      GUEST_QUOTA_LIMIT: "20"
+      GUEST_QUOTA_WINDOW_HOURS: "24"
+      # Where the in-chat limit notice sends people. The PRIVATE instance, deliberately — the whole
+      # point of the ceiling is to convert a demo visitor into a signup.
+      GUEST_QUOTA_SIGNUP_URL: https://ai.ohmz.cloud
+      PYTHONUNBUFFERED: "1"
+    healthcheck:
+      test: ["CMD", "python3", "-c",
+             "import urllib.request; urllib.request.urlopen('http://127.0.0.1:9099/healthz')"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
     logging:
       driver: json-file
       options:

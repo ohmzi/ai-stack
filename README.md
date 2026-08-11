@@ -289,6 +289,11 @@ qdrant. Every visitor gets a throwaway identity via trusted-header auth, injecte
 that a request cannot forge its way past. "No image or video generation" there is a fact about the
 network, not a setting someone could flip back.
 
+It is a demo, so it is metered: **20 messages per IP per rolling 24 hours**, enforced by an
+`auth_request` sidecar the gate consults before proxying a message. Past the limit the visitor gets
+a normal-looking assistant reply explaining when it lifts and inviting them to sign up — not an
+error toast.
+
 ```bash
 ./compose/public/up.sh                          # (re)create the stack
 python3 scripts/purge_public_guests.py --yes     # reap idle guest accounts — load-bearing, not optional

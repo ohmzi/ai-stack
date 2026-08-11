@@ -41,8 +41,8 @@ def check(label, ok, detail=""):
     print(f"  [{'PASS' if ok else 'FAIL'}] {label}" + (f"   {detail}" if detail and not ok else ""))
 
 
-def docker_exec(cmd, timeout=10):
-    r = subprocess.run(["docker", "exec", PUBLIC_CONTAINER, "sh", "-c", cmd],
+def docker_exec(cmd, timeout=10, container=None):
+    r = subprocess.run(["docker", "exec", container or PUBLIC_CONTAINER, "sh", "-c", cmd],
                         capture_output=True, timeout=timeout + 5, text=True)
     return r.stdout.strip()
 
@@ -59,7 +59,22 @@ class _NoRedirect(urllib.request.HTTPRedirectHandler):
 _opener = urllib.request.build_opener(_NoRedirect)
 
 
-def http(base, method, path, cookie=None, token=None, body=None, timeout=10):
+_ip_seq = iter(range(20, 250))
+
+
+def fresh_ip():
+    """A TEST-NET-2 address (RFC 5737, never routable) unique within this run.
+
+    Both the signin rate limiter and the message quota are keyed on $client_ip, so any two checks
+    sharing an address share their limiter buckets — which made this suite order-dependent and
+    unable to run twice inside a minute: the deliberate rate-limit test below would leave the
+    bucket empty and the NEXT check to sign in got a 503 it never asked for. Handing every
+    signin-performing check its own address isolates them completely.
+    """
+    return f"198.51.100.{next(_ip_seq)}"
+
+
+def http(base, method, path, cookie=None, token=None, body=None, timeout=10, client_ip=None):
     """Minimal request helper — plain urllib, matching this repo's convention (no `requests`).
 
     Returns (status, parsed_json_or_None, set_cookie_header_or_None). Never raises: an HTTPError
@@ -73,6 +88,10 @@ def http(base, method, path, cookie=None, token=None, body=None, timeout=10):
         req.add_header("Cookie", f"ohmzgid={cookie}")
     if token:
         req.add_header("Authorization", f"Bearer {token}")
+    if client_ip:
+        # Only cloudflared reaches these ports, so the gate trusts CF-Connecting-IP as the real
+        # client address — which lets a test pick its own limiter bucket.
+        req.add_header("CF-Connecting-IP", client_ip)
     try:
         with _opener.open(req, timeout=timeout) as r:
             raw = r.read()
@@ -89,9 +108,10 @@ def http(base, method, path, cookie=None, token=None, body=None, timeout=10):
         return None, None, None
 
 
-def mint_guest():
+def mint_guest(client_ip=None):
     """One full guest arrival: prime a cookie, sign in, return (gid, token, identity)."""
-    status, _, set_cookie = http(GATE_BASE, "GET", "/")
+    ip = client_ip or fresh_ip()
+    status, _, set_cookie = http(GATE_BASE, "GET", "/", client_ip=ip)
     if status != 302 or not set_cookie:
         return None, None, None
     m = re.search(r"ohmzgid=([0-9a-f]{32})", set_cookie)
@@ -99,7 +119,7 @@ def mint_guest():
         return None, None, None
     gid = m.group(1)
     status, body, _ = http(GATE_BASE, "POST", "/api/v1/auths/signin", cookie=gid,
-                            body={"email": "x", "password": "x"})
+                            body={"email": "x", "password": "x"}, client_ip=ip)
     if status != 200 or not body:
         return gid, None, None
     return gid, body.get("token"), body
@@ -165,7 +185,7 @@ def main():
     print("--- identity cannot be forged ---")
     status, forged, _ = http(GATE_BASE, "POST", "/api/v1/auths/signin",
                               cookie="cafecafecafecafecafecafecafecafe",
-                              body={"email": "x", "password": "x"})
+                              body={"email": "x", "password": "x"}, client_ip=fresh_ip())
     # A raw urllib.request.Request can't attach a second value for a header proxy_set_header would
     # normally replace anyway — the actual security property (proxy_set_header REPLACES a
     # client-supplied X-Ohmz-Guest) can't be exercised over plain HTTP without hand-building the
@@ -176,7 +196,8 @@ def main():
 
     print("--- signup is unreachable ---")
     status, _, _ = http(GATE_BASE, "POST", "/api/v1/auths/signup",
-                         body={"name": "x", "email": "nobody@example.com", "password": "x"})
+                         body={"name": "x", "email": "nobody@example.com", "password": "x"},
+                         client_ip=fresh_ip())
     check("POST /api/v1/auths/signup is rejected", status in (403, 404), f"status={status}")
 
     print("--- the admin door is a fixed, separate identity ---")
@@ -186,12 +207,84 @@ def main():
           f"got {admin_identity!r}" if not admin_identity else f"role={admin_identity.get('role')!r}")
 
     print("--- rate limiting on signin engages ---")
+    # Its own address, deliberately: this check exists to EXHAUST a limiter bucket, and sharing one
+    # with any other check makes the suite order-dependent and un-rerunnable inside a minute.
+    burst_ip = fresh_ip()
     codes = []
     for _ in range(8):
         status, _, _ = http(GATE_BASE, "POST", "/api/v1/auths/signin",
-                             body={"email": "x", "password": "x"})
+                             body={"email": "x", "password": "x"}, client_ip=burst_ip)
         codes.append(status)
     check("a burst of signin calls eventually gets 503 (limit_req)", 503 in codes, f"codes={codes}")
+
+    print("--- per-IP message quota ---")
+    probe_ip = fresh_ip()
+    # Unlike the rate limiter (which refills in seconds), a quota bucket lives for the whole 24h
+    # window — so a second run of this suite the same day would inherit the last run's exhausted
+    # count and fail on the very first check. Clear this probe's row first, computing the same
+    # HMAC the service does so the test never needs to know the raw key.
+    docker_exec(
+        "python3 -c \""
+        "import sqlite3,hmac,hashlib;"
+        "s=open('/data/quota_secret','rb').read().strip();"
+        f"k=hmac.new(s,b'{probe_ip}',hashlib.sha256).hexdigest();"
+        "c=sqlite3.connect('/data/guest_quota.db');"
+        "c.execute('DELETE FROM quota WHERE key=?',(k,));c.commit()\"",
+        container="owui-public-quota",
+    )
+
+    def quota_check():
+        """One /check against the quota service, from inside the gate — the same call
+        auth_request makes. Returns the HTTP status."""
+        out = docker_exec(
+            "wget -qS -O- --header='X-Ohmz-Client-IP: " + probe_ip + "' "
+            "http://owui-public-quota:9099/check 2>&1 | head -1",
+            container="owui-public-gate",
+        )
+        return "204" if "204" in out else ("403" if "403" in out else out.strip())
+
+    first = quota_check()
+    check("a fresh address is allowed", first == "204", f"got {first!r}")
+
+    # Burn through whatever the configured limit is, then one more. Read the limit off the service
+    # rather than hardcoding 20, so raising GUEST_QUOTA_LIMIT doesn't turn this into a false alarm.
+    limit_hdr = docker_exec(
+        "wget -qS -O- --header='X-Ohmz-Client-IP: " + probe_ip + "' "
+        "http://owui-public-quota:9099/check 2>&1 | grep X-Quota-Limit",
+        container="owui-public-gate",
+    )
+    try:
+        limit = int(limit_hdr.split(":")[1].strip())
+    except (IndexError, ValueError):
+        limit = 0
+    check("the service reports a limit", limit > 0, f"header was {limit_hdr!r}")
+
+    for _ in range(limit):
+        quota_check()
+    over = quota_check()
+    check(f"address is refused after {limit} messages", over == "403", f"got {over!r}")
+
+    # The whole point of the design: an exhausted visitor gets a readable assistant turn, not a red
+    # error toast. 200 + SSE + a signup link, through the real nginx path.
+    status, _, _ = (None, None, None)
+    req = urllib.request.Request(
+        f"{GATE_BASE}/api/chat/completions", method="POST",
+        data=json.dumps({"model": EXPECTED_MODEL, "stream": True,
+                         "messages": [{"role": "user", "content": "hi"}]}).encode(),
+    )
+    req.add_header("Content-Type", "application/json")
+    req.add_header("CF-Connecting-IP", probe_ip)
+    try:
+        with _opener.open(req, timeout=15) as r:
+            code, body, ctype = r.status, r.read().decode(), r.headers.get("Content-Type", "")
+    except urllib.error.HTTPError as e:
+        code, body, ctype = e.code, e.read().decode(), e.headers.get("Content-Type", "")
+
+    check("over-quota chat returns 200, not an error", code == 200, f"status={code}")
+    check("...as an SSE stream", "text/event-stream" in ctype, f"content-type={ctype!r}")
+    check("...that terminates properly", "data: [DONE]" in body)
+    check("...carrying the signup link", "ai.ohmz.cloud" in body)
+    check("...and no model was invoked for it", '"model": "guest-quota"' in body)
 
     print("--- branding: shared skin plus the guest-ui trim, nothing else ---")
     root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
