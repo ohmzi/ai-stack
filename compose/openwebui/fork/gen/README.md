@@ -30,22 +30,32 @@ docker exec open-webui cat /app/build/_app/immutable/chunks/<chunk>.js.map > mi.
 > fuzz, so the Sidebar hunks fail on context that moved, and the failure names a file the operator
 > never re-extracted.
 
-They expect the upstream `MessageInput.svelte`, `Chat.svelte` and `Sidebar.svelte` beside them
-(vendored here so a rebase starts from a known base), and run in order:
+> **Extended 2026-08-11.** A fourth file is now vendored: `auth+page.svelte`
+> (`src/routes/auth/+page.svelte`), patched by `04_guest_link.py` to add the public instance's
+> "Continue without an account" link (`docs/PUBLIC_INSTANCE.md`). The same trap as above applies to
+> it specifically: it is the one vendored file with no counterpart already living in this directory
+> from before, so it is the easiest of the four to forget to re-extract after an upstream bump.
+> `grep '^--- ' ../task-mode.patch` should list four files after `04` has run.
+
+They expect the upstream `MessageInput.svelte`, `Chat.svelte`, `Sidebar.svelte` and
+`auth+page.svelte` beside them (vendored here so a rebase starts from a known base), and run in
+order:
 
 ```bash
 python3 01_mode_buttons.py /tmp/p1.patch      # also writes MessageInput.patched.svelte, which 02 reads
 python3 02_mode_persistence.py ../task-mode.patch
 python3 03_tasks_shortcut.py ../task-mode.patch --append
+python3 04_guest_link.py ../task-mode.patch --append
 ```
 
 `01` adds the three exclusive mode buttons. `02` adds the `onModeChange` callback and the
 chat-scoped mode memory, emitting the combined patch for those two files. `03` appends the
-sidebar shortcut to the background-tasks channel.
+sidebar shortcut to the background-tasks channel. `04` appends the sign-in page's guest link.
 
 Run on 2026-08-08 against a scratch copy of this directory, with the output paths pointed into that
-copy, those three commands reproduced the committed `task-mode.patch` byte for byte: `diff` between
-the two was empty, 14377 bytes. The recipe above is current.
+copy, the first three commands reproduced the committed `task-mode.patch` byte for byte: `diff`
+between the two was empty, 14377 bytes. `04` was added later, on 2026-08-11 — see the extension note
+above.
 
 **Byproducts (recorded 2026-08-08).** The run writes four files here, not the one the `01` comment
 used to name on its own: `MessageInput.patched.svelte` (from `01`, and the input `02` loads),

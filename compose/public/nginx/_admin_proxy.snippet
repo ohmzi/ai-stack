@@ -1,0 +1,15 @@
+# Shared by every location in the :81 (admin) server of guest-gate.conf. See _guest_proxy.snippet
+# for why this lives outside the *.conf glob.
+proxy_set_header Host $host;
+proxy_set_header X-Real-IP $remote_addr;
+proxy_set_header X-Forwarded-For $remote_addr;
+proxy_set_header X-Forwarded-Proto http;
+
+# CHANGE THIS before first bringing the stack up (docs/PUBLIC_INSTANCE.md, bootstrap step 1) — it
+# is the email of the admin account created in that step. Every request through :81 authenticates as
+# this identity unconditionally; there is no cookie or client input involved on this door at all,
+# by design (it is loopback-only and never given a Cloudflare route). A placeholder is deliberately
+# left in rather than guessed, since guessing wrong here would either 403 the owner or, worse, quietly
+# create a second "admin" account no one is watching.
+proxy_set_header X-Ohmz-Guest "owner@aipublic.ohmz.cloud";
+proxy_set_header X-Ohmz-Guest-Name "Owner";

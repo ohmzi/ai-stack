@@ -16,6 +16,12 @@
 #   - An off-site leg. Both disks share one PSU and one house; fire/theft takes them together.
 #     Recorded as an accepted gap (owner decision 2026-08-01) until a cloud provider is picked —
 #     duplicity is already installed and can target B2 natively when that day comes.
+#   - /volume1/docker/openwebui-public/config/webui.db — the PUBLIC instance's database
+#     (docs/PUBLIC_INSTANCE.md). Deliberately excluded, not overlooked: everything in it is a guest
+#     chat, by design fresh every visit and reaped within 24h by scripts/purge_public_guests.py — the
+#     opposite of "irreplaceable state" this backup exists to protect. The three rows worth keeping
+#     (owner account, Guests group, the model access_grant) are three curl calls documented in
+#     PUBLIC_INSTANCE.md's bootstrap section, cheaper to redo than to restore.
 #
 # Databases are copied with sqlite3 ".backup", never cp: webui.db carries a live multi-MB WAL at
 # all times, and a raw copy taken mid-checkpoint is a corrupt backup that LOOKS complete — the

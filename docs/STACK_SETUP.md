@@ -152,6 +152,16 @@ three mode buttons and the Background-tasks shortcut while every suite stays gre
 first symptom is a chat input with an Integrations dropdown where the mode buttons used to be. Step 4
 above is the only check that exists.
 
+## Public instance
+
+Everything above stands up the **private** instance — the one with pipes, filters and the
+Internet/Code/Task fork. It has a separate, disposable sibling at `aipublic.ohmz.cloud`: no pipes,
+no login, one model, on its own network with no route to ComfyUI or the hermes gateway. Different
+compose project (`compose/public/`), different bootstrap order, different everything except the
+branding step. Not part of this page's stand-up order on purpose — standing it up requires the
+private instance's Ollama already running, but nothing here depends on the public instance existing.
+Full procedure: [PUBLIC_INSTANCE.md](PUBLIC_INSTANCE.md).
+
 ## Highlights
 - **Intent routing** with question/small-talk guards — a question about an image isn't turned into an edit.
 - **Conversation continuity** — a follow-up ("make this picture realistic") edits the picture already on the table, recovered from history or the persistent per-chat store; OpenWebUI's own background-task prompts are answered as text and never render. See [IMAGE_CONTINUATION.md](IMAGE_CONTINUATION.md).

@@ -1,0 +1,38 @@
+/* ============================================================================
+   Guest UI trim — hides two chat-header controls the public instance has no
+   permission flag for. NOT part of branding/ohmz.css and NOT installed by
+   branding/apply.sh: that file is shared with the private instance, and
+   these rules are specific to the guest experience. Installed instead by
+   ./apply_guest_ui.sh, appended after apply.sh has run.
+
+   The Controls button (temperature, system prompt override, …) has a real
+   permission — USER_PERMISSIONS_CHAT_CONTROLS=false in docker-compose.yml —
+   and is already gone server-side; nothing to hide here. These two are not:
+
+   #chat-context-menu-button   the "..." menu (share/rename/archive/delete) —
+                                gated on the chat having an id, not on any
+                                permission (src/lib/components/chat/Navbar.svelte)
+   [aria-label="User menu"]    the account-avatar dropdown — gated on nothing
+                                at all; any signed-in identity gets it, guest
+                                or not
+   #auth-page                  the "Signing in to OhmzAI ⟳" screen /auth
+                                renders while the trusted-header auto-signin is
+                                in flight (src/routes/auth/+page.svelte) — safe
+                                to hide unconditionally here because this
+                                instance always has auth_trusted_header=true
+                                (ENABLE_LOGIN_FORM=false, ENABLE_LDAP unset),
+                                so #auth-page's OTHER branch — the real
+                                email/password form — never renders on it at
+                                all; a guest lands on a blank moment instead
+                                of watching auth internals, then the app
+                                itself takes over once signin completes.
+   ========================================================================= */
+
+#chat-context-menu-button,
+button[aria-label='User menu'] {
+  display: none !important;
+}
+
+#auth-page {
+  display: none !important;
+}

@@ -354,3 +354,46 @@
  				</div>
  
  				{#if ($models ?? []).length > 0 && (($settings?.pinnedModels ?? []).length > 0 || $config?.default_pinned_models)}
+--- a/src/routes/auth/+page.svelte
++++ b/src/routes/auth/+page.svelte
+@@ -33,6 +33,12 @@
+ 
+ 	let mode = $config?.features.enable_ldap ? 'ldap' : 'signin';
+ 
++	// ai-stack: set by branding/loader.js from window.__ohmzGuestUrl, which is itself only set on
++	// the branded (private) instance — see that file for the hostname guard. '' here renders
++	// nothing, which is what a stock/unbranded build and the public instance itself both get.
++	const guestUrl =
++		(typeof window !== 'undefined' && window.__ohmzGuestUrl) || '';
++
+ 	let form = null;
+ 
+ 	let name = '';
+@@ -437,6 +443,27 @@
+ 								</div>
+ 							</form>
+ 
++							{#if guestUrl}
++								<div class="inline-flex items-center justify-center w-full">
++									<hr class="w-32 h-px my-4 border-0 dark:bg-gray-100/10 bg-gray-700/10" />
++									<span class="px-3 text-sm font-medium text-gray-900 dark:text-white bg-transparent"
++										>{$i18n.t('or')}</span
++									>
++									<hr class="w-32 h-px my-4 border-0 dark:bg-gray-100/10 bg-gray-700/10" />
++								</div>
++
++								<a
++									id="auth-guest-button"
++									href={guestUrl}
++									class="flex justify-center items-center bg-gray-700/5 hover:bg-gray-700/10 dark:bg-gray-100/5 dark:hover:bg-gray-100/10 dark:text-gray-300 dark:hover:text-white transition w-full rounded-full font-medium text-sm py-2.5"
++								>
++									{$i18n.t('Continue without an account')}
++								</a>
++								<div class="mt-2 text-xs text-center text-gray-500 dark:text-gray-400">
++									{$i18n.t('Chat only — nothing is saved.')}
++								</div>
++							{/if}
++
+ 							{#if Object.keys($config?.oauth?.providers ?? {}).length > 0}
+ 								<div class="inline-flex items-center justify-center w-full">
+ 									<hr class="w-32 h-px my-4 border-0 dark:bg-gray-100/10 bg-gray-700/10" />

@@ -21,6 +21,10 @@ branding/.cache/
 # searxng secret — rotated out of git 2026-07-29, lives here only
 compose/.env
 
+# GUEST_GROUP_ID, filled in by hand after bootstrap step 3 (docs/PUBLIC_INSTANCE.md) — not a
+# secret, just per-install state that would be wrong on any other host
+compose/public/.env
+
 # ntfy runtime state — auth.db holds password/token hashes; never in git
 compose/ntfy/
 

@@ -14,6 +14,10 @@ Checks, each fail-safe (a probe error is a FAIL for that check, never a crash):
   backup    /media/SandiskSSD/ai-stack-backups/LAST_OK newer than 26 h
   flightclaw  systemctl --user is-active flightclaw + GET 127.0.0.1:8765/mcp answers HTTP
             at all (406 to a bare GET is a live MCP server refusing politely)
+  pubgate   GET 127.0.0.1:4568/api/config answers HTTP (docs/PUBLIC_INSTANCE.md) — proves
+            owui-public-gate and open-webui-public are both up. Does NOT cover the Ollama
+            pinhole (owui-public-ollama) — verified 2026-08-11 this endpoint answers 200
+            regardless of that container's state, since it doesn't touch Ollama
 Report-only (logged, never alerted — they have their own recovery stories and the pipe
 already surfaces them to the user): comfyui /system_stats, ollama /api/version.
 
@@ -103,6 +107,17 @@ def check_flightclaw():
         return False, "flightclaw API (no HTTP answer on :8765)"
 
 
+def check_public_gate():
+    try:
+        req = urllib.request.Request("http://127.0.0.1:4568/api/config")
+        with urllib.request.urlopen(req, timeout=5):
+            return True, "public gate"
+    except urllib.error.HTTPError:
+        return True, "public gate"      # any HTTP answer proves the chain is up
+    except Exception:
+        return False, "public gate (no HTTP answer on :4568)"
+
+
 def check_backup():
     try:
         age = time.time() - os.path.getmtime(BACKUP_LAST_OK)
@@ -127,7 +142,7 @@ def main():
     dry = "--dry-run" in sys.argv
     checks = {"gateway": check_gateway, "api": check_api,
               "delivery": check_delivery, "backup": check_backup,
-              "flightclaw": check_flightclaw}
+              "flightclaw": check_flightclaw, "pubgate": check_public_gate}
     try:
         with open(STATE_FILE) as f:
             state = json.load(f)

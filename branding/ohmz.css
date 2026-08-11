@@ -393,6 +393,26 @@ html.light .fixed.min-h-screen.font-primary input:-webkit-autofill {
   -webkit-text-fill-color: var(--ohmz-l-text);
 }
 
+/* The guest link (compose/openwebui/fork/gen/04_guest_link.py) reuses the sign-in button's own
+   class string, so by default it is styled identically to "Sign in" — one amber-accented pill would
+   read as the primary action, which "Continue without an account" is not. Kept visually secondary:
+   no fill, just the line + text the OAuth buttons already use on this page. */
+#auth-guest-button {
+  background: transparent;
+  border: 1px solid var(--ohmz-line);
+  color: var(--ohmz-text);
+}
+
+html.dark #auth-guest-button:hover,
+html.light #auth-guest-button:hover {
+  background: var(--ohmz-hover);
+}
+
+html.light #auth-guest-button {
+  border-color: var(--ohmz-l-line);
+  color: var(--ohmz-l-text);
+}
+
 /* Sign in / Create account — the primary action, so it takes the accent. */
 .fixed.min-h-screen.font-primary button[type='submit'] {
   background: var(--ohmz-amber);

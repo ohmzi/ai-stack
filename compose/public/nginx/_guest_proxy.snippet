@@ -1,0 +1,22 @@
+# Shared by every location in the :80 (public) server of guest-gate.conf. Named with a leading
+# underscore and a non-.conf extension on purpose: nginx:alpine's stock http block does
+# `include /etc/nginx/conf.d/*.conf;`, and this file is only valid inside a `location` block — if
+# that wildcard picked it up too, its directives would also apply at http scope. Included explicitly
+# by full path instead.
+proxy_set_header Host $host;
+proxy_set_header X-Real-IP $client_ip;
+proxy_set_header X-Forwarded-For $client_ip;
+proxy_set_header X-Forwarded-Proto https;
+
+# The identity. proxy_set_header REPLACES any client-supplied header of the same name — see the
+# file header of guest-gate.conf. $gid is either the guest's existing valid cookie or the id this
+# request just minted (map chain in guest-gate.conf); either way this is what open-webui-public's
+# WEBUI_AUTH_TRUSTED_EMAIL_HEADER reads.
+proxy_set_header X-Ohmz-Guest "guest-$gid@public.ohmz.cloud";
+proxy_set_header X-Ohmz-Guest-Name "Guest";
+proxy_set_header X-Ohmz-Guest-Groups "Guests";
+
+# Present only on a cookie-less request (see the map definitions above); empty otherwise, and nginx
+# omits an add_header whose value is empty, so a returning guest gets neither header re-sent.
+add_header Set-Cookie $mint_gid always;
+add_header Set-Cookie $mint_token always;

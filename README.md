@@ -24,7 +24,8 @@ scripts/     the alerting side — monitors, discovery, delivery, transports
 hermes/      hermes-agent plugins, symlinked into ~/.hermes
 compose/     the containers. openwebui/ holds the frontend fork above AND run.sh,
              the only recorded recipe for creating the container; comfyui/ likewise;
-             docker-compose.yml holds the five support services
+             docker-compose.yml holds the five support services; public/ is the
+             second, no-login instance — see docs/PUBLIC_INSTANCE.md
 branding/    the OhmzAI skin
 tests/       unit tests, live QA harnesses and the eval suite
 docs/        runbooks, setup, model notes, QA plan
@@ -279,6 +280,25 @@ never passes through `window.fetch`. So instead of patching source, it gives the
 non-empty values (they ship as `""`, which is why the *key* is what renders), leaving every other
 locale untouched. `--check` reports without changing anything; `--revert` restores stock wording.
 
+## Public instance
+
+`ai.ohmz.cloud`'s sign-in page carries a "Continue without an account" link to
+`aipublic.ohmz.cloud` — a **second, disposable OpenWebUI container**, same skin, chat only, one
+model, no pipes deployed to it at all, on a network with no route to ComfyUI, the hermes gateway or
+qdrant. Every visitor gets a throwaway identity via trusted-header auth, injected by an nginx gate
+that a request cannot forge its way past. "No image or video generation" there is a fact about the
+network, not a setting someone could flip back.
+
+```bash
+./compose/public/up.sh                          # (re)create the stack
+python3 scripts/purge_public_guests.py --yes     # reap idle guest accounts — load-bearing, not optional
+python3 tests/test_public_instance.py            # isolation matrix, guest flow, branding parity
+```
+
+Full architecture, the trusted-header mechanism, bootstrap order (order matters — the first identity
+to reach a fresh database becomes admin) and the redirect-scheme bug that behind Cloudflare is worth
+reading before touching the gate config: [docs/PUBLIC_INSTANCE.md](docs/PUBLIC_INSTANCE.md).
+
 ## Deploying
 
 **Editing a pipe does not deploy it.** Open WebUI does not import pipes from disk — it stores each
@@ -385,6 +405,7 @@ Methodology and the current baseline: [docs/QA_TEST_PLAN.md](docs/QA_TEST_PLAN.m
 | | |
 |---|---|
 | [STACK_SETUP.md](docs/STACK_SETUP.md) | How the stack is put together |
+| [PUBLIC_INSTANCE.md](docs/PUBLIC_INSTANCE.md) | The no-login public instance: gate mechanism, isolation, bootstrap order |
 | [HERMES_AGENT.md](docs/HERMES_AGENT.md) | Standing jobs: what runs, why, how to undo it |
 | [MODELS.md](docs/MODELS.md) | Model roles, measured VRAM, the consolidation |
 | [QA_TEST_PLAN.md](docs/QA_TEST_PLAN.md) | Methodology and baselines |
