@@ -442,9 +442,17 @@ html.light .fixed.min-h-screen.font-primary input:-webkit-autofill {
   color: var(--ohmz-text);
 }
 
-html.dark #auth-guest-button:hover,
-html.light #auth-guest-button:hover {
+/* One hover colour per theme, NOT one for both. --ohmz-hover is #2d2a26, a
+   dark-mode surface: applying it in light mode filled the button near-black
+   while the label stayed --ohmz-l-text (#1a1917), so the text vanished on
+   hover. Light mode takes --ohmz-l-panel, which is the light-mode hover surface
+   (the same value ohmz-cloud's semantic layer assigns to --surface-hover). */
+html.dark #auth-guest-button:hover {
   background: var(--ohmz-hover);
+}
+
+html.light #auth-guest-button:hover {
+  background: var(--ohmz-l-panel);
 }
 
 html.light #auth-guest-button {
