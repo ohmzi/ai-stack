@@ -509,6 +509,24 @@ html.light #auth-guest-button {
    editing this file. The size is stated because the pseudo-elements inherit the
    zeroed size, not the heading's — 1.5rem is Tailwind's text-2xl, which is what
    the heading div carries. */
+/* The heading reads as the brand name alone — no "Sign in to" / "Sign up to" /
+   "Get started with" prose in front of it.
+ *
+ * 04_guest_link.py renders the heading as `{p[0]}<span class="ohmz-wordmark">
+ * {$WEBUI_NAME}</span>{p[1]}`, so the prose is a bare text node and there is no
+ * element to hide. Zeroing the font on the element that CONTAINS the wordmark
+ * collapses that text node (and the whitespace around it) to nothing, while the
+ * wordmark's own ::before/::after restate their size and are unaffected. That
+ * also means this keeps working across all four heading variants — signin,
+ * signup, ldap and onboarding — without naming any of them.
+ *
+ * :has() rather than a fixed class because the heading div carries only Tailwind
+ * utilities, which are not a stable hook. The same pattern is already used for
+ * the password row above. */
+#auth-page div:has(> .ohmz-wordmark) {
+  font-size: 0;
+}
+
 #auth-page .ohmz-wordmark {
   font-size: 0;
   letter-spacing: 0;
