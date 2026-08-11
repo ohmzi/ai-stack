@@ -165,6 +165,7 @@ if [ "${1:-}" = "--revert" ]; then
      && sed -i -E 's@(<meta name=\"theme-color\" content=)\"[^\"]*\"@\1\"$STOCK_THEME\"@' $INDEX \
      && sed -i -E \"s@'$BRAND_THEME'@'$STOCK_THEME'@g\" $INDEX \
      && sed -i -E 's@(<link rel=\"manifest\" href=)\"[^\"]*\"@\1\"$STOCK_MANIFEST\"@' $INDEX \
+     && sed -i -E \"s@localStorage.theme = 'dark'@localStorage.theme = 'system'@\" $INDEX \
      && sed -i -E 's@<title>[^<]*</title>@<title>$STOCK_NAME</title>@' $INDEX"
   # The UI copy lives in a frontend chunk, not in either static dir — its own
   # script, which puts the empty en-US values back.
@@ -274,12 +275,24 @@ docker exec "$CONTAINER" sh -c \
 # is rebranded; light (#ffffff), oled-dark (#000000) and her (#983724) are
 # deliberately left alone, since #1a1917 is the dark canvas specifically
 # (ohmz.css: --color-gray-900 / --color-black).
-echo "branding the shell (manifest link, title, theme-colour, iOS name)"
+# Dark is also the DEFAULT, not just a supported theme. Upstream's pre-paint
+# script seeds `localStorage.theme = 'system'` when nothing is stored, which
+# hands a first-time visitor's impression to whatever their OS happens to be
+# set to. These apps are dark-first and ohmz.cloud/Homarr now agree on that, so
+# an unset preference resolves to dark here too.
+#
+# Only the SEED is changed. Every branch that reads the value is untouched, and
+# 'dark' already falls through to the script's final else (which adds .dark and
+# #1a1917), so no new branch is needed. A user who picks a theme has it written
+# to localStorage by the app and keeps it — this only decides what happens
+# before anyone has chosen.
+echo "branding the shell (manifest link, title, theme-colour, iOS name, default theme)"
 docker exec "$CONTAINER" sh -c \
   "sed -i -E 's@(<link rel=\"manifest\" href=)\"[^\"]*\"@\1\"/static/site.webmanifest?v=$STAMP\"@' $INDEX \
    && sed -i -E 's@<title>[^<]*</title>@<title>$BRAND_NAME</title>@' $INDEX \
    && sed -i -E 's@<meta name=\"apple-mobile-web-app-title\"[^>]*>@@g' $INDEX \
    && sed -i -E 's@<meta name=\"theme-color\" content=\"[^\"]*\" />@<meta name=\"theme-color\" content=\"$BRAND_THEME\" /><meta name=\"apple-mobile-web-app-title\" content=\"$BRAND_NAME\" />@' $INDEX \
+   && sed -i -E \"s@localStorage.theme = 'system'@localStorage.theme = 'dark'@\" $INDEX \
    && sed -i -E \"s@'$STOCK_THEME'@'$BRAND_THEME'@g\" $INDEX"
 
 # The UI copy that still says WebUI — the pending-activation page, WebUI
