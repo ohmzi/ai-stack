@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Per-IP message quota for the public, no-account OhmzAI. See docs/PUBLIC_INSTANCE.md.
+"""Per-IP message quota for the public, no-account Ohmz AI. See docs/PUBLIC_INSTANCE.md.
 
 WHY THIS EXISTS
 ---------------
@@ -161,7 +161,7 @@ def human_duration(seconds):
 def limit_message(reset_in):
     return (
         f"### You've reached the demo limit\n\n"
-        f"That's all {LIMIT} messages for this session — thanks for giving OhmzAI a real try.\n\n"
+        f"That's all {LIMIT} messages for this session — thanks for giving Ohmz AI a real try.\n\n"
         f"The demo opens back up **{human_duration(reset_in)}**. "
         f"If you'd rather keep going now, [create an account]({SIGNUP_URL}) — it's free, and it "
         f"lifts the message cap entirely.\n\n"

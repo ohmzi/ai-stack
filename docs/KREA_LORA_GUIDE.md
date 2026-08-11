@@ -2,7 +2,7 @@
 
 This is the one part that isn't automated, because it uses **your** account, card, and images.
 It's a one-time ~**$3** step. Everything after you download the file is handled locally by the
-Krea LoRA Converter node + whichever RedCraft/Krea-2 text-to-image path you use — the Ω Assistant,
+Krea LoRA Converter node + whichever RedCraft/Krea-2 text-to-image path you use — the Assistant,
 or the `image_krea` "Image" pipe (see §5 for which of the two is selectable today). Based on the
 Pixaroma Ep26 method.
 
@@ -10,7 +10,7 @@ Pixaroma Ep26 method.
 > `redcraft23INT8INT4FP8_30Krea2.safetensors`, which is built on a **Krea 2 base** — the
 > architecture a fal.ai Krea 2 LoRA targets — so LoRAs trained this way load and apply
 > exactly as before, through the same `LoraLoaderModelOnly` node and the same valves (or, on
-> the Ω Assistant, the same module constants — see step 4.2).
+> the Assistant, the same module constants — see step 4.2).
 > RedCraft itself has no trigger word; yours still works the way it always did.
 
 ---
@@ -45,7 +45,7 @@ Make up a rare token so it doesn't collide with normal words, e.g. `pixag1rl26`,
 >
 > > **"and nowhere else" was false when written** (2026-08-01, commit ca9c258). **Corrected
 > > 2026-08-08.** A Krea 2 LoRA works on **any RedCraft/Krea-2 text-to-image path**, and there
-> > are two of those: the `image_krea` "Image" pipe and the **Ω Assistant**. The Assistant loads
+> > are two of those: the `image_krea` "Image" pipe and the **Assistant**. The Assistant loads
 > > the same checkpoint (`krea2/redcraft23INT8INT4FP8_30Krea2.safetensors`,
 > > `pipes/auto_assistant.py:3274` = `pipes/image_krea.py:83`) and wires the identical
 > > `LoraLoaderModelOnly` node onto the same unet (`auto_assistant.py:3283-3286` =
@@ -99,16 +99,16 @@ Make up a rare token so it doesn't collide with normal words, e.g. `pixag1rl26`,
 
      > **Corrected 2026-08-08.** This step used to read "Set the **Image** model's valves:
      > `LORA_FILE`, `TRIGGER`, `LORA_STRENGTH`" and stop there. Following it set three valves on
-     > the one pipe that is no longer selectable (§5) and left the Ω Assistant — the path §5 now
+     > the one pipe that is no longer selectable (§5) and left the Assistant — the path §5 now
      > tells you to use — generating base RedCraft with your trigger word silently ignored.
 3. Done — your subject/style now generates locally in OpenWebUI. Use the trigger word in prompts.
 
 ## 5. Using it day-to-day
 
-- In OpenWebUI, ask the **Ω Assistant** to "draw…".
+- In OpenWebUI, ask the **Assistant** to "draw…".
 
   > **Superseded 2026-08-08.** This line read: "In OpenWebUI, select **Image** (or just ask the
-  > Ω Assistant to 'draw…')". The standalone **Image** entry has not been selectable since
+  > Assistant to 'draw…')". The standalone **Image** entry has not been selectable since
   > 2026-08-02. Its row in the `model` table is `image_krea.krea2 | Image | is_active=0`, and an
   > inactive row is not a cosmetic hide: `get_all_models` deletes the manifold entry outright,
   > and because the picker and the dispatcher both read `app.state.MODELS`, a hidden model is

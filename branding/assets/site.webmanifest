@@ -1,8 +1,8 @@
 {
   "id": "/",
-  "name": "OhmzAI",
-  "short_name": "OhmzAI",
-  "description": "OhmzAI — a private AI workspace.",
+  "name": "Ohmz AI",
+  "short_name": "Ohmz AI",
+  "description": "Ohmz AI — a private AI workspace.",
   "start_url": "/",
   "scope": "/",
   "display": "standalone",

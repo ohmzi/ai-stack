@@ -15,7 +15,7 @@
    [aria-label="User menu"]    the account-avatar dropdown — gated on nothing
                                 at all; any signed-in identity gets it, guest
                                 or not
-   #auth-page                  the "Signing in to OhmzAI ⟳" screen /auth
+   #auth-page                  the "Signing in to Ohmz AI ⟳" screen /auth
                                 renders while the trusted-header auto-signin is
                                 in flight (src/routes/auth/+page.svelte) — safe
                                 to hide unconditionally here because this

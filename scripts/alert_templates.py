@@ -639,7 +639,7 @@ def _footer_lines(payload):
 
 # ---------------------------------------------------------------- the html email's brand
 #
-# The OhmzAI brand language, as branding/ohmz.css defines it and home.ohmz.cloud typesets it:
+# The Ohmz AI brand language, as branding/ohmz.css defines it and home.ohmz.cloud typesets it:
 # warm near-black surfaces, ONE amber accent spent on the action, depth from flat panels and 1px
 # hairlines — no gradients, no shadows, never pure #fff or #000. The email is dark in both of the
 # reader's themes because the brand is dark-first and email offers no way to follow a client theme;
@@ -667,7 +667,7 @@ _MONO = "'IBM Plex Mono',ui-monospace,SFMono-Regular,Menlo,monospace"
 def _lockup_html(assistant):
     """The wordmark row, or "" when no assistant name is configured.
 
-    The brand lockup sets the stem in the text colour and the last word in amber — OhmzAI does
+    The brand lockup sets the stem in the text colour and the last word in amber — Ohmz AI does
     "Ohmz"+"AI", the site does "Ohmz"+".cloud" — so this rebuilds that grammar from the CONFIGURED
     assistant name rather than hard-coding a brand string a rename would orphan. The Ω is the text
     character, not the favicon SVG: Gmail strips <svg>, and the mark is drawn from the Space
@@ -738,7 +738,7 @@ def _details_html(payload):
 
 
 def render_html(payload):
-    """A self-contained HTML email in the OhmzAI brand language: inline styles only, no external
+    """A self-contained HTML email in the Ohmz AI brand language: inline styles only, no external
     assets, mobile-friendly.
 
     Inline styles and a table shell because email clients strip <style> blocks and do not implement

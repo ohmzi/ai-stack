@@ -264,7 +264,7 @@ who does not exist yet.
 |---|---|---|
 | Phase 0 — driver | ✅ done | 580.173.02, all 15 pkgs held. Plan line 94 ("prevention still outstanding") is stale — contradicted 27 lines later and by `apt-mark showhold` |
 | Phase 1 — router poisoning | ✅ done, extended | 15/15 cases (A–O), not the 6/6 the plan claims. All md5s quoted in the plan are stale (live: `167e6c10…`, 113586 B; DB == disk == `pipes/live/`) |
-| Phase 2 — architecture | ✅ superseded | One entry, `🪄 Assistant`. `_entry()` still resolves retired `knowledge`/`coder` leaves |
+| Phase 2 — architecture | ✅ superseded | One entry, `Assistant`. `_entry()` still resolves retired `knowledge`/`coder` leaves |
 | Phase 2b — coder autorouting | ✅ done | `AUTO_ROUTE_CODER=True`, classifier `gemma3:1b`, 39/39 |
 | Phase 3 — documents/OCR | ✅ **done** (doc says partial) | `content_extraction_engine="tika"`, `tika_server_url=http://localhost:9998`, Tika 3.3.0 + Tesseract 5.5.0 healthy. **Never exercised**: 0 knowledge bases, 0 documents (all 25 files are jpg/png/webm) |
 | Phase 4 — web search | ✅ **done + proven in production** | SearXNG live, 5-engine roster pinned by `5fba13b`. Real `type=web_search` sources and `[1]/[3][5]` markers in `chat_message` rows |
@@ -730,7 +730,7 @@ down" instead of a 19 GB model load. `docker inspect open-webui` shows all four 
 | `user.permissions.chat.multiple_models = false` | Parallel dispatch to two entries bypasses `_GEN_LOCK` entirely; dolphin + coder does not fit in 24576 MiB |
 | `is_active=0` on `image_krea` and `animate_scail` | Both are live, both render to the same GPU with no lock, neither has a model row (so no filters, no legacy injection). Keeping `photoreal` (the `uncensored` entry) — it is actually used |
 | Settings → Audio → **Allow Voice Interruption in Call** | Already shipped and defaults to `false`; with it off the mic analyser is deliberately deafened while the assistant speaks. One checkbox = barge-in |
-| Create a Note with your standing context, attach it to 🪄 Assistant as knowledge | Notes are injected **full-content, unchunked** (`retrieval/utils.py:1361-1379`) through the legacy `:2377` gate. A persistent, UI-editable context doc you can actually read — unlike Adaptive Memory's inference. Keep it under ~1–2k tokens |
+| Create a Note with your standing context, attach it to Assistant as knowledge | Notes are injected **full-content, unchunked** (`retrieval/utils.py:1361-1379`) through the legacy `:2377` gate. A persistent, UI-editable context doc you can actually read — unlike Adaptive Memory's inference. Keep it under ~1–2k tokens |
 | Create a Folder per project (system prompt + file set) | Folder system prompts apply unconditionally, folder files RAG-inject on the legacy path. 0 folders exist |
 | Press the code-interpreter toggle | Already enabled on pyodide and **not blocked by legacy FC** — legacy uses the `<code_interpreter>` XML path (`middleware.py:2466-2484` → `:3910` → `:5043`). The `_CODE_STRONG` hazard from its injected prompt is already stripped by `_INJECTED_MARKERS`; do not remove that marker |
 | Use the thumbs; open the admin analytics endpoints | `feedback` table = 0 rows, so the leaderboard has nothing to rank over 58 chats / 254 messages |
@@ -1025,7 +1025,7 @@ kill switch. Aesthetic LoRAs bias *every* image; do a strength sweep.
 
 #### 2.6 Automations — daily only, and only after the confirmation gate exists
 
-**What.** Workspace → Automations. One or two daily/hourly RRULE prompts against 🪄 Assistant.
+**What.** Workspace → Automations. One or two daily/hourly RRULE prompts against Assistant.
 
 **Why.** The scheduler is already running in the OWUI event loop (`main.py:353`) with **zero**
 automations defined — the largest paid-for-and-unused feature. `execute_automation` calls

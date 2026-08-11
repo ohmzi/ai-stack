@@ -33,7 +33,10 @@ DEFAULT_DB = "/volume1/docker/openwebui/config/webui.db"
 
 # The README's Pipes/Filters tables are the roster a reader trusts, and nothing asserted them.
 # By 2026-08-02 they had drifted on five separate counts — a checkpoint swap (Krea 2 -> RedCraft),
-# a workspace rename (🪄 Assistant -> Ω Assistant), a function id that did not match its own
+# a workspace rename (🪄 Assistant -> Ω Assistant; renamed again to plain "Assistant" on
+# 2026-08-11 — the old names are kept HERE because this sentence is the record of a drift that
+# happened, and rewriting them to the current name would erase what it is describing), a
+# function id that did not match its own
 # filename, a pipe missing entirely, and an active filter documented nowhere. Every one of those
 # was invisible to a green suite, for the same reason `pipes/live/` was before this file existed:
 # no check compared the doc to the box.

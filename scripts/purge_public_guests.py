@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Reap idle guest accounts from the public OhmzAI instance.
+"""Reap idle guest accounts from the public Ohmz AI instance.
 
 Why this exists. Guest sessions on the public instance (docs/PUBLIC_INSTANCE.md) are fresh every
 visit by design — closing the browser drops the ohmzgid cookie, so a returning visitor gets a brand

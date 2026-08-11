@@ -356,7 +356,7 @@
  				{#if ($models ?? []).length > 0 && (($settings?.pinnedModels ?? []).length > 0 || $config?.default_pinned_models)}
 --- a/src/routes/auth/+page.svelte
 +++ b/src/routes/auth/+page.svelte
-@@ -33,6 +33,12 @@
+@@ -33,6 +33,21 @@
  
  	let mode = $config?.features.enable_ldap ? 'ldap' : 'signin';
  
@@ -366,10 +366,50 @@
 +	const guestUrl =
 +		(typeof window !== 'undefined' && window.__ohmzGuestUrl) || '';
 +
++	// ai-stack: split a "… {{WEBUI_NAME}} …" heading around the app name, so the wordmark can carry
++	// its own styling (branding/ohmz.css colours the "AI" amber, matching the sidebar) while the
++	// sentence around it stays an ordinary translated string.
++	//
++	// A sentinel split rather than {@html}, so a name that is ultimately admin-settable is never
++	// interpolated as markup; and rather than hardcoding the "Sign in to " prefix, so the name
++	// stays wherever the locale puts it instead of being forced to the end.
++	const ohmzBrandSplit = (key) => $i18n.t(key, { WEBUI_NAME: '\u0000' }).split('\u0000');
++
  	let form = null;
  
  	let name = '';
-@@ -437,6 +443,27 @@
+@@ -257,7 +272,7 @@
+ 				{:else}
+ 					<div class="my-auto flex flex-col justify-center items-center">
+ 						<div id="auth-login-card" class=" sm:max-w-md my-auto pb-10 w-full dark:text-gray-100">
+-							{#if $config?.metadata?.auth_logo_position === 'center'}
++							{#if ($config?.metadata?.auth_logo_position ?? 'center') === 'center'}
+ 								<div class="flex justify-center mb-6">
+ 									<img
+ 										id="logo"
+@@ -278,13 +293,17 @@
+ 								<div class="mb-1">
+ 									<div class=" text-2xl font-medium">
+ 										{#if $config?.onboarding ?? false}
+-											{$i18n.t(`Get started with {{WEBUI_NAME}}`, { WEBUI_NAME: $WEBUI_NAME })}
++											{@const p = ohmzBrandSplit(`Get started with {{WEBUI_NAME}}`)}
++											{p[0]}<span class="ohmz-wordmark">{$WEBUI_NAME}</span>{p[1] ?? ''}
+ 										{:else if mode === 'ldap'}
+-											{$i18n.t(`Sign in to {{WEBUI_NAME}} with LDAP`, { WEBUI_NAME: $WEBUI_NAME })}
++											{@const p = ohmzBrandSplit(`Sign in to {{WEBUI_NAME}} with LDAP`)}
++											{p[0]}<span class="ohmz-wordmark">{$WEBUI_NAME}</span>{p[1] ?? ''}
+ 										{:else if mode === 'signin'}
+-											{$i18n.t(`Sign in to {{WEBUI_NAME}}`, { WEBUI_NAME: $WEBUI_NAME })}
++											{@const p = ohmzBrandSplit(`Sign in to {{WEBUI_NAME}}`)}
++											{p[0]}<span class="ohmz-wordmark">{$WEBUI_NAME}</span>{p[1] ?? ''}
+ 										{:else}
+-											{$i18n.t(`Sign up to {{WEBUI_NAME}}`, { WEBUI_NAME: $WEBUI_NAME })}
++											{@const p = ohmzBrandSplit(`Sign up to {{WEBUI_NAME}}`)}
++											{p[0]}<span class="ohmz-wordmark">{$WEBUI_NAME}</span>{p[1] ?? ''}
+ 										{/if}
+ 									</div>
+ 
+@@ -437,6 +456,27 @@
  								</div>
  							</form>
  
@@ -397,3 +437,12 @@
  							{#if Object.keys($config?.oauth?.providers ?? {}).length > 0}
  								<div class="inline-flex items-center justify-center w-full">
  									<hr class="w-32 h-px my-4 border-0 dark:bg-gray-100/10 bg-gray-700/10" />
+@@ -607,7 +647,7 @@
+ 			</div>
+ 		</div>
+ 
+-		{#if !$config?.metadata?.auth_logo_position}
++		{#if $config?.metadata?.auth_logo_position === 'corner'}
+ 			<div class="fixed m-10 z-50">
+ 				<div class="flex space-x-2">
+ 					<div class=" self-center">

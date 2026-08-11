@@ -14,16 +14,16 @@ python3 tests/eval/run_eval.py --only CT02,CO04    # specific cases
 python3 tests/eval/run_eval.py --only CO01 --repeat 6   # is a case broken, or just flaky?
 ```
 
-> **All cases run on the single Ω Assistant entry.** The manifold collapsed from three entries to
+> **All cases run on the single Assistant entry.** The manifold collapsed from three entries to
 > one on 2026-07-26 — see `CAPABILITY_UPGRADE_PLAN.md`. Model choice is the pipe's job, so the suite
 > tests exactly what a user experiences: type a question, get the right model.
 >
-> **Renamed, recorded 2026-08-08.** This line said "🪄 Assistant" until today. That is still the name
+> **Renamed, recorded 2026-08-08.** This line said "Assistant" until today. That is still the name
 > `pipes()` returns in source — `pipes/auto_assistant.py:506` is literally
-> `return [{"id": "auto", "name": "🪄 Assistant"}]` — but the workspace row overrides it, so the
-> picker shows **Ω Assistant**. The evidence to trust here is `tests/test_deployed.py`, which reads
+> `return [{"id": "auto", "name": "Assistant"}]` — but the workspace row overrides it, so the
+> picker shows **Assistant**. The evidence to trust here is `tests/test_deployed.py`, which reads
 > the installed function's displayed name and passes on "README.md names auto_assistant as
-> 'Ω Assistant'"; `tests/test_deployed.py:36` lists "a workspace rename (🪄 Assistant -> Ω Assistant)"
+> 'Assistant'"; `tests/test_deployed.py:36` lists "a workspace rename (Assistant -> Assistant)"
 > among the drifts that suite was written to catch. Reading the pipe source alone gets this wrong.
 
 Cases live in `tests/eval/cases.json` — **data, not code**. Add a case by adding an object; the

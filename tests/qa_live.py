@@ -4,7 +4,7 @@
 Unlike test_router.py / test_manifold.py (which stub the model layer to test routing decisions),
 this makes ACTUAL inference calls. It answers three questions the unit tests cannot:
 
-  1. Does the single 🪄 Assistant entry pick the right model per turn, unaided?
+  1. Does the single Assistant entry pick the right model per turn, unaided?
   2. Is the response correct?
   3. Does keep_system=True really deliver system-message context to the model?
 

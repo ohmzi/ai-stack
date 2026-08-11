@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Rebrand every user-facing "WebUI" string to OhmzAI.
+"""Rebrand every user-facing "WebUI" string to Ohmz AI.
 
     python3 branding/i18n_brand.py            # install
     python3 branding/i18n_brand.py --revert   # put the stock wording back
@@ -42,7 +42,7 @@ WHAT IT REWRITES
 Every key containing "WebUI", by rule rather than by a list, so a string added
 upstream is picked up instead of quietly keeping stock wording. The article
 rules exist because a bare substitution produces broken English: "To access the
-WebUI" would become "To access the OhmzAI".
+WebUI" would become "To access the Ohmz AI".
 
 Ordered, and the order is load-bearing — "the WebUI" must run before
 "Open WebUI", or "maintained by the Open WebUI team" loses its article too.
@@ -78,11 +78,11 @@ CHUNKS = "/app/build/_app/immutable/chunks"
 # Applied in order. The first two exist so the result reads as English; the last
 # two are the actual rebrand. See the module docstring on why order matters.
 RULES = [
-    ("The WebUI", "OhmzAI"),
-    ("the WebUI", "OhmzAI"),
-    ("your WebUI", "your OhmzAI instance"),
-    ("Open WebUI", "OhmzAI"),
-    ("WebUI", "OhmzAI"),
+    ("The WebUI", "Ohmz AI"),
+    ("the WebUI", "Ohmz AI"),
+    ("your WebUI", "your Ohmz AI instance"),
+    ("Open WebUI", "Ohmz AI"),
+    ("WebUI", "Ohmz AI"),
 ]
 
 # A key is double-quoted unless it contains a double quote, in which case the

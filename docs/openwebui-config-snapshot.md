@@ -25,7 +25,7 @@ active `model` row (`utils/models.py:152`). So `image_krea` displays as `Image`,
 
 | id | name | active | note |
 |---|---|---|---|
-| `auto_assistant.auto` | Ω Assistant | ✅ | display name is the workspace override on the `model` row; the pipe's own fallback is still `🪄 Assistant`. `meta.filterIds = ['adaptive_memory']` |
+| `auto_assistant.auto` | Assistant | ✅ | display name is the workspace override on the `model` row; the pipe's own fallback is still `Assistant`. `meta.filterIds = ['adaptive_memory']` |
 | `photoreal.photo` | Photoreal | ✅ | migrated from `uncensored.photo` 2026-08-02; 3 pre-existing chats still reference the old id and will not resolve it |
 | `animate_scail.scail` | Animate | ✅ | row added 2026-08-02 purely to carry capabilities — `web_search`, `code_interpreter`, `image_generation`, `terminal`, `builtin_tools`, `file_context` and `citations` all **false**, `defaultFeatureIds: []` |
 | `image_krea.krea2` | Image | — | **hidden 2026-08-02 by request** — the function stays active and deployed; only the picker entry is gone |
@@ -38,7 +38,7 @@ active `model` row (`utils/models.py:152`). So `image_krea` displays as `Image`,
 
 ### Decision: the picker is curated down to three entries (2026-08-02)
 
-**Intended state — `Ω Assistant`, `Animate`, `Photoreal`, and nothing else.** Every other row
+**Intended state — `Assistant`, `Animate`, `Photoreal`, and nothing else.** Every other row
 above is hidden on purpose. If a future change makes `Image`, a `hermes-genesis` tag or `bge-m3`
 reappear in the dropdown, that is a regression, not a restoration; `tests/test_deployed.py`
 fails when it happens.

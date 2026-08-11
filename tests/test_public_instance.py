@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""The public, no-account OhmzAI stays isolated and stays anonymous.
+"""The public, no-account Ohmz AI stays isolated and stays anonymous.
 
 Two properties this instance exists for, and nothing about them is obvious from reading the compose
 file in isolation — they only hold if the network topology, the nginx gate, and OWUI's own auth

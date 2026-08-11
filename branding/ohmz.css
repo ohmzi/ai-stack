@@ -1,5 +1,5 @@
 /* ============================================================================
-   OhmzAI — theme for Open WebUI 0.10.2
+   Ohmz AI — theme for Open WebUI 0.10.2
    Installs as /app/backend/open_webui/static/custom.css — the directory
    main.py mounts at /static, which index.html already <link>s. (Note it is
    NOT /app/build/static; that path exists but is served to nobody.)
@@ -354,6 +354,42 @@ html.dark body #splash-screen {
    Everything here is scoped to the auth container so ordinary dialogs and
    settings forms elsewhere in the app keep their own styling. */
 
+/* A soft amber bloom from the top of the sign-in, so the backdrop is warm
+   rather than a flat field. Shared with the Ohmz HomeLab login
+   (homarr: apps/nextjs/src/styles/ohmz-brand.scss, .ohmz-auth-screen) so both
+   front doors read as the same product.
+
+   ::before on the auth container rather than a background on the container
+   itself: the backdrop colour is already set at the token layer via
+   --color-black, and layering the gradient separately leaves that alone. The
+   pseudo-element is inert (pointer-events + z-index) so it can never sit
+   between the user and the form. */
+.fixed.min-h-screen.font-primary {
+  position: fixed; /* already fixed by the utility class; restated so ::before has a containing block */
+  isolation: isolate;
+}
+
+.fixed.min-h-screen.font-primary::before {
+  content: '';
+  position: absolute;
+  inset-inline: 0;
+  top: 0;
+  height: min(34rem, 55vh);
+  z-index: 0;
+  pointer-events: none;
+  background: radial-gradient(ellipse 40rem 20rem at 50% 12%, rgb(224 145 63 / 14%), transparent 70%);
+}
+
+html.light .fixed.min-h-screen.font-primary::before {
+  background: radial-gradient(ellipse 40rem 20rem at 50% 12%, rgb(168 99 29 / 10%), transparent 70%);
+}
+
+/* Keep the form above the bloom layer. */
+.fixed.min-h-screen.font-primary > * {
+  position: relative;
+  z-index: 1;
+}
+
 .fixed.min-h-screen.font-primary input[type='text'],
 .fixed.min-h-screen.font-primary input[type='email'],
 .fixed.min-h-screen.font-primary div.flex:has(> input[type='password']) {
@@ -436,18 +472,59 @@ html.light #auth-guest-button {
   letter-spacing: 0;
 }
 
+/* 20px, not the shared 24px the wordmark uses on the sign-in heading, the
+   Homarr header and ohmz.cloud. This is a compact nav rail rather than a page
+   header, and the row it sits in is sized for a 16px label; 24px here crowds
+   the controls beside it. The grammar is identical — same face, same -0.02em,
+   same 500/600 split — only the step differs. Raise to 24px if the rail should
+   match the page headers exactly. */
 #sidebar-webui-name::before,
 #sidebar-webui-name::after {
-  font-size: 16px;
+  font-size: 20px;
   font-weight: 500;
   letter-spacing: -0.02em;
 }
 
+/* \00a0 (NBSP), not a plain space: a space between two inline boxes is
+   collapsible whitespace, and the two words of the brand should never be split
+   across a line anyway. */
 #sidebar-webui-name::before {
-  content: 'Ohmz';
+  content: 'Ohmz\00a0';
 }
 
 #sidebar-webui-name::after {
+  content: 'AI';
+  color: var(--ohmz-amber);
+  font-weight: 600;
+}
+
+/* The same lockup in the sign-in heading, so "Ohmz AI" reads identically in both
+   places. The span is put there by compose/openwebui/fork/gen/04_guest_link.py:
+   upstream interpolates the name into the MIDDLE of a translated sentence as one
+   text node ("Sign in to Ohmz AI"), and CSS cannot colour part of a text node — so
+   the patch lifts just the name into its own element and this styles it.
+
+   Same font-size:0 + pseudo-element swap as the sidebar above, and the same
+   trade: the two halves are spelled here rather than derived, so a rebrand means
+   editing this file. The size is stated because the pseudo-elements inherit the
+   zeroed size, not the heading's — 1.5rem is Tailwind's text-2xl, which is what
+   the heading div carries. */
+#auth-page .ohmz-wordmark {
+  font-size: 0;
+  letter-spacing: 0;
+}
+
+#auth-page .ohmz-wordmark::before,
+#auth-page .ohmz-wordmark::after {
+  font-size: 1.5rem;
+  letter-spacing: -0.02em;
+}
+
+#auth-page .ohmz-wordmark::before {
+  content: 'Ohmz\00a0';
+}
+
+#auth-page .ohmz-wordmark::after {
   content: 'AI';
   color: var(--ohmz-amber);
   font-weight: 600;

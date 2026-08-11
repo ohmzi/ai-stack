@@ -1,4 +1,4 @@
-# OhmzAI — Open WebUI skin
+# Ohmz AI — Open WebUI skin
 
 Warm-dark shell, one amber accent, Ω mark. Built from the `OhmzAI Brand.dc.html`
 brand sheet and verified against Open WebUI **0.10.2**.
@@ -17,7 +17,7 @@ which is most of what this file is about:
 | Surface | Lever | Why the others cannot reach it |
 |---|---|---|
 | Look | `ohmz.css` | — |
-| App name in the running UI | `loader.js` rewrites `/api/config` | `WEBUI_NAME` would render "OhmzAI (Open WebUI)" |
+| App name in the running UI | `loader.js` rewrites `/api/config` | `WEBUI_NAME` would render "Ohmz AI (Open WebUI)" |
 | Home-screen shortcut, tab title, icons | `apply.sh` edits `index.html` | a browser fetches the manifest itself, not via `window.fetch` |
 | UI copy saying *WebUI* | `i18n_brand.py` | i18n resources arrive by dynamic `import()`, also not via `window.fetch` |
 
@@ -130,7 +130,7 @@ Re-run it only if you change the mark; `assets/` is committed.
 > hand-maintained; only the PNGs, the SVG and the `.ico` come from the font outline.
 >
 > What that costs: `apply.sh` installs whatever is in `assets/`, so the next
-> `./branding/apply.sh` ships the stripped manifest — Android loses OhmzAI from the share
+> `./branding/apply.sh` ships the stripped manifest — Android loses Ohmz AI from the share
 > sheet, the three non-maskable icons go with it, and nothing says so. The suite does not
 > catch it: `tests/test_branding.py:195-211` asserts the manifest's `name`, `short_name`,
 > per-icon bytes and declared-vs-IHDR sizes, and nothing else — there is no `id`, `scope`
@@ -196,7 +196,7 @@ elsewhere keep their own styling.
 and is the single source the whole front-end reads for the app name — the
 sign-in heading, the sidebar and the document title all derive from it. The
 loader wraps `window.fetch`, rewrites that one field, and everything downstream
-says **OhmzAI**.
+says **Ohmz AI**.
 
 index.html loads `loader.js` with `defer` at line 34, ahead of the SvelteKit
 entry at line 120, so the patch is in place before the app's first request. On
@@ -206,7 +206,7 @@ untouched response.
 Two things this beats:
 
 - **`WEBUI_NAME`.** `env.py:842-844` appends `" (Open WebUI)"` to any value that
-  isn't the default, so the env var can only ever produce *"OhmzAI (Open
+  isn't the default, so the env var can only ever produce *"Ohmz AI (Open
   WebUI)"*. It also needs the container recreated rather than restarted.
   (Historic note: this used to add "and a restart signs everyone out" — no
   longer true since `0f95516` set `WEBUI_SECRET_KEY` in
@@ -238,7 +238,7 @@ Three further things the stock manifest got wrong, now fixed in ours:
 - it declared no `id`, `scope` or non-maskable icon.
 
 `share_target` is carried over from the stock manifest — without it Android
-loses OhmzAI from the system share sheet.
+loses Ohmz AI from the system share sheet.
 
 All of that was hand-added to `assets/site.webmanifest` after it was first rendered, and
 `build_assets.py` still overwrites the file from a template that has none of it — see the
@@ -286,26 +286,26 @@ instead of quietly keeping stock wording. Applied top to bottom — this is
 `i18n_brand.py`'s `RULES` (`i18n_brand.py:80-86`), in order and in full:
 
 ```
-"The WebUI"  -> "OhmzAI"
-"the WebUI"  -> "OhmzAI"
-"your WebUI" -> "your OhmzAI instance"
-"Open WebUI" -> "OhmzAI"
-"WebUI"      -> "OhmzAI"
+"The WebUI"  -> "Ohmz AI"
+"the WebUI"  -> "Ohmz AI"
+"your WebUI" -> "your Ohmz AI instance"
+"Open WebUI" -> "Ohmz AI"
+"WebUI"      -> "Ohmz AI"
 ```
 
 **Corrected 2026-08-08.** This block listed four rules in two columns and omitted the
 sentence-initial `"The WebUI"`, which is `RULES[0]`. Anyone rebuilding the table from the
 doc dropped it, and every string starting *"The WebUI ..."* then fell through to the bare
-substitution and rendered as *"The OhmzAI ..."*. The four that were listed were in the
+substitution and rendered as *"The Ohmz AI ..."*. The four that were listed were in the
 right relative order; the two-column layout was also making that order guesswork, so the
 rules are now one column.
 
 Order is load-bearing. The article rules exist because a bare substitution reads
-as *"To access the OhmzAI"*, and they must run before `"Open WebUI"` or
+as *"To access the Ohmz AI"*, and they must run before `"Open WebUI"` or
 *"maintained by the Open WebUI team"* loses its article too. Note that
-`"the OhmzAI team"` is a correct result — the tests assert each rule's **output**
-rather than the absence of `"the OhmzAI"`, since no cheap pattern separates that
-from `"the OhmzAI, please"`.
+`"the Ohmz AI team"` is a correct result — the tests assert each rule's **output**
+rather than the absence of `"the Ohmz AI"`, since no cheap pattern separates that
+from `"the Ohmz AI, please"`.
 
 Idempotent in both directions, because the rule is applied to the current value
 when there is one and already-branded text has nothing left to match. `--revert`

@@ -359,7 +359,7 @@ VID_VERIFY = True   # vision-check a mid frame of the clip against the request; 
 VID_VERIFY_MODE = "anchors"  # multi-shot QA scope: "anchors" = shot 1 + last shot only | "all" = every shot
 
 # --- automatic coder routing on the 'auto' entry -------------------------------------------------
-# Lets 🪄 Assistant hand a coding question to the big coder tenant without the user switching entries.
+# Lets Assistant hand a coding question to the big coder tenant without the user switching entries.
 # Media routing always wins first; this only ever affects turns that were already going to be chat.
 AUTO_ROUTE_CODER = True
 # Classifier for prompts the regexes can't call confidently. gemma3:1b is 0.99 GB and is PROVEN to
@@ -518,7 +518,7 @@ class Pipe:
     # its own module namespace, so a second file would get its own _GEN_LOCK and nothing would
     # serialize GPU work between them (see CAPABILITY_UPGRADE_PLAN.md Phase 2, shape C).
     def pipes(self):
-        return [{"id": "auto", "name": "🪄 Assistant"}]
+        return [{"id": "auto", "name": "Assistant"}]
 
     def _entry(self, body):
         """Which manifold entry was selected. OpenWebUI sends '<function_id>.<pipe_id>'; anything

@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# Install the OhmzAI skin into the running Open WebUI container.
+# Install the Ohmz AI skin into the running Open WebUI container.
 #
 #   ./branding/apply.sh            # install
 #   ./branding/apply.sh --revert   # put the stock assets back
@@ -71,7 +71,10 @@ INDEX=/app/build/index.html
 # all, so /favicon.ico falls through to the SPA catch-all and returns HTML.
 BUILD_ROOT=/app/build
 
-BRAND_NAME=OhmzAI
+# Quoted because the name contains a space — unquoted, `BRAND_NAME=Ohmz AI` is
+# parsed as "run the command AI with BRAND_NAME=Ohmz in its environment", which
+# is exactly how this failed the moment the brand gained a space.
+BRAND_NAME='Ohmz AI'
 BRAND_THEME='#1a1917'
 # The values to put back on --revert. Hardcoded rather than restored from a
 # backup for the same reason the fingerprints are stripped rather than restored:
@@ -289,7 +292,7 @@ OWUI_CONTAINER="$CONTAINER" python3 "$HERE/i18n_brand.py"
 
 cat <<DONE
 
-OhmzAI skin installed (v=$STAMP).
+Ohmz AI skin installed (v=$STAMP).
 
 The assets are fingerprinted, so no refresh is needed to pick them up. The
 exception is the HTML that carries the fingerprints: Open WebUI serves / with
@@ -301,9 +304,9 @@ and later skin changes propagate on their own.
 
 The app name is handled by loader.js, which rewrites the "name" field of
 GET /api/config before the front-end reads it — so the sign-in heading, the
-sidebar and the document title all say OhmzAI. Setting WEBUI_NAME instead
+sidebar and the document title all say Ohmz AI. Setting WEBUI_NAME instead
 would need the container recreated, and env.py:842-844 would render it as
-"OhmzAI (Open WebUI)" regardless.
+"Ohmz AI (Open WebUI)" regardless.
 
 The name on a phone home-screen shortcut is a SEPARATE path, and loader.js
 cannot reach it: a browser fetches the web app manifest itself rather than

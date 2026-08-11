@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Render every OhmzAI brand asset OpenWebUI serves out of /app/build/static.
+"""Render every Ohmz AI brand asset OpenWebUI serves out of /app/build/static.
 
 The mark is the Greek capital omega from Space Grotesk — the brand text face —
 so the logo and the UI are drawn with the same pen. Space Grotesk is variable
@@ -87,7 +87,7 @@ def render_svg(font: TTFont, size: int = 64) -> str:
     r = round(size * RADIUS_RATIO, 2)
     return (
         f'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 {size} {size}" '
-        f'width="{size}" height="{size}" role="img" aria-label="OhmzAI">\n'
+        f'width="{size}" height="{size}" role="img" aria-label="Ohmz AI">\n'
         f'  <rect width="{size}" height="{size}" rx="{r}" ry="{r}" fill="{AMBER}"/>\n'
         f'  <g transform="translate({tx:.3f} {ty:.3f}) scale({scale:.6f} {-scale:.6f})">\n'
         f'    <path fill="{ON_AMBER}" d="{path}"/>\n'
@@ -164,8 +164,8 @@ def main() -> None:
 
     (ASSETS / "site.webmanifest").write_text(
         '{\n'
-        '  "name": "OhmzAI",\n'
-        '  "short_name": "OhmzAI",\n'
+        '  "name": "Ohmz AI",\n'
+        '  "short_name": "Ohmz AI",\n'
         '  "icons": [\n'
         '    {\n'
         '      "src": "/static/web-app-manifest-192x192.png",\n'

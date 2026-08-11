@@ -26,7 +26,7 @@ compose/     the containers. openwebui/ holds the frontend fork above AND run.sh
              the only recorded recipe for creating the container; comfyui/ likewise;
              docker-compose.yml holds the five support services; public/ is the
              second, no-login instance — see docs/PUBLIC_INSTANCE.md
-branding/    the OhmzAI skin
+branding/    the Ohmz AI skin
 tests/       unit tests, live QA harnesses and the eval suite
 docs/        runbooks, setup, model notes, QA plan
 ```
@@ -39,7 +39,7 @@ things and have drifted apart before.
 
 | Function (OpenWebUI id) | Model in the UI | What it does |
 |---|---|---|
-| `auto_assistant` | Ω Assistant | One entry that routes by intent: chat (with vision when an image is in play), automatic coder routing, a RedCraft image (create, or edit via Qwen-Image-Edit), a Wan 2.2 video (text-to-video, image-to-video, or a multi-shot sequence), standing background jobs through the local hermes agent, a deterministic job-management path answered from `/api/jobs` rather than delegated, and a flight path that answers from parsed slots instead of letting a fare reach the chat model. Vision-QA on stills and video frames, a confirmation step before a video render, and VRAM choreography around every job. |
+| `auto_assistant` | Assistant | One entry that routes by intent: chat (with vision when an image is in play), automatic coder routing, a RedCraft image (create, or edit via Qwen-Image-Edit), a Wan 2.2 video (text-to-video, image-to-video, or a multi-shot sequence), standing background jobs through the local hermes agent, a deterministic job-management path answered from `/api/jobs` rather than delegated, and a flight path that answers from parsed slots instead of letting a fare reach the chat model. Vision-QA on stills and video frames, a confirmation step before a video render, and VRAM choreography around every job. |
 | `image_krea` | *(hidden)* | RedCraft (Krea 2 base) text-to-image + Qwen-Image-Edit 2509 instruction editing, optional trained LoRA, local prompt-enhance and vision-grounded edit-rewrite, two-round vision-QA correction. Hidden from the picker on 2026-08-02 — the Assistant covers the same two jobs. Restore by setting `image_krea.krea2` active in the `model` table. |
 | `photoreal` | Photoreal | Photorealistic text-to-image on its own SDXL checkpoint. Edits — including text-only follow-ups on the previous picture — run through Qwen-Image-Edit via the shared `identity_edit` module so the subject stays the same person, with an SDXL img2img fallback when Qwen is unavailable. |
 | `animate_scail` | Animate | SCAIL-2 (Wan 2.1 14B GGUF) motion transfer: attach a full-body character image and name one of three built-in motions — dance, wave or walk. Your text picks the motion; it is not a prompt. ~2 s clip, ~3 min. |
@@ -75,12 +75,12 @@ Highlights:
 
 | Function | What it does |
 |---|---|
-| `adaptive_memory` | Vendored Adaptive Memory v4.4.1 (`1818TusculumSt/owui-adaptive-memory`) — extracts, dedupes and embeds per-user memories, then prepends them to the last user message. Attached to `Ω Assistant` specifically rather than globally. Provenance and the license caveat: [docs/CAPABILITY_UPGRADE_PLAN.md](docs/CAPABILITY_UPGRADE_PLAN.md). |
+| `adaptive_memory` | Vendored Adaptive Memory v4.4.1 (`1818TusculumSt/owui-adaptive-memory`) — extracts, dedupes and embeds per-user memories, then prepends them to the last user message. Attached to `Assistant` specifically rather than globally. Provenance and the license caveat: [docs/CAPABILITY_UPGRADE_PLAN.md](docs/CAPABILITY_UPGRADE_PLAN.md). |
 | `task_mode` | The **Task** control in the chat input — one of the three mutually-exclusive mode buttons the frontend fork adds (Internet / Code / Task). While it is on, the turn goes to the hermes background-task agent instead of being guessed at from the user's wording, and Internet / Code are stood down server-side for that turn. Off by default. The *filter* is stateless — read per turn, never remembered server-side — but the fork's `Chat.svelte` does remember the choice **per chat**, and deliberately only when the user made it, so an incidental reset cannot silently re-arm a mode. `toggle` must be set on the *instance*, not the module: OpenWebUI reads it off the instantiated Filter, and a module-level-only `toggle` loads fine, passes every static check, and produces no control in the UI. |
 
 ### The picker is curated on purpose
 
-**The model dropdown shows exactly three entries — `Ω Assistant`, `Animate`, `Photoreal` — and
+**The model dropdown shows exactly three entries — `Assistant`, `Animate`, `Photoreal` — and
 that is the intended state, not drift.** Everything else is hidden behind an inactive `model`
 row: `image_krea`, `flux_image`, and every raw Ollama tag (`hermes-genesis:apex-compact`,
 `hermes-genesis:agent`, `bge-m3`, `gemma3:1b`, `gemma4:e2b`).
@@ -164,7 +164,7 @@ domain with no MX but an A record is flagged `implicit` rather than silently tru
 5321 says mail falls back there and it usually still bounces. The resolver check fails **open** — a
 missing `dig` must never be what stops an alert.
 
-The email is set in the OhmzAI brand, not a stock white template — same warm-dark palette and one
+The email is set in the Ohmz AI brand, not a stock white template — same warm-dark palette and one
 amber accent as the rest of the stack, `branding/ohmz.css` copied into `scripts/alert_templates.py`
 rather than shared by import, since an email cannot load the site's own stylesheet.
 
@@ -261,7 +261,7 @@ docker compose -f compose/docker-compose.yml up -d
 
 ## Branding
 
-[`branding/`](branding/) holds the OhmzAI skin — warm-dark shell, one amber
+[`branding/`](branding/) holds the Ohmz AI skin — warm-dark shell, one amber
 accent, Ω mark — applied to the running container:
 
 ```bash

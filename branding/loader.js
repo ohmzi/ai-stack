@@ -1,12 +1,12 @@
 /* ============================================================================
-   OhmzAI — app name override for Open WebUI 0.10.2
+   Ohmz AI — app name override for Open WebUI 0.10.2
    Installs as /app/backend/open_webui/static/loader.js, which index.html loads
    with `defer` in <head> (line 34) — before the SvelteKit entry (line 120), so
    this is in place before the app makes its first request.
 
    Why not WEBUI_NAME: env.py:842-844 appends " (Open WebUI)" to any WEBUI_NAME
    that isn't the default, so the env var can only ever produce
-   "OhmzAI (Open WebUI)". It also needs the container recreated rather than
+   "Ohmz AI (Open WebUI)". It also needs the container recreated rather than
    restarted, and WEBUI_SECRET_KEY is unset here — every restart would sign
    everyone out.
 
@@ -23,7 +23,7 @@
    ========================================================================= */
 
 (() => {
-	const BRAND = 'OhmzAI';
+	const BRAND = 'Ohmz AI';
 	const GUEST_URL = 'https://aipublic.ohmz.cloud';
 
 	// Sentinel, so "did the browser actually run this file?" is one lookup

@@ -219,7 +219,7 @@ Three more have **no permission at all** in 0.10.2 — verified by reading the v
 - the "···" chat-context menu (`#chat-context-menu-button`, gated only on the chat having an id)
 - the account-avatar menu (`button[aria-label="User menu"]`, gated on nothing — any signed-in
   identity gets it)
-- the "Signing in to OhmzAI ⟳" screen `/auth` shows while the trusted-header auto-signin is in
+- the "Signing in to Ohmz AI ⟳" screen `/auth` shows while the trusted-header auto-signin is in
   flight — safe to hide unconditionally on `#auth-page` here, since this instance always has
   `auth_trusted_header=true` and that element's OTHER branch (the real email/password form) never
   renders on it at all

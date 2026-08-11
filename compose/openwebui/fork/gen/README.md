@@ -31,7 +31,8 @@ docker exec open-webui cat /app/build/_app/immutable/chunks/<chunk>.js.map > mi.
 > never re-extracted.
 
 > **Extended 2026-08-11.** A fourth file is now vendored: `auth+page.svelte`
-> (`src/routes/auth/+page.svelte`), patched by `04_guest_link.py` to add the public instance's
+> (`src/routes/auth/+page.svelte`), patched by `04_guest_link.py` — which despite its name now
+> makes three sign-in-page changes, not one; see its docstring — starting with the public instance's
 > "Continue without an account" link (`docs/PUBLIC_INSTANCE.md`). The same trap as above applies to
 > it specifically: it is the one vendored file with no counterpart already living in this directory
 > from before, so it is the easiest of the four to forget to re-extract after an upstream bump.
@@ -50,7 +51,9 @@ python3 04_guest_link.py ../task-mode.patch --append
 
 `01` adds the three exclusive mode buttons. `02` adds the `onModeChange` callback and the
 chat-scoped mode memory, emitting the combined patch for those two files. `03` appends the
-sidebar shortcut to the background-tasks channel. `04` appends the sign-in page's guest link.
+sidebar shortcut to the background-tasks channel. `04` appends the sign-in page's three changes:
+the guest link, the brand wordmark span (`branding/ohmz.css` colours the "AI" amber off the back of
+it), and the logo moved from the fixed corner into the card.
 
 Run on 2026-08-08 against a scratch copy of this directory, with the output paths pointed into that
 copy, the first three commands reproduced the committed `task-mode.patch` byte for byte: `diff`

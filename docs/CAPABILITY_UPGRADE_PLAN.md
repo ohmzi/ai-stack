@@ -313,7 +313,7 @@ mechanism above remains available if legacy proves too limiting.
 
 ## Phase 2b — Automatic coder routing on 🪄 auto ✅ DONE
 
-**Question answered: no, you do not have to switch entries to get the coder.** 🪄 Assistant now picks
+**Question answered: no, you do not have to switch entries to get the coder.** Assistant now picks
 the model itself. What it *cannot* do is switch on knowledge bases, web search or citations —
 `function_calling: "legacy"` is read by middleware at `:2363`/`:2377`/`:2458` **before the pipe is
 ever invoked**, so it is a per-entry setting and the pipe has no say. 📚 Knowledge stays the entry
@@ -614,7 +614,7 @@ reading *"asked for a picture of their dog"* could make an ordinary question sta
 > **Mitigation 1 superseded 2026-07-26 — the filter is now on `auto`, and the two entries it was
 > scoped to no longer exist.** Decision 5 was reversed the same week (see "Decision 5 reversed" in
 > Decisions, below): `adaptive_memory` was attached to `auto_assistant.auto` as well, and when
-> `pipes()` collapsed to the single `🪄 Assistant` entry the `knowledge` and `coder` **model rows were
+> `pipes()` collapsed to the single `Assistant` entry the `knowledge` and `coder` **model rows were
 > deleted**. `docs/openwebui-config-snapshot.md:25`, re-read from the live database on 2026-08-02,
 > shows `auto_assistant.auto` carrying `meta.filterIds = ['adaptive_memory']` and it is the only
 > active `auto_assistant` row. So the filter now sits on the one entry that *does* route media.
@@ -855,11 +855,11 @@ correctly refused), so these need you. Exact prompts and exact pass criteria:
 > same week (see "…and then the manifold collapsed to ONE entry", below), and the `knowledge` and
 > `coder` **model rows were deleted**. Three things in the list are therefore untrue as written:
 >
-> - **Item 1** ("confirm **three** entries exist: 🪄 Assistant, 📚 Knowledge, 💻 Coder"). The picker does
->   still show three entries, but a different three — `Ω Assistant`, `Animate`, `Photoreal` — and that
+> - **Item 1** ("confirm **three** entries exist: Assistant, 📚 Knowledge, 💻 Coder"). The picker does
+>   still show three entries, but a different three — `Assistant`, `Animate`, `Photoreal` — and that
 >   curation is intentional, not drift (`README.md:82-86`; `docs/openwebui-config-snapshot.md:25-40`,
 >   read from the live DB 2026-08-02). `Ω` is the workspace display override on the `model` row; the
->   pipe's own fallback name is still `🪄 Assistant`.
+>   pipe's own fallback name is still `Assistant`.
 > - **Every "on 📚 Knowledge" / "on 💻 Coder" step** (items 5, 6, 7, 8, 11) must be run on the one
 >   Assistant entry instead. `_entry()` still resolves the retired ids, so a saved chat degrades
 >   sensibly, but there is no way to *select* them.
@@ -871,10 +871,10 @@ correctly refused), so these need you. Exact prompts and exact pass criteria:
 > all). Do not treat a "FAIL" on items 1/5/6/7/8/11 as a regression until they are repointed.
 
 **Setup (30 s)**
-1. Open OWUI. In the model picker, confirm **three** entries exist: 🪄 Assistant, 📚 Knowledge, 💻 Coder.
+1. Open OWUI. In the model picker, confirm **three** entries exist: Assistant, 📚 Knowledge, 💻 Coder.
 
 **The Phase 1 regression — the bug that started all this (2 min)**
-2. Select **🪄 Assistant**. Attach any PDF whose text contains the words "video" or "picture of"
+2. Select **Assistant**. Attach any PDF whose text contains the words "video" or "picture of"
    (`~/Downloads/ojsadmin,+Men+in+Charge.pdf` works). Send: `summarise this document for me`
    → **PASS = it writes a summary. FAIL = it starts rendering an image or video.**
 3. Same chat, same PDF attached, send: `make a picture of a cat`
@@ -894,7 +894,7 @@ correctly refused), so these need you. Exact prompts and exact pass criteria:
 7. On **📚 Knowledge**: `Remember that my project deadline is 14 August and my editor is Helix.`
 8. Start a **new chat**, still 📚 Knowledge: `what is my project deadline and which editor do I use?`
    → **PASS = recalls both.** (Adaptive Memory is scoped to Knowledge/Coder — it will *not* work on
-   🪄 Assistant, by design.)
+   Assistant, by design.)
 
 **Speech (1 min)**
 9. Press the 🔊 speaker icon on any reply → **PASS = audible speech** (Kokoro).
@@ -902,7 +902,7 @@ correctly refused), so these need you. Exact prompts and exact pass criteria:
     STT decision still outstanding.*
 
 **The architecture test — the one that actually matters (5 min)**
-11. On **🪄 Assistant**: `make a video of a dog running through a field`. While it is rendering,
+11. On **Assistant**: `make a video of a dog running through a field`. While it is rendering,
     open a second chat on **💻 Coder** and ask: `write a python decorator that retries on exception`.
     → **PASS = the coder answer waits, then arrives. FAIL = CUDA OOM, or either job dies.**
     This is what `_GEN_LOCK` exists for and nothing else has exercised it.
@@ -968,9 +968,9 @@ gitignored mirror of the deployed bytes; both** must stay identical to `function
 | 10 | TTS | **Kokoro on CPU**, OpenAI-compatible, local base URL — Phase 5 |
 | 11 | QA split | **Automated checks run by Claude; a short numbered checklist for the browser-only tests** — Phase 9 |
 
-### Decision 5 reversed — 🪄 Assistant is now fully powered (2026-07-26)
+### Decision 5 reversed — Assistant is now fully powered (2026-07-26)
 
-**Trigger.** Toggling web search on 🪄 Assistant produced *"I don't have real-time browsing
+**Trigger.** Toggling web search on Assistant produced *"I don't have real-time browsing
 capabilities"*, while the identical question on 📚 Knowledge searched and answered correctly. That was
 the documented consequence of decision 5, not a bug — but it is the wrong trade in daily use.
 
@@ -1010,7 +1010,7 @@ Giving `auto` everything had an immediate consequence: **📚 Knowledge became a
 Same tools, same model, same memory — but unable to render or reach the coder. It only subtracted.
 💻 Coder only *forced* a model that `_is_code_request` already selects automatically.
 
-So `pipes()` now returns a single entry, `🪄 Assistant`:
+So `pipes()` now returns a single entry, `Assistant`:
 
 | Capability | How it is reached |
 |---|---|

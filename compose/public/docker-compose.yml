@@ -1,4 +1,4 @@
-# The public, no-account OhmzAI — a second, disposable OpenWebUI in front of one Ollama model and
+# The public, no-account Ohmz AI — a second, disposable OpenWebUI in front of one Ollama model and
 # nothing else. Full rationale, bootstrap order and operations: docs/PUBLIC_INSTANCE.md.
 #
 # WHY A SECOND CONTAINER AT ALL
@@ -174,7 +174,7 @@ services:
       WEBUI_BANNERS: >-
         [{"id":"guest","type":"info","title":"","content":"You're chatting as a guest — nothing is saved and no account is created.","dismissible":true,"timestamp":0}]
       # Left unset, same reasoning as compose/openwebui/run.sh: env.py appends " (Open WebUI)" to
-      # any custom WEBUI_NAME, so the OhmzAI brand comes from branding/loader.js instead (applied
+      # any custom WEBUI_NAME, so the Ohmz AI brand comes from branding/loader.js instead (applied
       # with OWUI_CONTAINER=open-webui-public ./branding/apply.sh — see docs/PUBLIC_INSTANCE.md).
 
       # --- Hygiene, matched to compose/openwebui/run.sh ------------------------------------------

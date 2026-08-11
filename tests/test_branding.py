@@ -50,7 +50,7 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 BASE = os.environ.get("OWUI_URL", "http://127.0.0.1:4567")
 CONTAINER = os.environ.get("OWUI_CONTAINER", "open-webui")
 
-BRAND = "OhmzAI"
+BRAND = "Ohmz AI"
 
 # served path -> repo file it must be byte-identical to
 SERVED = {
@@ -259,20 +259,20 @@ def verify_copy(stage):
 
     # The page that prompted this, spelled out: a rule that silently stopped matching would
     # still pass the count check above if the keys vanished too.
-    for want in ("Contact Admin for OhmzAI Access",
-                 "To access OhmzAI, please reach out to the administrator"):
+    for want in ("Contact Admin for Ohmz AI Access",
+                 "To access Ohmz AI, please reach out to the administrator"):
         check(f"{stage}: pending page says {want[:34]!r}...", want in body)
 
     # Each article rule, by the phrase it produces. A bare substitution would leave "To access
-    # the OhmzAI" and "your OhmzAI." here, so these are what proves those rules still fire.
+    # the Ohmz AI" and "your Ohmz AI." here, so these are what proves those rules still fire.
     #
-    # Deliberately NOT a blanket "the OhmzAI never appears": "maintained by the OhmzAI team" is
-    # correct English, and no cheap pattern separates it from "the OhmzAI, please" without
+    # Deliberately NOT a blanket "the Ohmz AI never appears": "maintained by the Ohmz AI team" is
+    # correct English, and no cheap pattern separates it from "the Ohmz AI, please" without
     # guessing at parts of speech. Assert the outputs, not the absence of a shape.
-    for rule, want in (('"the WebUI"', "Please serve OhmzAI from the backend"),
-                       ('"your WebUI"', "Enter the public URL of your OhmzAI instance")):
+    for rule, want in (('"the WebUI"', "Please serve Ohmz AI from the backend"),
+                       ('"your WebUI"', "Enter the public URL of your Ohmz AI instance")):
         check(f"{stage}: the {rule} article rule still fires", want in body,
-              f"expected {want!r} — a bare substitution would read 'the OhmzAI' here")
+              f"expected {want!r} — a bare substitution would read 'the Ohmz AI' here")
 
 
 def main():
