@@ -173,6 +173,26 @@
   --font-mono: 'IBM Plex Mono', ui-monospace, SFMono-Regular, Menlo, monospace;
 }
 
+/* Declaring the variable is not enough. Tailwind compiles .font-primary with
+   the family spelled out — `Archivo, Vazirmatn, sans-serif` — rather than as a
+   var() reference, so redefining --font-primary above never reached it. Every
+   element carrying .font-primary, the sign-in heading included, was still
+   rendering in Archivo while html/body were correctly Space Grotesk.
+ *
+ * Visible rather than academic: Archivo's capital O is narrower and less
+ * geometric than Space Grotesk's, so "Ohmz" read differently here than on
+ * ohmz.cloud and Ohmz HomeLab — close enough to a zero to notice.
+ *
+ * The `body` prefix is load-bearing. This sheet is linked BEFORE the app's own
+ * stylesheets - confirmed by reading document.styleSheets order in the browser:
+ * custom.css, then Toaster/Confetti/Modal, then 0.*.css and 50.*.css. A bare
+ * `.font-primary` here therefore TIES Tailwind's utility on specificity and
+ * loses on source order. The extra element bumps this to (0,1,1) and wins
+ * outright - the same move #splash-screen further down already relies on. */
+body .font-primary {
+  font-family: var(--font-primary);
+}
+
 /* --- Chassis --------------------------------------------------------------
    body's colours are literal hex in the app's stylesheet, not ramp tokens, so
    they are the one pair that has to be restated. */
@@ -343,6 +363,50 @@ html.light body #splash-screen {
 
 html.dark body #splash-screen {
   background: var(--ohmz-canvas);
+}
+
+/* The splash is the first thing anyone sees, and it should be the sign-in
+   without the form — same bloom, same circular mark, in the same place — so the
+   handover from loading to signing in does not move anything.
+
+   The bloom is the gradient the sign-in uses, on its own inert layer. */
+#splash-screen {
+  position: relative;
+  isolation: isolate;
+}
+
+#splash-screen::before {
+  content: '';
+  position: absolute;
+  inset-inline: 0;
+  top: 0;
+  height: min(34rem, 55vh);
+  z-index: 0;
+  pointer-events: none;
+  background: radial-gradient(ellipse 40rem 20rem at 50% 12%, rgb(224 145 63 / 14%), transparent 70%);
+}
+
+html.light #splash-screen::before {
+  background: radial-gradient(ellipse 40rem 20rem at 50% 12%, rgb(168 99 29 / 18%), transparent 72%);
+}
+
+/* index.html builds this <img> in a pre-paint script and sets position, size
+   and `top: 44%` as INLINE style, so overriding it needs !important — there is
+   no stylesheet route to an inline rule.
+ *
+ * `calc(50% - 276px)` rather than a percentage: the sign-in card is 551px tall
+ * and vertically centred, so its logo sits at (100vh - 551) / 2, which is
+ * exactly 50vh - 275.5px. Reproducing that arithmetic keeps the two aligned at
+ * EVERY viewport height, which no single percentage can do. max() stops it
+ * going off the top on a short window.
+ *
+ * The artwork is a rounded square (splash*.png); clipping it to 50% gives the
+ * circle the sign-in badge has — the same trick, since that badge is a square
+ * PNG clipped round too. */
+#splash-screen #logo {
+  top: max(1rem, calc(50% - 276px)) !important;
+  border-radius: 50%;
+  z-index: 1;
 }
 
 /* --- Sign-in --------------------------------------------------------------
@@ -575,4 +639,27 @@ html.light #sidebar-new-chat-button {
 
 html.dark #sidebar-new-chat-button:hover {
   background: #35322d;
+}
+
+/* --- Mobile: no zoom ------------------------------------------------------
+   index.html already ships `maximum-scale=1`, which is what Android and
+   installed PWAs read, so pinch-zoom is pinned there. iOS Safari has ignored
+   maximum-scale and user-scalable since iOS 10 — pinch-zoom is always
+   available and no meta tag changes it.
+
+   What iOS does still do, and what actually reads as "the page zoomed on me",
+   is auto-zoom to a field that takes focus with a computed font-size below
+   16px. The font size is the only lever. OWUI's fields are Tailwind `text-sm`
+   (14px), so touch devices get 16px.
+
+   `pointer: coarse` rather than a width breakpoint: this is about touch input,
+   not screen size, and it leaves the 14px desktop geometry — shared with the
+   Ohmz HomeLab sign-in — untouched. */
+@media (pointer: coarse) {
+  input:not([type='checkbox']):not([type='radio']),
+  select,
+  textarea,
+  [contenteditable='true'] {
+    font-size: 16px;
+  }
 }
