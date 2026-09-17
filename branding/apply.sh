@@ -373,12 +373,19 @@ cat <<DONE
 Ohmz AI skin installed (v=$STAMP).
 
 The assets are fingerprinted, so no refresh is needed to pick them up. The
-exception is the HTML that carries the fingerprints: Open WebUI serves / with
-no cache-control, so a browser that loaded the app earlier may hold it under
-heuristic freshness (~10% of its age) and keep requesting the old URLs. One
-hard refresh (ctrl-shift-r / cmd-shift-r) clears that, once. After it, the
-shell's Last-Modified is recent, so browsers revalidate it almost every load
-and later skin changes propagate on their own.
+exception is the HTML that carries the fingerprints, and as of 2026-09-17 that
+is fixed at the server rather than left to chance: SPAStaticFiles now serves the
+shell with "Cache-Control: no-cache" (compose/openwebui/fork/gen/05_shell_cache.py),
+so browsers revalidate it every load for the price of a 304. Before that they
+fell back to heuristic freshness (~10% of the document's age) and could hold a
+stale shell for days — which is not just stale branding: a shell whose chunk
+hashes no longer exist leaves the app stuck on the splash screen until site data
+is cleared. One hard refresh (ctrl-shift-r / cmd-shift-r) is still needed ONCE,
+on any browser holding a pre-fix copy, because a header can only be learned from
+a request the browser has not yet decided to make.
+
+Run this after every rebuild of the fork image, not only after a static change:
+the image supplies main.py, and this script supplies the assets.
 
 The app name is handled by loader.js, which rewrites the "name" field of
 GET /api/config before the front-end reads it — so the sign-in heading, the

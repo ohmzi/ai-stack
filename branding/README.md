@@ -8,7 +8,7 @@ python3 branding/build_assets.py   # render the mark (only after editing it) —
                                    # overwrites assets/site.webmanifest; see "The mark"
 ./branding/apply.sh                # install into the running container
 ./branding/apply.sh --revert       # put the stock look back
-python3 tests/test_branding.py     # 43 checks; --restart adds the restart case
+python3 tests/test_branding.py     # 49 checks; --restart adds the restart case (98)
 ```
 
 There are **four** surfaces here, not one, and each needs a different lever —
@@ -51,12 +51,42 @@ Chrome's favicon store is the one layer a fingerprint reaches only on the *next*
 change: an icon it has already cached under a URL stays until that URL moves.
 That is fine as long as the stamp moves with the asset, which is the fix above.
 
-The one thing a fingerprint can't bust is the HTML carrying it. Open WebUI
-serves `/` with no `cache-control`, so browsers apply *heuristic* freshness —
-roughly 10% of the document's age. Against a shell whose `Last-Modified` was
-the image build date, that is days. Hence: **one** hard refresh after the first
-install. After that the shell's `Last-Modified` is recent, browsers revalidate
-it on almost every load, and later changes propagate on their own.
+The one thing a fingerprint can't bust is the HTML carrying it, and that is now
+handled on the server rather than hoped for. Open WebUI serves `/` with no
+`cache-control`, so browsers fall back to *heuristic* freshness — roughly 10% of
+the document's age — and against a shell whose `Last-Modified` was the image
+build date that is **days**.
+
+**Changed 2026-09-17.** Heuristic freshness on the shell was not merely slow, it
+was a hang: the shell boots by importing content-hashed entry chunks and calling
+`kit.start()`, which is what removes `#splash-screen`. A rebuild changes those
+filenames, so a browser reusing a stored shell asks for chunks that no longer
+exist, every import 404s, and the splash screen with the logo sits there forever
+— clearable only by wiping site data, which drops the auth token, which is why it
+presented as "stuck until I clear the cache and log in again".
+
+The shell (and every non-`.js` 404 fallback, so `/auth` and `/c/<id>` too) now
+carries `Cache-Control: no-cache`, and revalidates on every load. It costs a
+`304`, not a re-download — Starlette's etag/last-modified comparison was already
+there, it simply had nothing telling browsers to use it. `no-store` would have
+been wrong: it forbids storing the response, so nothing would ever be revalidated
+and every load would refetch the whole shell.
+
+Two files, two instances, because they run different images:
+
+| Instance | Lever |
+|---|---|
+| `ai.ohmz.cloud` (fork image) | `SPAStaticFiles` in `main.py` — `gen/05_shell_cache.py` → `shell-cache.patch` |
+| `aipublic.ohmz.cloud` (stock image) | nginx `map $upstream_http_content_type $shell_cc` — `compose/public/nginx/guest-gate.conf` |
+
+`tests/test_branding.py` asserts the header, the 304, and — just as important —
+that hashed chunks and `/static/*` are **still** cacheable, since forcing
+`no-cache` there would undo the edge caching the stack depends on.
+
+A client that already holds a pre-fix shell still needs **one** hard refresh: the
+header can only be learned from a request the browser has not yet decided to
+make. After that it revalidates on its own, and later changes propagate without
+anyone touching anything.
 
 `window.__ohmzLoader` is a sentinel for exactly this — it answers "did the
 browser actually run the current file?" in one lookup.
@@ -376,10 +406,23 @@ Why not a fork rebuild: `compose/openwebui/fork/` is the right tool when
 did not, and the script asserts every occurrence is accounted for — against
 which a rebuild is `npm ci && npm run build` plus a container recreate.
 
-`/_app/immutable/` sounds like it would fight this and does not: the build sends
-no `cache-control` there, only `etag` + `last-modified`, and Cloudflare reports
-`REVALIDATED`. Editing a chunk changes its etag and both layers pick it up. If
-upstream ever starts sending `immutable`, this has to rename the chunk instead.
+`/_app/immutable/` sounds like it would fight this and does not — but not for the
+reason this paragraph used to give. **Corrected 2026-09-17.** It claimed the build
+"sends no `cache-control` there, only `etag` + `last-modified`, and Cloudflare
+reports `REVALIDATED`". Measured: `cache-control: max-age=14400`,
+`cf-cache-status: HIT`, `age: 129`. The origin sends neither, so that header can
+only be Cloudflare's own Cache Rule, and the edge is caching these for four hours.
+
+That does not break this section, because editing a chunk in place changes its
+etag and a revalidation gets the new bytes — but it does mean **a chunk edit can
+take up to four hours to reach a browser**, and `i18n_brand.py` edits chunks in
+place while deliberately keeping their filenames. An edit that must be visible
+sooner needs the chunk renamed (which busts the URL) or the edge purged; the
+`?v=` stamp `apply.sh` writes does not reach this directory at all, and neither
+does the shell's `no-cache`, which covers the shell only.
+
+The original conclusion still holds for the case it was about: if upstream ever
+starts sending `immutable`, this has to rename the chunk instead.
 
 Scope was the owner's call (2026-08-04): **every** occurrence, including the ones
 naming the upstream project — version strings, Community links, the funding

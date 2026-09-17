@@ -20,3 +20,7 @@ proxy_set_header X-Ohmz-Guest-Groups "Guests";
 # omits an add_header whose value is empty, so a returning guest gets neither header re-sent.
 add_header Set-Cookie $mint_gid always;
 add_header Set-Cookie $mint_token always;
+
+# The SPA shell must be revalidated, never reused blind — the splash-screen hang, see $shell_cc in
+# guest-gate.conf. Empty for every non-HTML response, so /static/* and /_app/* keep their caching.
+add_header Cache-Control $shell_cc always;

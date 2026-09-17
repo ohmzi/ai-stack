@@ -22,12 +22,15 @@
 #   WEBUI_NAME           — env.py appends " (Open WebUI)" to any custom value; the branding
 #                          loader.js rewrites /api/config suffix-free instead.
 #
-# The image is a LOCAL FORK, not upstream: compose/openwebui/fork/ rebuilds only the frontend so
-# the chat input carries three mutually-exclusive mode buttons (Internet / Code / Task). The Python
-# backend and CUDA layers come straight from a digest-pinned upstream image and are untouched.
+# The image is a LOCAL FORK, not upstream: compose/openwebui/fork/ rebuilds the frontend for the
+# three mutually-exclusive mode buttons (Internet / Code / Task), and patches ONE backend file,
+# main.py, so the SPA shell is served with Cache-Control: no-cache (the splash-screen hang — see
+# fork/gen/05_shell_cache.py). The rest of the Python backend and the CUDA layers come straight from
+# a digest-pinned upstream image and are untouched.
 # Build it with:  docker build -t ai-stack/open-webui:task-mode compose/openwebui/fork/
 # To go back to stock, put the digest from that Dockerfile's FROM line here instead — the fork adds
-# nothing the backend depends on, so nothing else has to change.
+# nothing the backend DEPENDS on, so every pipe and filter keeps working. It is not free, though:
+# reverting also drops the shell's no-cache header and brings the splash-screen hang back.
 #
 # After a RECREATE or image pull: run branding/apply.sh (both static dirs live inside the image).
 # A plain restart no longer needs it — apply.sh writes /app/build/static too, so config.py's

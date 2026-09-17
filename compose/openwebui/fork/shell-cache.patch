@@ -1,0 +1,63 @@
+--- a/backend/open_webui/main.py
++++ b/backend/open_webui/main.py
+@@ -290,19 +290,58 @@
+ 
+ 
+ class SPAStaticFiles(StaticFiles):
++    # ai-stack: the one response whose staleness BRICKS the app.
++    #
++    # The shell boots by importing /_app/immutable/entry/{start,app}.<hash>.js and calling
++    # kit.start(), which is what removes #splash-screen. A rebuild changes those filenames, so a
++    # client reusing a stored shell requests chunks that no longer exist, the dynamic imports
++    # reject, kit.start() never runs, and the splash screen stays up forever. The only way out is
++    # clearing site data, which drops the auth token with it.
++    #
++    # Starlette sends no cache-control here, so browsers fall back to HEURISTIC freshness (~10% of
++    # the document's age, RFC 9111 4.2.2) and can reuse a stored shell for days without asking.
++    # `no-cache` — not `no-store` — is the fix: it forbids reuse without REVALIDATION while still
++    # allowing the response to be STORED, so the etag/last-modified comparison Starlette already
++    # implements answers with a 304 instead of resending the shell on every load.
++    #
++    # KEYED ON THE REQUEST, not on the response, and that is deliberate. Starlette's
++    # NotModifiedResponse whitelists only cache-control, content-location, date, etag, expires and
++    # vary, so a 304 carries NO content-type — a content-type guard would fire on the 200 and
++    # silently skip the 304. Because RFC 9111 4.3.4 keeps the stored headers a 304 does not
++    # mention, a client holding a pre-fix shell would then keep revalidating under its OLD
++    # heuristic policy and never converge, while an unconditional GET showed the header and looked
++    # correct.
++    #
++    # The path is relative to this mount and normalised, so a request for `/` arrives as '.' —
++    # NOT '' and NOT '/'. index.html is listed too because it is directly reachable.
++    SHELL_PATHS = frozenset({'.', 'index.html'})
++
+     async def get_response(self, path: str, scope):
++        shell = path in self.SHELL_PATHS
+         try:
+-            return await super().get_response(path, scope)
++            response = await super().get_response(path, scope)
+         except (HTTPException, StarletteHTTPException) as ex:
+             if ex.status_code == 404:
+                 if path.endswith('.js'):
+                     # Return 404 for javascript files
+                     raise ex
+                 else:
+-                    return await super().get_response('index.html', scope)
++                    response = await super().get_response('index.html', scope)
++                    # The fallback IS the shell: /auth, /c/<id> and every other non-.js 404 answer
++                    # with index.html, and each is a URL a browser may hold without ever having
++                    # asked for /. Flag it here rather than inferring it from the response.
++                    shell = True
+             else:
+                 raise ex
+ 
++        # `shell` covers the 200s and the 304s; the content-type test is a net under any other
++        # text/html entry point a future build may grow. Hashed chunks are text/javascript and are
++        # deliberately NOT touched: their filenames change on every build, which is exactly what
++        # makes them safe to cache hard, and Cloudflare already gives them max-age=14400.
++        if shell or response.headers.get('content-type', '').startswith('text/html'):
++            response.headers['Cache-Control'] = 'no-cache'
++        return response
++
+ 
+ class CORSStaticFiles(StaticFiles):
+     async def get_response(self, path: str, scope):

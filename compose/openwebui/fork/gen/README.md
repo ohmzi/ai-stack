@@ -54,7 +54,8 @@ docker exec open-webui cat /app/build/_app/immutable/chunks/<chunk>.js.map > mi.
 > **Extended 2026-09-17 (the 0.11.3 rebase).** A **fifth** file is now vendored:
 > `Placeholder.svelte` (`src/lib/components/chat/Placeholder.svelte`), patched by `02` — which
 > despite its name now makes edits in **three** files, not one. `grep '^--- ' ../task-mode.patch`
-> should list **five** files after `04` has run.
+> should list **five** files after `04` has run. (Still five after `05` was added on 2026-09-17 —
+> that one emits `shell-cache.patch`, a separate artifact. See "`05` is the odd one out" below.)
 >
 > Why it was needed: 0.11.3 factored the no-messages landing page out of `Chat.svelte` into
 > `Placeholder`, which renders its own `MessageInput` and declares its props explicitly (`export
@@ -78,6 +79,7 @@ python3 01_mode_buttons.py /tmp/p1.patch      # also writes MessageInput.patched
 python3 02_mode_persistence.py ../task-mode.patch
 python3 03_tasks_shortcut.py ../task-mode.patch --append
 python3 04_guest_link.py ../task-mode.patch --append
+python3 05_shell_cache.py ../shell-cache.patch    # a SECOND artifact — see below
 ```
 
 `01` adds the three exclusive mode buttons. `02` adds the `onModeChange` callback and the
@@ -85,6 +87,28 @@ chat-scoped mode memory, emitting the combined patch for those two files. `03` a
 sidebar shortcut to the background-tasks channel. `04` appends the sign-in page's three changes:
 the guest link, the brand wordmark span (`branding/ohmz.css` colours the "AI" amber off the back of
 it), and the logo moved from the fixed corner into the card.
+
+**`05` is the odd one out, and deliberately so.** It emits its own `shell-cache.patch` and is not
+part of `task-mode.patch`, because the two differ in three ways that all argue for separate
+artifacts:
+
+- **Different language, different file.** `05` patches `backend/open_webui/main.py` — one class,
+  `SPAStaticFiles`. The other four patch compiled Svelte sources.
+- **Different point in the build.** `01`-`04` must run before `npm run build`; the result REPLACES
+  `/app/build`. `05` edits a Python file that is never built and is LAYERED over the base image's
+  own copy. One patch file would imply a sequencing that does not exist.
+- **A count that other docs depend on.** `task-mode.patch` is documented here and in
+  `docs/STACK_SETUP.md` as touching exactly **five** files, and operators are told to check that
+  with `grep '^--- ' ../task-mode.patch`. Folding `main.py` in would make it six and quietly break
+  four statements that are used as a verification step. **`main.py` is intentionally not in it** —
+  do not "fix" that.
+
+It also means a conflict in a 4669-line `Chat.svelte` cannot block a one-hunk change to `main.py`,
+and a failed `git apply` names the artifact to re-derive.
+
+`05` takes the `"w"` form like `01`/`02` (it is the first writer of its own artifact, so there is
+no `--append`), and writes `main.py.new` as its byproduct — already covered by the `*.new` ignore
+above.
 
 Run on 2026-08-08 against a scratch copy of this directory, with the output paths pointed into that
 copy, the first three commands reproduced the committed `task-mode.patch` byte for byte: `diff`
@@ -107,8 +131,24 @@ As of the 0.11.3 rebase the run writes **six**, one per file `01`-`04` touches: 
 `Placeholder.svelte.new` (`02` now has four `EDITS` entries) and `auth+page.patched.svelte` (`04`,
 which the 2026-08-11 note predates).
 
-After an upstream bump, re-extract the three sources from the new image's sourcemaps, replace the
+After an upstream bump, re-extract the sources from the new image's sourcemaps, replace the
 vendored copies, and re-run. A hunk that no longer applies shows up as an assertion here, naming
 which anchor moved — but only for the copies you actually replaced. A source left stale satisfies
 its own assertions and defers the failure to `git apply` in the build, which is the trap the
 2026-08-08 correction above describes.
+
+**`main.py` is a vendored source too, and inherits that trap exactly** (added 2026-09-17). It is
+the largest file here at 3043 lines, and — being Python — it has no sourcemaps: re-extract it from
+git at the pinned revision, never by hand.
+
+```bash
+git show $OWUI_REV:backend/open_webui/main.py > main.py    # OWUI_REV from ../Dockerfile
+md5sum main.py        # must be 191d906bd0fcad8d892ea570a49cce96 at v0.11.3
+```
+
+Two guards watch it, and they watch different things. The `sha256sum` assertion in
+`../Dockerfile` catches `OWUI_REV` and the base digest describing *different revisions* — a
+mismatch `git apply` cannot see, because the anchors are identical across revisions and the patch
+applies cleanly to the wrong file. The `sub()` count assertions in `05_shell_cache.py` catch
+anchors that moved *within* a matching revision, but only when you regenerate. Neither runs if you
+bump one and forget the other.

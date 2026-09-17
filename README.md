@@ -9,9 +9,14 @@ a repeatable eval suite instead of vibes.
 and run on the stock Python backend, which is what keeps them portable. The **frontend** is a
 different story: this host runs a local fork, `ai-stack/open-webui:task-mode`, that adds three
 mutually-exclusive mode buttons (Internet / Code / Task) to the chat input and a Background-tasks
-shortcut to the sidebar. The backend and CUDA layers come straight from a digest-pinned upstream
-image and are untouched — the fork adds nothing the backend depends on — so pointing
-`compose/openwebui/run.sh` back at that digest costs those two UI affordances and nothing else.
+shortcut to the sidebar. The rest of the backend and the CUDA layers come straight from a
+digest-pinned upstream image and are untouched, so the fork adds nothing the backend depends on.
+Pointing `compose/openwebui/run.sh` back at that digest does **not** cost only those two UI
+affordances: the fork also carries `Cache-Control: no-cache` on the SPA shell, and reverting to the
+stock digest brings back the splash-screen hang — the app stuck at the logo until site data is
+cleared. `tests/test_branding.py` fails loudly on it rather than leaving you to rediscover why.
+(The one backend file the fork does carry is `main.py`, for exactly that header —
+`compose/openwebui/fork/gen/05_shell_cache.py`.)
 (This paragraph said "there is no fork and no source patch" until 2026-08-08, five days after the
 fork landed.)
 

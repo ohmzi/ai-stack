@@ -43,6 +43,7 @@ import os
 import re
 import subprocess
 import sys
+import urllib.error
 import urllib.parse
 import urllib.request
 
@@ -90,11 +91,39 @@ def fetch(path):
     return fetch_abs(f"/static/{path}")[0]
 
 
-def fetch_abs(path):
-    """Fetch an absolute site path. Returns (bytes, content-type) or (None, None)."""
+def fetch_abs_full(path):
+    """Fetch an absolute site path. Returns (bytes, headers) or (None, None).
+
+    The live HTTPMessage rather than a projected field, so .get() is case-insensitive and the
+    cache checks below can ask for a header other than content-type. fetch_abs keeps the narrower
+    contract its existing call sites were written against.
+    """
     try:
         with urllib.request.urlopen(f"{BASE}{path}", timeout=10) as r:
-            return r.read(), r.headers.get("content-type", "")
+            return r.read(), r.headers
+    except Exception:
+        return None, None
+
+
+def fetch_abs(path):
+    """Fetch an absolute site path. Returns (bytes, content-type) or (None, None)."""
+    body, hdrs = fetch_abs_full(path)
+    return (body, hdrs.get("content-type", "")) if hdrs is not None else (None, None)
+
+
+def fetch_conditional(path, headers):
+    """A conditional GET. Returns (status, headers) or (None, None).
+
+    304 is not 2xx, so urllib raises HTTPError and the response actually under test arrives as an
+    EXCEPTION — reading e.headers is the only way to see the headers on it. A bare urlopen would
+    report the shell as unreachable instead.
+    """
+    req = urllib.request.Request(f"{BASE}{path}", headers=headers)
+    try:
+        with urllib.request.urlopen(req, timeout=10) as r:
+            return r.status, r.headers
+    except urllib.error.HTTPError as e:
+        return e.code, e.headers
     except Exception:
         return None, None
 
@@ -217,6 +246,90 @@ def verify_shell(stage):
           f"got {ctype!r} — the catch-all is answering, so consumers of it get HTML")
 
 
+def verify_cache(stage):
+    """The shell must forbid reuse without revalidation — and nothing else may be forced to.
+
+    This is the splash-screen hang, reported 2026-09-17 as "stuck on a screen with the logo in the
+    middle, on my phone, until I clear the cache and log in again". The shell boots by importing
+    content-hashed entry chunks and calling kit.start(), which is what removes #splash-screen. A
+    rebuild changes those filenames, so a client that REUSES a stored shell asks for chunks that no
+    longer exist: every import 404s, kit.start() never runs, and the splash stays up forever. One
+    action fixes it, because clearing site data drops the auth token too.
+
+    The server's only lever is telling the browser to revalidate, which is why the header is
+    `no-cache` and not `no-store`: Starlette already implements the etag/last-modified comparison,
+    so the price is a 304 rather than resending the shell on every load. `no-store` would forbid
+    storing the response at all, so nothing would ever be revalidated — every load a full fetch.
+    """
+    body, hdrs = fetch_abs_full("/")
+    if hdrs is None:
+        check(f"{stage}: the shell is reachable", False)
+        return
+
+    cc = hdrs.get("cache-control", "")
+    check(f"{stage}: the shell forbids reuse without revalidation",
+          "no-cache" in cc.lower(),
+          f"cache-control is {cc!r} — browsers fall back to HEURISTIC freshness (~10% of the "
+          f"document's age) and can reuse a shell whose chunks no longer exist")
+
+    # THE 304 IS THE CASE THAT MATTERS, and the one a content-type-keyed guard silently skips:
+    # Starlette's NotModifiedResponse whitelists cache-control, content-location, date, etag,
+    # expires and vary — content-type is not among them. RFC 9111 4.3.4 keeps the stored headers a
+    # 304 does not mention, so a client that already holds a pre-fix shell would go on revalidating
+    # under its OLD heuristic policy and never converge, while an unconditional GET showed the
+    # header and looked entirely correct.
+    #
+    # Cloudflare strips `etag` from this response (measured), so a browser behind the edge
+    # revalidates with If-Modified-Since. Either validator is fine; whichever is offered is used.
+    validator = hdrs.get("etag") or hdrs.get("last-modified")
+    if not validator:
+        check(f"{stage}: the shell carries a validator to revalidate with", False,
+              "neither etag nor last-modified — nothing for a browser to revalidate against")
+    else:
+        key = "If-None-Match" if hdrs.get("etag") else "If-Modified-Since"
+        status, h304 = fetch_conditional("/", {key: validator})
+        check(f"{stage}: revalidating the shell is answered 304", status == 304,
+              f"got {status} with {key} — the shell would be re-sent in full on every load")
+        cc304 = (h304 or {}).get("cache-control", "")
+        check(f"{stage}: the 304 repeats no-cache", "no-cache" in cc304.lower(),
+              f"the 304's cache-control is {cc304!r} — a client that already has the bug would "
+              f"keep its old heuristic policy and never converge")
+
+    # /auth is what a bookmark or a home-screen shortcut holds, and it reaches the shell through
+    # the 404 fallback — a different branch from `/`. If that branch is not flagged as the shell,
+    # the URL most likely to be stored is the one left freely cacheable.
+    _, h_auth = fetch_abs_full("/auth")
+    cc_auth = (h_auth or {}).get("cache-control", "")
+    check(f"{stage}: the 404 fallback is the shell and says so", "no-cache" in cc_auth.lower(),
+          f"/auth carries {cc_auth!r}")
+
+    # THE NEGATIVE CASE. Content-hashed chunks are what BREAKS when cached too long, but they are
+    # also what is safest to cache hardest — their names change on every build, which is precisely
+    # why a stale shell 404s against them. Cloudflare gives /_app/immutable/* max-age=14400 from a
+    # Cache Rule and that is correct; forcing no-cache here would undo edge caching the stack
+    # depends on. Accept an absent header (origin) or a real max-age (edge); reject no-cache.
+    refs = re.findall(r"/_app/immutable/chunks/[A-Za-z0-9._-]+\.js",
+                      body.decode("utf-8", "replace"))
+    if refs:
+        _, h_chunk = fetch_abs_full(refs[0])
+        if h_chunk is None:
+            check(f"{stage}: the shell's chunks are reachable", False, f"{refs[0]} did not fetch")
+        else:
+            cc_chunk = h_chunk.get("cache-control", "").lower()
+            m = re.search(r"max-age=(\d+)", cc_chunk)
+            check(f"{stage}: hashed chunks are still cacheable",
+                  "no-cache" not in cc_chunk and "no-store" not in cc_chunk
+                  and (m is None or int(m.group(1)) >= 3600),
+                  f"{refs[0]} carries {cc_chunk!r} — the change reached past the SPA mount")
+
+    # /static is a PLAIN StaticFiles mount (main.py:2989), not SPAStaticFiles, so nothing this
+    # change does should be visible there at all.
+    _, h_static = fetch_abs_full("/static/loader.js")
+    cc_static = (h_static or {}).get("cache-control", "").lower()
+    check(f"{stage}: the /static mount is untouched", "no-cache" not in cc_static,
+          f"/static/loader.js carries {cc_static!r} — the change leaked off the SPA mount")
+
+
 def verify_copy(stage):
     """The UI copy that still said WebUI.
 
@@ -286,6 +399,9 @@ def main():
     print("--- the shell asks for what is actually there ---")
     verify_shell("live")
 
+    print("--- the shell revalidates instead of being reused blind ---")
+    verify_cache("live")
+
     print("--- the UI copy no longer says WebUI ---")
     verify_copy("live")
 
@@ -298,6 +414,10 @@ def main():
             subprocess.run(["sleep", "2"])
         verify("after restart")
         verify_shell("after restart")
+        # Not ceremony: the stale-bytecode risk is a STARTUP behaviour (a main.cpython-*.pyc left
+        # over from the unpatched file would restore the old SPAStaticFiles on the next boot), and
+        # the header has to survive a restart exactly like the skin does.
+        verify_cache("after restart")
         verify_copy("after restart")
 
     fails = results.count(False)

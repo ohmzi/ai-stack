@@ -10,9 +10,11 @@ loaded by the stock backend, which is what makes them portable to any instance. 
 plainly because **this host does run a fork** — the image is `ai-stack/open-webui:task-mode`, and
 `compose/openwebui/fork/` rebuilds the *frontend* so the chat input carries three mutually-exclusive
 mode buttons (Internet / Code / Task) and the sidebar gets a Background-tasks shortcut. The two facts
-are unrelated: the fork changes the browser, the pipes run on the untouched Python backend, and
-setting `compose/openwebui/run.sh` back to the digest-pinned upstream image leaves everything here
-working. The tag, the build, the upstream-bump rule and the rollback are in
+are unrelated: the fork changes the browser, the pipes run on the Python backend, and setting
+`compose/openwebui/run.sh` back to the digest-pinned upstream image leaves everything here working.
+(The fork does now carry **one** backend file, `main.py`, but for a header the browser acts on —
+`Cache-Control: no-cache` on the SPA shell — not for anything a pipe or filter calls. Reverting that
+too is not free: see the rollback row under [The frontend fork](#the-frontend-fork).) The tag, the build, the upstream-bump rule and the rollback are in
 [The frontend fork](#the-frontend-fork) below; how the patch is regenerated is in
 [../compose/openwebui/fork/gen/README.md](../compose/openwebui/fork/gen/README.md).
 
@@ -54,7 +56,8 @@ shared code is therefore copied onto OpenWebUI's data mount and reached with a g
 ## Requirements
 - OpenWebUI — this stack runs the **local fork image** `ai-stack/open-webui:task-mode`, built from
   [`../compose/openwebui/fork/`](../compose/openwebui/fork/), not the official image; the Python
-  backend and CUDA layers inside it are byte-identical digest-pinned upstream. With Ollama
+  backend and CUDA layers inside it are digest-pinned upstream, except for `main.py`, which the fork
+  patches for the SPA shell's cache header. With Ollama
   (`localhost:11434`) and ComfyUI (`localhost:8188`) reachable — the two endpoints
   `compose/openwebui/run.sh` (`OLLAMA_BASE_URL=http://127.0.0.1:11434`) and
   `compose/comfyui/run.sh` (`-p 127.0.0.1:8188:8188`) actually use.
@@ -131,20 +134,28 @@ Operator-critical, and until 2026-08-08 written down nowhere but code comments.
 | Image tag | `ai-stack/open-webui:task-mode` — what `compose/openwebui/run.sh` ends its `docker run` with |
 | Pinned to | Open WebUI **v0.11.3** (`OWUI_REV=2a960a59…`), base digest `sha256:f27666b8…` (`v0.11.3-cuda`). Bumped from 0.10.2 on 2026-09-17. |
 | Build | `docker build -t ai-stack/open-webui:task-mode compose/openwebui/fork/`, then `compose/openwebui/run.sh` (which already points at that tag) |
-| What is rebuilt | The frontend only. `compose/openwebui/fork/Dockerfile` clones open-webui at `OWUI_REV`, `git apply --verbose`s `task-mode.patch`, runs `npm ci && npm run build` in `node:22-alpine`, then COPYs `/src/build` onto a base pinned **by digest** rather than by the `cuda` tag. Backend, CUDA layers and every dependency stay byte-identical upstream — the patch cannot reach them. |
-| What it adds | Three mutually-exclusive mode buttons in the chat input (Internet / Code / Task), and a sidebar Background-tasks shortcut that resolves the delivery channel by name (`background-tasks`). The patch touches **five** upstream files (`MessageInput`, `Placeholder`, `Chat`, `Sidebar`, `auth/+page`) — see `gen/README.md`. |
-| Rollback to stock | Put the digest from that Dockerfile's `FROM` line into `run.sh` instead. The fork adds nothing the backend depends on, so nothing else has to change and every pipe and filter keeps working. |
+| What is rebuilt | The frontend, **plus exactly one backend file**. `compose/openwebui/fork/Dockerfile` clones open-webui at `OWUI_REV`, `git apply --verbose`s `task-mode.patch` and `shell-cache.patch`, runs `npm ci && npm run build` in `node:22-alpine`, then COPYs `/src/build` **and `backend/open_webui/main.py`** onto a base pinned **by digest** rather than by the `cuda` tag. The rest of the backend, the CUDA layers and every dependency stay byte-identical upstream. |
+| What it adds | Three mutually-exclusive mode buttons in the chat input (Internet / Code / Task), a sidebar Background-tasks shortcut that resolves the delivery channel by name (`background-tasks`), and `Cache-Control: no-cache` on the SPA shell (the splash-screen hang — see below). |
+| The two patches | `task-mode.patch` (**five** upstream files: `MessageInput`, `Placeholder`, `Chat`, `Sidebar`, `auth/+page`) is applied before the build and the result replaces `/app/build`. `shell-cache.patch` (one file, `backend/open_webui/main.py`) is layered over the base image's copy. They are separate artifacts on purpose — different concerns, applied at different points, and a conflict in one should name the artifact to re-derive. See `gen/05_shell_cache.py`. |
+| Rollback to stock | Put the digest from that Dockerfile's `FROM` line into `run.sh` instead. Every pipe and filter keeps working. **Read this before you do it:** the fork adds nothing the backend *depends* on, but it now supplies two UI affordances **and the shell's `no-cache` header**. Rolling back to the stock digest silently re-introduces the splash-screen hang — the app stuck at the logo until site data is cleared. `tests/test_branding.py` will report it as a failure rather than leaving you to rediscover it. |
 
-After an upstream bump, in this order (`compose/openwebui/fork/Dockerfile` is the source for all four):
+After an upstream bump, in this order (`compose/openwebui/fork/Dockerfile` is the source for all five):
 
 1. Move `OWUI_REV` and the base digest **together** — they must describe the same build, or the
-   frontend and the backend disagree.
-2. Rebuild. `git apply` runs with no fuzz and no 3-way, so it fails loudly on conflict; that failure
+   frontend and the backend disagree. Since `shell-cache.patch`, this is **enforced**: the build
+   compares the `main.py` it cloned against the one in the base image and fails with both hashes if
+   they differ. That check did not exist before, and could not have: `task-mode.patch` only rewrites
+   files the build replaces wholesale, so a mismatched digest was invisible.
+2. Re-extract `gen/main.py` from the new revision (`git show $OWUI_REV:backend/open_webui/main.py`,
+   never copy-paste — it is 4-space indented and one re-indented space breaks `git apply`) and
+   re-run `gen/05_shell_cache.py` alongside `01`-`04`.
+3. Rebuild. `git apply` runs with no fuzz and no 3-way, so it fails loudly on conflict; that failure
    is the signal to re-derive the patch, not something to force past. Regeneration procedure:
    [../compose/openwebui/fork/gen/README.md](../compose/openwebui/fork/gen/README.md).
-3. Re-run `branding/apply.sh` — the static assets live inside the image, as always.
-4. `python3 tests/test_deployed.py`, then confirm **by hand** that the three buttons still switch
-   each other off.
+4. Re-run `branding/apply.sh` — the static assets live inside the image, as always.
+5. `python3 tests/test_deployed.py` and `python3 tests/test_branding.py`, then confirm **by hand**
+   that the three buttons still switch each other off. `test_branding.py` is what catches a
+   `main.py` whose anchors moved in a way `git apply` happened to accept.
 
 **What the 0.11.3 bump actually cost (2026-09-17), as a calibration for the next one.** 0.10.2 →
 0.11.3 was a rebase, not a version bump: it rewrote the two components the patch leans on hardest
@@ -160,13 +171,21 @@ generators' anchors. All 6 were mechanical to re-derive. Two things were not:
   `index.html` with six unasserted `sed`s that exit 0 whether or not they substitute, so a moved
   anchor is silent. `tests/test_branding.py` is the only thing that sees it — run it per instance.
 
-Also worth knowing: **the backend needed nothing.** Every contract the pipes and filters depend on
-was checked against 0.11.3 and holds — `adaptive_memory`'s six internal imports, `deploy_pipe.py`'s
-preflight (`extract_frontmatter`/`replace_imports`), the `user`⋈`auth` join, `metadata.filter_ids`
-and `metadata.features`, the `__task__` kwarg, and the `#### Code Interpreter` prompt marker. The
-one marker that looked missing (`User Memories (`) is emitted by our own `filters/adaptive_memory.py`,
-not upstream, and was never at risk. Check these again next time, but the frontend is the expensive
-half.
+Also worth knowing: **the backend needed nothing _for that bump_.** Every contract the pipes and
+filters depend on was checked against 0.11.3 and holds — `adaptive_memory`'s six internal imports,
+`deploy_pipe.py`'s preflight (`extract_frontmatter`/`replace_imports`), the `user`⋈`auth` join,
+`metadata.filter_ids` and `metadata.features`, the `__task__` kwarg, and the `#### Code Interpreter`
+prompt marker. The one marker that looked missing (`User Memories (`) is emitted by our own
+`filters/adaptive_memory.py`, not upstream, and was never at risk. Check these again next time, but
+the frontend is still the expensive half.
+
+That framing has an expiry date, though. Since `shell-cache.patch` (2026-09-17) the fork carries one
+backend file, so "the backend needed nothing" is no longer true by construction — the next bump has
+to re-derive `gen/main.py` and `05_shell_cache.py` too, and `SPAStaticFiles` is a class upstream has
+reason to keep editing. The `sha256sum` assertion in the Dockerfile catches a `OWUI_REV`/digest
+mismatch; it cannot catch anchors that moved *within* a matching revision. That is what the
+`sub()` count assertions in `05_shell_cache.py` are for, and they run when you regenerate, not when
+you build.
 
 **Nothing tests the running image.** `tests/test_deployed.py` compares Function rows and the two
 sidecar copies against the repo; it makes no assertion about the image the container was created
