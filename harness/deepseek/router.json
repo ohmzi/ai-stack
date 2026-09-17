@@ -1,0 +1,47 @@
+{
+  "_comment": "Providers are matched in order; first whose `models` glob matches the request's model wins. Specific patterns MUST come before the \"*\" catch-all.",
+
+  "listen": {
+    "host": "127.0.0.1",
+    "port": 8788
+  },
+
+  "default_provider": "local",
+
+  "providers": [
+    {
+      "name": "deepseek",
+      "base_url": "https://api.deepseek.com/anthropic",
+      "auth": "passthrough",
+      "supports_count_tokens": true,
+      "models": [
+        "deepseek-flash*",
+        "deepseek-chat*",
+        "deepseek-reasoner*",
+        "deepseek*"
+      ]
+    },
+    {
+      "name": "local",
+      "base_url": "http://127.0.0.1:11434",
+      "auth": "dummy",
+      "supports_count_tokens": false,
+      "normalize_system": true,
+      "context_window": 131072,
+      "_output_reserve": "Claude Code asks for max_tokens=32000; the backend window covers prompt + completion, so reserve that much or a full prompt overflows.",
+      "output_reserve": 32768,
+      "inject": {
+        "thinking": { "type": "disabled" }
+      },
+      "models": [
+        "qwen38-coder:q4-128k",
+        "qwen38-coder:q4",
+        "qwen3.8:27b-q4_K_M",
+        "hermes-genesis:agent",
+        "gemma3:1b",
+        "gemma4:e2b",
+        "*"
+      ]
+    }
+  ]
+}

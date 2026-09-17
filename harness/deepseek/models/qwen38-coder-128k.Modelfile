@@ -1,0 +1,33 @@
+# qwen38-coder:q4-128k -- the coder tag at a context window Claude Code can use.
+#
+# Build with:
+#   ollama create qwen38-coder:q4-128k -f models/qwen38-coder-128k.Modelfile
+#
+# WHY THIS TAG EXISTS
+#
+# The stock `qwen38-coder:q4` carries `PARAMETER num_ctx 32768`. That is fine for
+# OpenCode, which sends a lean prompt, but it is unusable as a Claude Code backend:
+# Claude Code's baseline request -- system prompt plus every tool schema -- measures
+# roughly 25K tokens on its own, so a 32K window leaves almost nothing for the
+# actual conversation. The first real turn overflows and Ollama answers:
+#
+#   400 request (33142 tokens) exceeds the available context size (32768 tokens)
+#
+# MEASURED FOOTPRINT (RTX 3090, 24 GB, 2026-09-17)
+#
+#   ollama ps  -> 21 GB, 100% GPU, CONTEXT 131072
+#   nvidia-smi -> 21857 MiB resident
+#
+# The whole 128K window fits in VRAM with no CPU offload, so this costs accuracy
+# nothing and buys a window that is actually usable. The q8_0 KV cache
+# (OLLAMA_KV_CACHE_TYPE=q8_0) is why: it works out to roughly 40 KB per token, not
+# the ~128 KB an fp16 estimate would predict. 128K is therefore the comfortable
+# ceiling on a 24 GB card -- 256K would not fit and would start spilling.
+#
+# Only num_ctx is overridden. `FROM qwen38-coder:q4` inherits that tag's template
+# and sampling parameters (temperature 0.7, top_k 20, top_p 0.8, presence_penalty 1,
+# repeat_penalty 1), so the two tags answer with identical style and differ only in
+# how much they can hold.
+
+FROM qwen38-coder:q4
+PARAMETER num_ctx 131072

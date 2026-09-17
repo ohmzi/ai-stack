@@ -1,0 +1,136 @@
+#!/usr/bin/env bash
+#
+# deepseek -- launch Claude Code against a backend you can switch mid-session.
+#
+#   deepseek                    DeepSeek cloud API (default)
+#   deepseek --local            local Qwen 3.8 on the RTX 3090
+#   deepseek --model NAME       any routable model name
+#   deepseek --status           router health and backend reachability
+#   deepseek --routes [MODEL]   show which upstream a model resolves to
+#   deepseek --restart          bounce the router
+#
+# Anything else is handed straight to claude, e.g.
+#   deepseek --local -p "summarise this repo"
+#   deepseek --continue
+#
+# Inside a session, /model switches backend live: 'opus' is the cloud API,
+# 'sonnet' is the local Qwen, 'haiku' is a fast local model for background work.
+#
+set -euo pipefail
+
+CONF_DIR="${HOME}/.config/deepseek"
+ROUTER_PY="${CONF_DIR}/router.py"
+CONFIG="${CONF_DIR}/router.json"
+SECRETS="${CONF_DIR}/secrets.env"
+LOGFILE="${XDG_CACHE_HOME:-$HOME/.cache}/deepseek-router.log"
+UNIT="deepseek-router.service"
+
+CLOUD_MODEL="${DEEPSEEK_CLOUD_MODEL:-deepseek-flash[1m]}"
+LOCAL_MODEL="${DEEPSEEK_LOCAL_MODEL:-qwen38-coder:q4-128k}"
+FAST_MODEL="${DEEPSEEK_FAST_MODEL:-gemma3:1b}"
+
+die() { printf 'deepseek: %s\n' "$*" >&2; exit 1; }
+
+[[ -r "$CONFIG" ]] || die "missing $CONFIG"
+[[ -r "$ROUTER_PY" ]] || die "missing $ROUTER_PY"
+
+read -r ROUTER_HOST ROUTER_PORT < <(
+  jq -r '"\(.listen.host) \(.listen.port)"' "$CONFIG" 2>/dev/null \
+    || echo "127.0.0.1 8788"
+)
+BASE_URL="http://${ROUTER_HOST}:${ROUTER_PORT}"
+
+# A token is only needed for the cloud leg; the router passes it through verbatim.
+# Precedence: real env > secrets.env > whatever the ambient shell already exported.
+# shellcheck disable=SC1090
+[[ -r "$SECRETS" ]] && source "$SECRETS"
+AUTH_TOKEN="${DEEPSEEK_API_TOKEN:-${ANTHROPIC_AUTH_TOKEN:-}}"
+
+router_up() { curl -sf -o /dev/null --max-time 2 "${BASE_URL}/v1/models"; }
+
+start_router() {
+  if systemctl --user list-unit-files "$UNIT" >/dev/null 2>&1 \
+     && systemctl --user cat "$UNIT" >/dev/null 2>&1; then
+    systemctl --user start "$UNIT"
+  else
+    mkdir -p "$(dirname "$LOGFILE")"
+    nohup python3 "$ROUTER_PY" >>"$LOGFILE" 2>&1 &
+    disown || true
+  fi
+  for _ in $(seq 1 40); do router_up && return 0; sleep 0.25; done
+  die "router did not come up -- see ${LOGFILE} or: journalctl --user -u ${UNIT} -n 50"
+}
+
+ensure_router() { router_up || start_router; }
+
+show_status() {
+  if router_up; then
+    printf 'router      up   %s\n' "$BASE_URL"
+  else
+    printf 'router      DOWN %s\n' "$BASE_URL"
+  fi
+  printf 'cloud       %s  (auth: %s)\n' "$CLOUD_MODEL" \
+    "$([[ -n $AUTH_TOKEN ]] && echo present || echo MISSING)"
+  printf 'local       %s\n' "$LOCAL_MODEL"
+  printf 'fast        %s\n' "$FAST_MODEL"
+  printf '\n'
+  ensure_router
+  printf '%-28s %s\n' "MODEL" "UPSTREAM"
+  python3 "$ROUTER_PY" --route "$CLOUD_MODEL" "$LOCAL_MODEL" "$FAST_MODEL" \
+    "qwen3.8:27b-q4_K_M" "hermes-genesis:agent" 2>/dev/null || true
+}
+
+case "${1:-}" in
+  --status|-s) show_status; exit 0 ;;
+  --routes)    shift; exec python3 "$ROUTER_PY" --route "${@:-$CLOUD_MODEL}" ;;
+  --restart)
+    if systemctl --user cat "$UNIT" >/dev/null 2>&1; then
+      systemctl --user restart "$UNIT"
+    else
+      pkill -f "$ROUTER_PY" 2>/dev/null || true
+      sleep 0.5
+      start_router
+    fi
+    echo "router restarted on ${BASE_URL}"; exit 0 ;;
+  --help|-h) sed -n '3,19p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+esac
+
+MODEL="$CLOUD_MODEL"
+CLOUD_ONLY=0
+case "${1:-}" in
+  --local)   MODEL="$LOCAL_MODEL"; shift ;;
+  --cloud)   MODEL="$CLOUD_MODEL"; CLOUD_ONLY=1; shift ;;
+  --model)   [[ -n "${2:-}" ]] || die "--model needs a name"; MODEL="$2"; shift 2 ;;
+esac
+
+command -v claude >/dev/null 2>&1 || die "claude not found on PATH"
+ensure_router
+
+# A local backend needs two things spelled out that a cloud one doesn't: its real
+# context window (Claude Code otherwise assumes 200k and over-fills the request,
+# which a 32K model answers with an error) and no idle timeout (a 27B model can
+# pause for minutes between chunks while it loads into VRAM).
+# The context window is read ONCE, at launch, but /model can switch backends at any
+# time. So advertise the LOCAL window by default: it is the smaller of the two
+# backends' windows, which keeps a mid-session switch to a local model safe. Giving
+# the session a larger window than the backend actually has hands the local model a
+# prompt it answers with a hard 400 ("exceeds the available context size").
+#
+# `--cloud` opts out and lets the cloud model keep its full window -- do not switch
+# a --cloud session to a local model, or the next long turn will overflow.
+LOCAL_WINDOW="$(python3 "$ROUTER_PY" --window "$LOCAL_MODEL" 2>/dev/null)"
+if [[ "$CLOUD_ONLY" != "1" && -n "$LOCAL_WINDOW" ]]; then
+  export CLAUDE_CODE_MAX_CONTEXT_TOKENS="$LOCAL_WINDOW"
+  # A 27B model can pause for minutes between chunks while loading into VRAM.
+  export API_FORCE_IDLE_TIMEOUT=0
+fi
+
+# Override the ambient DeepSeek-cloud exports for this process only.
+export ANTHROPIC_BASE_URL="$BASE_URL"
+export ANTHROPIC_AUTH_TOKEN="${AUTH_TOKEN:-router-local}"
+export ANTHROPIC_MODEL="$MODEL"
+export ANTHROPIC_DEFAULT_OPUS_MODEL="$CLOUD_MODEL"
+export ANTHROPIC_DEFAULT_SONNET_MODEL="$LOCAL_MODEL"
+export ANTHROPIC_DEFAULT_HAIKU_MODEL="$FAST_MODEL"
+
+exec claude "$@"
