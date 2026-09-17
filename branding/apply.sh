@@ -70,6 +70,12 @@ INDEX=/app/build/index.html
 # the <link> tags. Stock ships favicon.png here (the "OI" mark) and no .ico at
 # all, so /favicon.ico falls through to the SPA catch-all and returns HTML.
 BUILD_ROOT=/app/build
+# The compiled SPA itself. Unlike index.html it is not a document the browser
+# re-reads and re-resolves — it is ~980 chunks that hardcode their own asset
+# URLs, so a stamp written into index.html does not reach the marks the SPA
+# draws. Explains the "tab is right, sidebar and sign-in are still stock"
+# symptom; see the fingerprinting step below.
+BUILD_APP=/app/build/_app/immutable
 
 # Quoted because the name contains a space — unquoted, `BRAND_NAME=Ohmz AI` is
 # parsed as "run the command AI with BRAND_NAME=Ohmz in its environment", which
@@ -259,6 +265,36 @@ echo "fingerprinting index.html + site.webmanifest (v=$STAMP)"
 docker exec "$CONTAINER" sh -c \
   "sed -i -E 's#/static/($FINGERPRINTED)(\?v=[A-Za-z0-9]+)?#/static/\1?v=$STAMP#g' \
      $INDEX $STATIC/site.webmanifest $BUILD_STATIC/site.webmanifest"
+
+# ...and the compiled chunks, which the line above does NOT reach. Added
+# 2026-09-17, after exactly the symptom that omission produces: the browser tab
+# showed the new mark while the SIDEBAR and the SIGN-IN page kept the stock one.
+#
+# Nothing about the SPA reads its icons from index.html. It hardcodes
+# '/static/favicon.png' into the bundle — 96 references: the sidebar mark, the
+# sign-in mark, the default avatar, the notification toast. Without the stamp
+# those URLs are byte-identical to the ones the browser cached back when the
+# file was stock, so Chrome served its own copy (its favicon/asset cache is
+# keyed by URL) and Cloudflare served its edge copy, and a hard refresh did not
+# help, because there was nothing for the refresh to notice.
+#
+# SvelteKit names chunks by content hash, so this edits a build artifact in
+# place and leaves its filename alone. Safe HERE and only here: nothing verifies
+# the hash (index.html carries no integrity= attribute — checked), the chunks
+# resolve each other by names this does not touch, and the same in-place edit is
+# already made to index.html eight lines up. The cost is that the on-disk hash
+# is no longer the content's hash, so treat /app/build/_app as apply.sh's output
+# rather than as the build's — which is already true of index.html.
+echo "fingerprinting the compiled chunks (v=$STAMP)"
+CHUNKS=$(docker exec "$CONTAINER" grep -rlE "/static/($FINGERPRINTED)" "$BUILD_APP" \
+           --include='*.js' 2>/dev/null || true)
+if [ -n "$CHUNKS" ]; then
+  printf '%s\n' "$CHUNKS" | docker exec -i "$CONTAINER" \
+    xargs -r sed -i -E "s#/static/($FINGERPRINTED)(\?v=[A-Za-z0-9]+)?#/static/\1?v=$STAMP#g"
+  echo "  $(printf '%s\n' "$CHUNKS" | grep -c .) chunk file(s) re-stamped"
+else
+  echo "  none — no chunk names a branded asset (unexpected; check FINGERPRINTED)"
+fi
 
 # The shell's own branding — see the header. Every one of these is idempotent:
 # each rewrites a value in place, and the apple-mobile-web-app-title tag is
