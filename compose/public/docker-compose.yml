@@ -78,6 +78,17 @@ services:
       # the auth page auto-redirects on load whenever features.auth_trusted_header is true.
       ENABLE_LOGIN_FORM: "false"
 
+      # --- The generated PWA manifest says "Open WebUI" unless pointed elsewhere ---------------
+      # /manifest.json is a BACKEND route, generated from app.state.WEBUI_NAME, which is left at
+      # its default. branding/apply.sh rewrites only the SHELL (to /static/site.webmanifest), so
+      # this route stayed stock: anything still asking for /manifest.json — a browser holding a
+      # pre-branding index.html, an installed PWA refreshing itself, a guest poking the path by
+      # hand — got the Open WebUI name and description. Set this and the route returns THIS
+      # document's JSON instead of generating one. Self-referential on purpose: :8080 is this
+      # container's own listen port (see the healthcheck above), so there is one manifest, not two
+      # to keep in sync.
+      EXTERNAL_PWA_MANIFEST_URL: http://127.0.0.1:8080/static/site.webmanifest
+
       # --- Backend: Ollama only, nothing else reachable -----------------------------------------
       # 172.16.240.1 is owui-public-ollama's socat pinhole (network_mode: host on the HOST side,
       # listening only on this bridge's gateway address) — not Ollama itself, which stays bound to

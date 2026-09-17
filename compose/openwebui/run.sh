@@ -69,6 +69,17 @@ docker run -d --name open-webui \
   `# Whisper: cut hallucinated transcription on silence, stop auto-detect guessing the language.` \
   -e WHISPER_VAD_FILTER=true \
   -e WHISPER_LANGUAGE=en \
+  `# /manifest.json is the BACKEND's own generated PWA manifest, and it is built from` \
+  `# app.state.WEBUI_NAME — which is left at its default here, deliberately (see the header). So it` \
+  `# kept saying "Open WebUI" with an Open WebUI description long after the skin landed, because` \
+  `# branding/apply.sh only rewrites the SHELL to point at /static/site.webmanifest. Anything that` \
+  `# still asks for /manifest.json — a browser holding a pre-branding index.html, an installed PWA` \
+  `# refreshing itself — got the old name and, before the skin, the old icon with it.` \
+  `# This env var is upstream's own hook for exactly that: set it, and the route returns THAT` \
+  `# document's JSON instead of generating one. Self-referential on purpose (the container is on` \
+  `# --network host, so 127.0.0.1:4567 is itself) — the alternative is a second copy of the manifest` \
+  `# to keep in sync, and two copies of one manifest is how they drift.` \
+  -e EXTERNAL_PWA_MANIFEST_URL=http://127.0.0.1:4567/static/site.webmanifest \
   ai-stack/open-webui:task-mode
 
 echo -n "waiting for open-webui"
