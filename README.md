@@ -427,6 +427,7 @@ Methodology and the current baseline: [docs/QA_TEST_PLAN.md](docs/QA_TEST_PLAN.m
 | [PUBLIC_INSTANCE.md](docs/PUBLIC_INSTANCE.md) | The no-login public instance: gate mechanism, isolation, bootstrap order |
 | [HERMES_AGENT.md](docs/HERMES_AGENT.md) | Standing jobs: what runs, why, how to undo it |
 | [MODELS.md](docs/MODELS.md) | Model roles, measured VRAM, the consolidation |
+| [CLAUDE_CODE.md](docs/CLAUDE_CODE.md) | Both ways Claude Code runs here, which model for which job, and the script inventory |
 | [harness/deepseek/README.md](harness/deepseek/README.md) | The `deepseek` harness: Claude Code on the local 128K coder or the DeepSeek cloud API, switchable mid-session |
 | [QA_TEST_PLAN.md](docs/QA_TEST_PLAN.md) | Methodology and baselines |
 | [TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md) | Failures seen in practice |

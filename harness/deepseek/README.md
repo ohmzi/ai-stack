@@ -1,5 +1,9 @@
 # The `deepseek` harness — one Claude Code session, several backends
 
+> This is the reference for the relay itself. For the wider picture — both ways Claude Code runs
+> on this box, which model to reach for and when, and the full script inventory — see
+> [docs/CLAUDE_CODE.md](../../docs/CLAUDE_CODE.md).
+
 ## 1. What this is
 
 Claude Code reads `ANTHROPIC_BASE_URL` **once, at launch**. There is no documented way to change
@@ -21,10 +25,11 @@ shims in §5. A body that does not parse as JSON is the one case forwarded as ra
 ```
 harness/deepseek/
   router.py                        the relay — Python stdlib only, no dependencies
-  router.json                      providers, glob routing rules, context sizing
+  router.json                      providers, glob routing rules, per-model context sizing
   deepseek                         the launcher wrapper (bash)
-  install.sh                       symlinks these into ~/.config/deepseek + ~/.local/bin
+  install.sh                       symlinks these into place, then verifies preconditions
   models/qwen38-coder-128k.Modelfile   the 128K-context build of the coder model
+  systemd/deepseek-router.service  optional: start the relay at login (install.sh --with-service)
 ```
 
 ## 2. Architecture
@@ -326,9 +331,25 @@ cd ai-stack/harness/deepseek
 ~/.local/bin/deepseek           -> harness/deepseek/deepseek
 ```
 
-`~/.config/deepseek` is created mode `700`. `--uninstall` removes the three symlinks and leaves
-`~/.config/deepseek` in place (so `secrets.env`, if you keep one there, survives). The router then
-starts on demand on the first `deepseek` run; verify with `deepseek --status`.
+The corollary is worth stating plainly: **editing these files, or switching branch, changes the
+live harness immediately.** There is no staging step and no copy to re-sync.
+
+`~/.config/deepseek` is created mode `700`. The router starts on demand on the first `deepseek`
+run; verify with `deepseek --status`.
+
+It then runs a precondition check rather than leaving you to discover problems at request time —
+`jq`, `ollama`, the `qwen38-coder:q4-128k` tag, and a token in the environment. Each check maps to
+a failure this harness actually produced, so a fresh machine reports what is missing at install
+time instead of 401-ing or 404-ing later.
+
+**`--with-service`** additionally installs and starts `systemd/deepseek-router.service`, so the
+relay comes up at login instead of on demand. Without the flag the unit is left alone. The unit is
+`PartOf=ollama.service` and ordered `After=` it, since the relay is useless without its local
+upstream.
+
+**`--uninstall`** stops and removes the unit, removes the three symlinks, and kills any on-demand
+relay. It leaves `~/.config/deepseek` in place (so `secrets.env`, if you keep one there, survives)
+and does not touch Ollama — `qwen38-coder:q4-128k` stays until you `ollama rm` it.
 
 ### The one manual prerequisite: the API key
 
@@ -340,10 +361,10 @@ this repo or into `router.json`. It belongs in the shell environment — this st
 The launcher resolves the token in this order: `DEEPSEEK_API_TOKEN`, then `ANTHROPIC_AUTH_TOKEN`,
 after sourcing `~/.config/deepseek/secrets.env` if that file exists. The `secrets.env` path is an
 alternative for people who prefer a file; note that it is **sourced after the environment is
-already exported**, so a variable set there wins over an ambient one of the same name — the
-comment above that code reads the precedence the other way round ("real env > secrets.env"). It
-matters only if both places set the *same* variable; on this host `secrets.env` does not exist and
-the token arrives from the shell. With no token at all the launcher still starts, exporting the
+already exported**, so a variable set there wins over an ambient one of the same name — the file
+beats the shell, the opposite of what "environment beats file" intuition suggests. It matters only
+if both places set the *same* variable; on this host `secrets.env` does not exist and the token
+arrives from `~/.bashrc`. With no token at all the launcher still starts, exporting the
 placeholder `router-local` — the local leg ignores credentials entirely, so a local-only session
 works without one, and only the cloud leg fails.
 
