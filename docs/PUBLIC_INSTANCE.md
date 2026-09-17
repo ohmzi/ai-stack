@@ -293,6 +293,18 @@ else ever reaches `:80`.
 5. Give it a system prompt (`POST /api/v1/models/model/update` — **must** re-include the same
    `access_grants` array from step 4, or `ModelForm`'s validator rejects the request outright with a
    500 for a missing required field — it is not optional-and-preserved).
+
+   Then set the model's **avatar** in the same meta. A fresh row has
+   `profile_image_url: null`, and the empty-chat hero's avatar *is* that value: the
+   route 302s to a hardcoded `/static/favicon.png` when it is unset, an asset URL
+   the browser caches and which no amount of fingerprinting can move — the symptom
+   is the stock Open WebUI mark in the middle of the hero, on every device, that a
+   reload does not clear. Store the mark as a `data:image/png;base64,…` URI instead
+   and the route serves it inline, with no cacheable URL in play at all. The exact
+   command, and why it is a data URI rather than a path, is in
+   [../branding/README.md](../branding/README.md) under "The model avatar".
+   **A re-bootstrap must not skip this** — it is the one branding surface that does
+   not come back from `apply.sh`.
 6. Put the `Guests` group id into `compose/public/.env` as `GUEST_GROUP_ID` (gitignored — per-install
    state, would be wrong on any other host), then `./compose/public/up.sh --force-recreate` so
    `DEFAULT_GROUP_ID` picks it up.

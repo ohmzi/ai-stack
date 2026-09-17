@@ -143,6 +143,66 @@ Re-run it only if you change the mark; `assets/` is committed.
 > all. Until one lands, run `git diff branding/assets/site.webmanifest` after every render
 > and put the file back if the render touched it.
 
+## The model avatar — the one mark apply.sh cannot fingerprint
+
+Added 2026-09-17, after this was reported three times as "the icon above the
+chatbox is still the stock one" while everything else had visibly updated.
+
+The empty-chat hero draws the selected model's avatar, and that image does **not**
+come from `/static/` directly. The markup asks for the API route:
+
+```
+<img src="/api/v1/models/model/profile/image?id=<model>&lang=en-US">
+```
+
+and `routers/models.py` answers with a **302 to a hardcoded path** whenever the
+model has no custom image — the redirect target is the literal `'/static/favicon.png'`
+(`models.py:719`, and again at `:689`; `utils/validate.py:28` lists the same three
+paths as the only relative ones it will accept). It is not read from config, and
+there is no env var for it.
+
+That is why fingerprinting never reached it. Every other mark is busted by
+rewriting the URL in the document or the bundle; here the URL is chosen by the
+**backend**, at request time, and the fork rebuilds only the frontend. `apply.sh`
+replaces the file at that path, so the *server* is correct — but the URL never
+changes, so every browser that cached it while it was stock keeps serving that
+copy. The 302's target also carries `max-age=14400`, so it self-clears in four
+hours, and returns on the next rebrand.
+
+**The fix: store the mark in the model's own metadata as a data URI.** The route
+serves a `data:image/...` value **inline** — no redirect, no separate URL, nothing
+to go stale, on any device, through any rebrand. It is also a value the validator
+explicitly allows (`PROFILE_IMAGE_MAX_DATA_URI_SIZE` is unset, so there is no cap;
+the mark is ~30 KB encoded). Applied to every model row whose
+`profile_image_url` was the stock path or null — four on the private instance,
+one on the public:
+
+```bash
+docker exec "$CONTAINER" python3 - <<'PY'
+import base64, sqlite3
+uri = 'data:image/png;base64,' + base64.b64encode(
+    open('/app/backend/open_webui/static/favicon.png', 'rb').read()).decode()
+db = sqlite3.connect('/app/backend/data/webui.db')
+n = db.execute("""
+    update model set meta = json_set(meta, '$.profile_image_url', ?)
+    where coalesce(json_extract(meta, '$.profile_image_url'), '/static/favicon.png')
+          in ('/static/favicon.png', '/favicon.png')
+""", (uri,)).rowcount
+db.commit()
+print(f'{n} model row(s) updated')
+PY
+```
+
+`json_set` touches only that one key, so `description` and `capabilities` — and on
+the public instance the `access_grant`-bearing meta — are left alone. No restart
+is needed: the route reads the row per request. **Re-run this after changing the
+mark**, or the hero keeps the previous one — it is a stored copy of the asset, so
+it does not follow `assets/` the way every other surface does.
+
+Not covered: a model row that does not exist (a raw Ollama tag that never had a
+row) still falls through to the hardcoded default. Every model in the picker on
+both instances has a row, so nothing reachable is affected today.
+
 ## Where this installs — TWO directories, and both are mandatory
 
 `main.py:2567` mounts `/static` from `STATIC_DIR`, which `env.py:240` resolves to
