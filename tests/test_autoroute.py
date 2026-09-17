@@ -27,6 +27,7 @@ mod = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(mod)
 
 CLASSIFIER_CALLS = []
+ROUTE_CALLS = []
 
 
 class FakeResp:
@@ -78,6 +79,10 @@ def make_pipe(classifier=None):
         return None
     p._tracked, p._finish, p._status = _tracked, _finish, _status
 
+    def _route_metric(route, tier, rule_id, text=None, **extra):
+        ROUTE_CALLS.append({"route": route, "tier": tier, "rule_id": rule_id, **extra})
+    p._route_metric = _route_metric
+
     if not LIVE:
         def _cls(text):
             CLASSIFIER_CALLS.append(text)
@@ -86,16 +91,24 @@ def make_pipe(classifier=None):
     return p
 
 
-async def route(query, pipe=None, images=None, model="auto_assistant.auto"):
-    """Returns 'MEDIA[...]' or the model name the chat path selected."""
+async def route(query, pipe=None, images=None, model="auto_assistant.auto", features=None):
+    """Returns 'MEDIA[...]' or the model name the chat path selected.
+
+    `features` mirrors OpenWebUI's client-side toggles (e.g. {"code_interpreter": True} for the
+    Code button), copied into metadata the same way main.py does before any filter runs.
+    """
     SENT.clear()
+    ROUTE_CALLS.clear()
     p = pipe or make_pipe()
     content = query
     if images:
         content = [{"type": "text", "text": query},
                    {"type": "image_url", "image_url": {"url": "data:image/png;base64,AAAA"}}]
     body = {"model": model, "messages": [{"role": "user", "content": content}]}
-    out = await p.pipe(body, __metadata__={"chat_id": "t", "user_prompt": query})
+    md = {"chat_id": "t", "user_prompt": query}
+    if features is not None:
+        md["features"] = features
+    out = await p.pipe(body, __metadata__=md)
     if isinstance(out, str):
         return out
     async for _ in out:
@@ -245,6 +258,45 @@ async def main():
     check("coder entry still coder_model",
           await route("what is the capital of Australia?", make_pipe(),
                       model="auto_assistant.coder"), CODER)
+
+    # --- 9. Code button: explicit signal, added with qwen38-coder:q4 (2026-08-17) --------------
+    # features['code_interpreter'] is metadata's copy of the client's structured claim (main.py
+    # copies form_data['features'] there before any filter runs) — a trustworthy, non-text signal,
+    # unlike the raw-marker approach tried and reverted (see _code_mode's docstring and cases J/L
+    # in test_router.py, which exist specifically to keep text-based signals out of routing).
+    check("code button + trivial question -> coder",
+          await route("what is the capital of Australia?", make_pipe(),
+                      features={"code_interpreter": True}), CODER)
+    results.append(("   ...tier 0, rule code_button", bool(ROUTE_CALLS) and
+                    ROUTE_CALLS[-1]["tier"] == 0 and ROUTE_CALLS[-1]["rule_id"] == "code_button",
+                    f"got {ROUTE_CALLS[-1] if ROUTE_CALLS else 'NO ROUTE CALL'}"))
+
+    check("code button + media request -> media still wins",
+          await route("make a picture of a cat", make_pipe(classifier=lambda t: True),
+                      features={"code_interpreter": True}), "MEDIA[Generating image]")
+
+    check("code button + attached image -> vision, not coder",
+          await route("what's in this picture?", make_pipe(),
+                      features={"code_interpreter": True}, images=True), VISION)
+
+    check("code button OFF (feature absent) -> ordinary chat routing",
+          await route("what is the capital of Australia?", make_pipe()), CHAT)
+
+    # Task claims the whole turn even when Code is also on — task_mode.py clears
+    # features['code_interpreter'] server-side whenever Task genuinely is, so in a real system the
+    # two are mutually exclusive; this pins that Task is still checked FIRST regardless.
+    p_task = make_pipe()
+
+    async def _task_wins(cid, text, msgs, user, src, ref=None):
+        return "TASK-WON"
+    p_task._task_mode_turn = _task_wins
+    SENT.clear()
+    out = await p_task.pipe(
+        {"model": "auto_assistant.auto",
+         "messages": [{"role": "user", "content": "what is the capital of Australia?"}]},
+        __metadata__={"chat_id": "t", "user_prompt": "what is the capital of Australia?",
+                      "task_mode": True, "features": {"code_interpreter": True}})
+    check("Task on + Code on -> Task wins", out, "TASK-WON")
 
     fails = 0
     for name, ok, detail in results:

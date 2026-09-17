@@ -1,7 +1,7 @@
 """
 title: Assistant (auto)
 author: local
-version: 0.6.0
+version: 0.7.0
 required_open_webui_version: 0.5.0
 description: One model that decides - chats (with vision), makes a RedCraft image (with follow-up edits that stay anchored to the previous picture), or a Wan video. Background-task calls never render; QA checks edits against the original ask and the original image. Non-blocking (async). Never uses the uncensored model.
 """
@@ -223,8 +223,9 @@ METRICS_PATH = os.environ.get("MEDIA_METRICS", "/app/backend/data/media_metrics.
 # 'without slicing' constraint". That is temperature, not capability. It also put a +/-2-3 case
 # noise floor on a 32-case suite, which made every other change unmeasurable.
 #
-# Split by route rather than by model tag: chat, code and vision all resolve to the SAME tag since
-# the 2026-07-26 consolidation, so the tag cannot discriminate. The coder guard can.
+# Split by route rather than by model tag: chat/vision stay on hermes-genesis:apex-compact, but
+# since 2026-08-17 the coder route has its OWN tag (qwen38-coder:q4) — the first time the tag
+# itself discriminates the route, rather than just the guard.
 # Per-request context sizing — see _fit_ctx. The floor is generous on purpose: --context-shift
 # means an under-sized window truncates SILENTLY rather than erroring, so the failure mode of
 # guessing low is a wrong answer, while guessing high is only wasted VRAM.
@@ -232,8 +233,27 @@ CTX_FLOOR = 16384          # never ask for less, whatever the arithmetic says
 CTX_MAX = 32768            # OLLAMA_CONTEXT_LENGTH; asking beyond it buys nothing
 CTX_HEADROOM = 2048        # room for the reply and the system guard
 
+# The coder route does NOT use _fit_ctx. Ollama keys a running model by tag + options, and
+# OpenCode (the other client of qwen38-coder:q4) sends no num_ctx of its own, so it inherits the
+# server's OLLAMA_CONTEXT_LENGTH=32768. If this pipe asked for a different num_ctx (which _fit_ctx
+# would do on most turns — usually 16384), Ollama would spin up a SECOND ~17 GB runner instead of
+# reusing the one OpenCode already loaded, and the two would evict each other on every alternation.
+# Measured empirically 2026-08-17: a request at num_ctx=16384 evicted a resident 32768-context
+# runner (and gemma3:1b alongside it) rather than reusing it. Fixed size, not a tuning knob.
+CODER_CTX = 32768
+# Thinking is a native Qwen3.8 capability and defaults ON even with non-thinking sampling params —
+# confirmed empirically: an unadorned request returns a populated `reasoning` field. Left off here
+# because _achat_stream only yields message.content (6516ish), so enabling it would just be a
+# silent multi-second stall before the visible reply, with the reasoning thrown away. Hoisted to a
+# constant, not inlined, so flipping it later is a one-line change — see the "think" key below.
+CODER_THINK = False
+
 CHAT_OPTIONS = {"temperature": 0.45, "top_p": 0.9}
-CODER_OPTIONS = {"temperature": 0.15, "top_p": 0.9, "top_k": 20, "repeat_penalty": 1.05}
+# Qwen3.8-27B published NON-THINKING profile (temp 0.7 / top_p 0.80 / top_k 20). presence_penalty
+# is deliberately BELOW Qwen's published 1.5: that figure is tuned for prose, and code legitimately
+# repeats identifiers and indentation. repeat_penalty drops to 1.0 so the two don't stack.
+CODER_OPTIONS = {"temperature": 0.7, "top_p": 0.8, "top_k": 20,
+                 "presence_penalty": 1.0, "repeat_penalty": 1.0}
 # The harness measures behaviour, not dice. With this set, both routes go fully greedy from a fixed
 # seed so a flipped case means the change flipped it. Mirrors the MEDIA_METRICS override above.
 EVAL_DETERMINISTIC = bool(os.environ.get("AA_EVAL_DETERMINISTIC"))
@@ -453,8 +473,10 @@ class Pipe:
         self.valves = self.Valves()
         self.comfy = "http://localhost:8188"
         self.ollama = "http://localhost:11434"
-        # ONE MODEL FOR EVERYTHING. Chat, code, vision and the uncensored prompt helpers all run on
-        # this single tenant — across every pipe on the box, not just this one.
+        # ONE MODEL FOR CHAT AND VISION (plus the uncensored prompt helpers other pipes on the box
+        # call through these same attributes). The coder route split off onto its own tag on
+        # 2026-08-17 — see self.coder_model below — this comment now covers chat_model/vision_model
+        # only.
         #
         # Why this tag rather than the stock Qwen3.6 it replaces: measured head-to-head
         # (tests/bench_models.py, see UPGRADE_ROADMAP.md §0), it matched stock Qwen on 27/27 executed
@@ -466,19 +488,30 @@ class Pipe:
         # ⚠️ Known caveat, recorded rather than hidden: the coding benchmark does not discriminate —
         # all candidates scored 27/27, so it shows no DETECTABLE regression, not equal quality. The
         # upstream author states this build is tuned for uncensored roleplay and that a different
-        # model is better for coding. Adopted on the user's explicit decision. If code quality feels
-        # worse, the rollback is in UPGRADE_ROADMAP.md §0.6.
+        # model is better for coding. That gap is exactly why the coder route no longer shares this
+        # tag — see self.coder_model. chat_model/vision_model stay here because the 5/5 vs 3/5
+        # prompt-enhancer compliance measurement is still the deciding factor for THIS role, and a
+        # dedicated coder model cannot substitute for it. If chat quality regresses independent of
+        # that, the rollback is in UPGRADE_ROADMAP.md §0.6.
         self.chat_model = "hermes-genesis:apex-compact"
         # Same tenant again — it ships its own F16 projector and passed the vision check in the
         # head-to-head. gemma4:31b, the old vision model, is gone: Ollama predicted 25.5 GiB for it
         # at 32k context, more than the card, so it evicted everything unconditionally on every
         # image turn.
         self.vision_model = "hermes-genesis:apex-compact"
-        # Same tenant a third time. Kept as a separate attribute rather than collapsed into one
-        # field because the coder ROUTE still differs — it gets its own guard prompt and holds
-        # _GEN_LOCK for the stream — and because splitting them again later should be a one-line
-        # change, not a refactor.
-        self.coder_model = "hermes-genesis:apex-compact"
+        # Split off chat/vision on 2026-08-17. This was the promised one-line change (see the old
+        # comment on chat_model): the coder route already had its own guard prompt and held
+        # _GEN_LOCK separately, so nothing about the ROUTE changed — only which tenant answers it.
+        # qwen38-coder:q4 is Qwen3.8-27B Q4_K_M (Ollama's official build, mmproj dropped — the coder
+        # route never receives images, see `not attached_img` at the dispatch site) wrapped with
+        # PARAMETER num_ctx 32768 (/home/ohmz/models/qwen38-coder/Modelfile) — that num_ctx MUST
+        # match CODER_CTX below, see the comment there. This tenant CANNOT co-reside with
+        # hermes-genesis (37.6 GB combined vs. 24 GB card), so every chat<->code alternation is a
+        # full swap — measured ~6-12 s each way on 2026-08-17, serialized under the existing
+        # _locked_stream/_GEN_LOCK so a swap can never land mid-render. gemma3:1b (the router
+        # classifier) DOES survive co-resident with this tenant — measured 18,957 MiB combined
+        # against the 24,115 MiB usable ceiling.
+        self.coder_model = "qwen38-coder:q4"
         # OpenWebUI's title/tag/query tasks are CONFIGURED to run on a small model, but the
         # server silently falls back to the chat's model (this pipe) whenever that id is
         # missing from the visible model registry — observed in media_metrics.jsonl as real
@@ -5433,6 +5466,27 @@ class Pipe:
             return None
         return "both" if (in_ids and stamped) else ("stamp" if stamped else "filter_ids")
 
+    # ---------- the Code control ----------
+    @staticmethod
+    def _code_mode(metadata):
+        """True when the Code control is genuinely on, else False.
+
+        Deliberately ONE signal, not an OR of two like _task_mode. features['code_interpreter'] is
+        the CLIENT's structured claim, copied into metadata before any filter runs (main.py:1616
+        puts form_data['features'] into metadata) — it is trustworthy the same way _task_mode's
+        filter_ids/stamp are: the server put it there, the user's message text cannot forge it.
+
+        A second signal — scanning the raw user text for the '#### Code Interpreter' marker OWUI
+        injects when the feature is on — was tried and REMOVED. Unlike Task mode, there is no
+        filter that stamps metadata to prove the injection genuinely happened; the marker is just a
+        substring of the message, exactly the class of signal _strip_injected_context/
+        _INJECTED_MARKERS exists to distrust for routing (test_router.py cases J/L pin this: text
+        that merely CONTAINS the marker string — pasted, quoted, coincidental — must not itself
+        select the coder). If OWUI ever exposes a trusted second signal for this control, add it
+        back; until then, one honest signal beats two where the second can be spoofed by content.
+        """
+        return bool((metadata or {}).get("features", {}).get("code_interpreter"))
+
     async def _task_mode_turn(self, cid, text, msgs, user, src, ref=None):
         """The whole turn, given that the user asked for the background-task agent.
 
@@ -6409,10 +6463,15 @@ class Pipe:
     def _fit_ctx(messages):
         """A per-request num_ctx sized to the conversation, rounded UP to a power-of-two step.
 
+        Chat/vision only since 2026-08-17 — the coder route sends a fixed CODER_CTX instead
+        (see _achat_stream) because Ollama keys a running model by tag+options, and OpenCode, the
+        coder tag's other client, always requests the server default. Varying num_ctx per turn on
+        a tag two different processes share would spin up a second runner instead of reusing one.
+
         OLLAMA_CONTEXT_LENGTH=32768 is allocated for every turn regardless of how short it is,
         and the KV cache is sized from it — so a two-line question reserves the same VRAM as a
         30k-token thread. Sizing per request hands that back on short turns, which is most of
-        them, at measured-zero throughput cost (the coder is flat 123-125 tok/s from 4k to 32k).
+        them, at measured-zero throughput cost on hermes-genesis (flat 123-125 tok/s from 4k to 32k).
 
         ROUND UP ONLY, and never below CTX_FLOOR. Ollama runs with --context-shift, so an
         under-sized window does not error — it silently evicts the front of the conversation, and
@@ -6488,6 +6547,14 @@ class Pipe:
             model = self.chat_model
             # dolphin is text-only — drop any stale image arrays from history so it never sees images[]
             messages = [{k: v for k, v in m.items() if k != "images"} for m in messages]
+        # The coder route bypasses _fit_ctx and gets a FIXED num_ctx instead. Ollama keys a running
+        # model by tag + options, and OpenCode — the other client of qwen38-coder:q4 — sends no
+        # num_ctx of its own and inherits the server's OLLAMA_CONTEXT_LENGTH=32768. If this pipe
+        # asked for whatever _fit_ctx computed (usually 16384), Ollama would spin up a SECOND
+        # runner rather than reuse OpenCode's, and the two would evict each other every turn —
+        # measured empirically 2026-08-17. Same `is`-identity test _sampling already uses, so there
+        # is exactly one way to recognise the coder route.
+        is_coder = guard_text is self._CODER_GUARD
         try:
             # sock_read (not a fixed total) catches an idle hang without killing a long, actively
             # streaming reply.
@@ -6495,9 +6562,11 @@ class Pipe:
             async with aiohttp.ClientSession(timeout=timeout) as s:
                 async with s.post(f"{self.ollama}/api/chat",
                                   json={"model": model, "messages": messages,
-                                        "stream": True, "think": False,
+                                        "stream": True,
+                                        "think": CODER_THINK if is_coder else False,
                                         "options": {**self._sampling(guard_text),
-                                                    "num_ctx": self._fit_ctx(messages)}}) as r:
+                                                    "num_ctx": CODER_CTX if is_coder
+                                                    else self._fit_ctx(messages)}}) as r:
                     if r.status != 200:
                         body = (await r.text())[:300]
                         yield f"⚠️ Ollama HTTP {r.status} from {model}: {body}"
@@ -6523,12 +6592,23 @@ class Pipe:
     # guard forbids emitting JSON, which would be actively harmful here — JSON is frequently the
     # correct answer to a coding question. It keeps the citation rule, because a coding turn can
     # still carry web-search or document context.
+    #
+    # ⚠️ Selected by object IDENTITY, not content — `guard_text is self._CODER_GUARD` in
+    # _sampling() and _achat_stream(), and tests/eval/run_eval.py identifies the coder route the
+    # same way on the wire. Edit the string's CONTENTS freely; never reassign this to a new object
+    # or duplicate it under another name, or every one of those checks silently stops matching.
+    # test_autoroute.py's route_of() also greps this text for "programming assistant" — kept intact
+    # below.
     _CODER_GUARD = (
         "You are an expert programming assistant. Prefer complete, runnable code over fragments, "
         "state the language and any assumptions, and point out real bugs or edge cases you notice. "
-        "Use fenced code blocks. Image and video generation are handled by the app, not by you. "
+        "Use fenced code blocks. Answer directly — do not narrate a plan before giving the code. "
+        "Image and video generation are handled by the app, not by you. "
         "When context from documents or a web search is provided, keep any [id] citation markers "
-        "exactly as given.")
+        "exactly as given.\n"
+        "If the app has given you a tag syntax to use — for example a <code_interpreter> block — "
+        "follow those instructions and emit the tag raw. Never wrap such a tag in a markdown code "
+        "fence; fenced tags are displayed as text instead of being executed.")
 
     # Retained for backwards compatibility only. The manifold collapsed to a single 'auto' entry, so
     # nothing selectable reaches this any more — but a chat saved against the old
@@ -6777,6 +6857,9 @@ class Pipe:
             # No user_prompt (direct API, older middleware): strip the fallback too, so a RAG-
             # wrapped turn still routes on the question rather than on the envelope.
             text = self._strip_injected_context(text).strip()
+        # Reads metadata only, not text — see _code_mode's docstring for why a text-based signal
+        # was tried and removed.
+        code_btn = self._code_mode(__metadata__)
         # OpenWebUI background tasks (title / follow-up / tags / web-search decisions) arrive
         # through this pipe whenever the configured task model isn't visible in the model
         # registry. Before this guard each one ran the FULL router — real 14-174 s GPU renders
@@ -7164,10 +7247,27 @@ class Pipe:
                 self._mark_bg(cid)
                 return self._hermes_stream(sent, handle, scoped=scoped,
                                            verify_creation=not (read_only or followup))
-        if not attached_img and not ref and await asyncio.to_thread(self._is_code_request, text):
-            code_rule = ("code_strong" if self._CODE_STRONG.search(text or "")
+        # `code_btn` (an explicit Code-button press) is checked here, alongside the regex/classifier
+        # guess, rather than hoisted up next to the Task control above. Task CLAIMS the whole turn —
+        # "draw a cat" with Task on must reach the agent, not the renderer. Code is only a
+        # model-selection hint, so it belongs at the same tier as the guess it's replacing: media
+        # still wins ("make a picture of a cat" with Code on renders, it doesn't route to the
+        # coder), and an attached image still goes to vision. Task above still wins over Code too,
+        # since task_mode.py clears features['code_interpreter'] whenever Task is genuinely on.
+        if not attached_img and not ref and (code_btn or
+                await asyncio.to_thread(self._is_code_request, text)):
+            code_rule = ("code_button" if code_btn
+                         else "code_strong" if self._CODE_STRONG.search(text or "")
                          else "code_classifier")
-            self._route_metric("coder", 1 if code_rule == "code_strong" else 3, code_rule, text)
+            self._route_metric("coder", 0 if code_btn else (1 if code_rule == "code_strong" else 3),
+                               code_rule, text, code_signal=code_btn)
+            # The coder tenant cannot co-reside with chat_model (37.6 GB combined vs. 24 GB card),
+            # so this is a full model swap under the lock below, not a cheap route change — measured
+            # ~6-12 s. _locked_stream's own status ticker only starts once the GPU LOCK is acquired,
+            # so a swap that is waiting on nothing but Ollama's own load has no ticker of its own;
+            # this is the only feedback the user gets during it.
+            if emitter:
+                await self._status(emitter, "Loading the coding model…", done=False)
             # emitter goes IN, so the wait ticks from inside _locked_stream's polling loop. Not
             # wrapped around it — wrapping one async generator in another breaks aclose()
             # propagation and would hold the GPU on a disconnect, which is the bug just fixed.

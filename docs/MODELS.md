@@ -3,18 +3,17 @@
 Single 24 GB RTX 3090. **Every number here is measured** (`nvidia-smi` delta on a clean idle
 baseline), not estimated — see the warning about `/api/ps` below.
 
-**As of 2026-08-01 the box runs FIVE models, one of which does almost everything.**
-(Was four until `hermes-genesis:agent` — the 65536-ctx tag hermes-agent needs — joined the
-roster on 2026-07-29. Same weights as `apex-compact`, ~0 extra disk, but a SEPARATE runner:
-Ollama keys runners by model+options, so the two cannot co-reside on this card.)
+**As of 2026-08-17 the box runs SIX models.** The coder role split off the shared tenant onto its
+own tag — see "The coder split (2026-08-17)" below for the full account.
 
 | Slot | Model | Real VRAM | tok/s | Role |
 |---|---|---|---|---|
-| **Everything** | `hermes-genesis:apex-compact` (MoE, ~3 B active of 34.7 B) | **18285 MiB** | **135.3** | Chat, code, vision, and the uncensored prompt helpers — across `auto_assistant`, `photoreal` and `image_krea`. |
+| **Chat + vision** | `hermes-genesis:apex-compact` (MoE, ~3 B active of 34.7 B) | **18285 MiB** | **135.3** | Chat and vision, and the uncensored prompt helpers — across `auto_assistant`, `photoreal` and `image_krea`. No longer the coder — see below. |
+| **Coder** | `qwen38-coder:q4` (Qwen3.8-27B dense Q4_K_M, official Ollama build, mmproj dropped) | **16881 MiB** @ 32K ctx | not benchmarked | The coder route in `auto_assistant.py` (`self.coder_model`), and the sole model OpenCode talks to. Cannot co-reside with the chat tenant — see below. |
 | **Task model** | `gemma3:1b` | **1313 MiB** | 235.4 | Chat titles, tags, RAG query generation. **Reverted from `gemma4:e2b` on 2026-08-01** — see "the phantom": e2b was measured EVICTING the 16.70 GiB tenant on every title generation. `gemma3:1b` co-resides (21298/24576 measured). |
 | **QA judge** | `gemma4:e2b` | 3307 MiB | 166.6 | Still the eval judge (cross-family control). Kept on disk; no longer in the request path. ⚠️ see "the phantom". |
-| **Router classifier** | `gemma3:1b` | **1313 MiB** | 235.4 | The HINT-tier chat-vs-code classifier in the pipe. Co-resides with the main tenant. |
-| **Embeddings** | `bge-m3:latest` | ~941 MiB, transient | — | RAG embeddings via the Ollama engine. 1024-dim, 8192-token window. |
+| **Router classifier** | `gemma3:1b` | **1313 MiB** | 235.4 | The HINT-tier chat-vs-code classifier in the pipe. Co-resides with BOTH the chat tenant and the coder — measured 18957 MiB with the coder, 2026-08-17. |
+| **Embeddings** | `bge-m3:latest` | ~941 MiB, transient (664 MiB observed resident) | — | RAG embeddings via the Ollama engine. 1024-dim, 8192-token window. Also OpenCode's `local_code_index` embedder since 2026-08-17 (was LM Studio's nomic-embed, 768-dim, dead backend). |
 | **Background agent** | `hermes-genesis:agent` | ~17 GB (**not measured here** — see note) | — | The tag `hermes-agent` runs cron jobs on. Same weights as `apex-compact` via `ollama create` + `PARAMETER num_ctx 65536`, so ~0 extra disk — but Ollama keys runners by model+options, making it a **separate ~17 GB runner** that cannot co-reside with the 32768-ctx chat tenant. A tick firing mid-conversation evicts chat and the next turn pays a cold reload, **measured at 22.7 s**. That is why the pipe releases the chat tenant before handing off, and why the GPU guard exists. Full account: [HERMES_AGENT.md](HERMES_AGENT.md). |
 
 > **The agent row is the one number on this page that is not an `nvidia-smi` delta.** It was missing
@@ -272,6 +271,78 @@ A cheaper variant worth trying first: point `chat_model` at the **coder** as wel
 vision would then be one tenant — 18372 MiB, zero eviction churn, 2.4× faster chat — but the
 Photoreal helper would still need an uncensored model, so dolphin could not be deleted outright.
 
+## The coder split (2026-08-17)
+
+The 2026-07-26 consolidation put chat/code/vision on one tenant with a documented caveat: the
+coding benchmark scored every candidate 27/27, showing *no detectable regression*, not equal
+quality — and the upstream author states the build is tuned for uncensored roleplay, not code.
+Qwen3.8-27B (weights 2026-08-14, Apache 2.0) shipped an official Ollama Q4_K_M build with native
+tool-calling and thinking, so the coder role split off onto its own tag. Chat/vision are
+unaffected — `hermes-genesis:apex-compact` still holds them, and still passes the Photoreal
+uncensored regression guard 5/5 (re-verified 2026-08-17).
+
+**Prerequisite: Ollama upgraded 0.32.1 → 0.32.14.** Qwen3.8 support landed in 0.32.12; 0.32.14
+additionally fixes non-leading system messages, which the coder route's guard + `keep_system`
+combination needs. The `multi-model.conf` drop-in and CDI GPU access on all three containers were
+confirmed intact after the required `daemon-reload`. One measured side effect: this version range
+also changed the `repeat_penalty` default from 1.1 to 1.0 for models that don't set it explicitly
+— `hermes-genesis`'s Modelfile is one of those (no `PARAMETER` overrides, by design), and a direct
+A/B (repeat_penalty 1.0 vs 1.1) confirmed the classifier drift below is NOT explained by this;
+the effective sampling shift on hermes-genesis itself was not otherwise probed.
+
+**The tag:** `qwen38-coder:q4`, built from the official `qwen3.8:27b-q4_K_M` with a
+single-`FROM` Modelfile (`/home/ohmz/models/qwen38-coder/Modelfile`) that drops the ~884 MiB vision
+projector — the coder route never receives images (`not attached_img` at the dispatch site) and
+neither does OpenCode — and pins `num_ctx 32768` plus Qwen's published non-thinking sampling
+(temp 0.7 / top_p 0.8 / top_k 20 / presence_penalty 1.0 / repeat_penalty 1.0).
+
+**Real VRAM, measured 2026-08-17:** 16881 MiB @ 32K context (baseline 763 → 17644 MiB with the
+coder alone resident) — well under the ~19288 MiB a uniform-attention estimate predicted. Ollama
+reports this model's architecture as `qwen35`: a **hybrid SSM/attention** design (65 layers, only
+every 4th does full attention; the rest are fixed-state Mamba-style layers), which needs far less
+KV cache than a dense transformer of the same size. `gemma3:1b` co-resides comfortably: 18957 MiB
+total with both loaded, against the 24115 MiB usable ceiling — about 5.2 GB of headroom, more than
+double what the pre-measurement estimate assumed.
+
+**The runner-key trap is real, not hypothetical — reproduced directly.** Ollama keys a running
+model by tag *and* options. OpenCode sends no `num_ctx` and inherits the server's
+`OLLAMA_CONTEXT_LENGTH=32768`; the pipe's `_fit_ctx` sizes per-turn and would ask for 16384 on most
+messages. A live test confirmed a request at `num_ctx=16384` evicted a resident 32768-context
+runner (**and `gemma3:1b` alongside it**) rather than reusing it. `auto_assistant.py`'s coder
+branch now sends a fixed `CODER_CTX = 32768` for exactly this reason — matching what OpenCode
+inherits is not optional.
+
+**The swap cost, measured 2026-08-17:** hermes→coder ~6.2 s, coder→hermes ~12.4 s (both faster
+than the 22.7 s baseline the `hermes-genesis:agent` row above cites — plausibly because the box's
+disk cache was warm from the model having just been pulled). They cannot co-reside
+(18285 + 16881 ≫ 22172, the co-resident ceiling), so every chat↔code alternation is a full swap,
+serialized under the existing `_locked_stream`/`_GEN_LOCK` so a swap can never land mid-render. The
+pipe now emits a "Loading the coding model…" status before the lock wait, since `_locked_stream`'s
+own ticker only starts once the lock is held — during the load itself the user previously saw
+nothing. `OLLAMA_KEEP_ALIVE` was left at `60s`; raising it would pin ~17 GB for the whole window
+and starve ComfyUI, so this is a real ongoing tradeoff, not a solved problem.
+
+**⚠️ A measured side effect on the HINT-tier classifier, unrelated to any of the above changes.**
+`gemma3:1b`'s response to one specific ambiguous test phrase ("my python keeps dying on me") now
+comes back CODE where `tests/test_autoroute.py --live` expects CHAT for at least one of its two
+identical calls. Confirmed NOT caused by the coder-route code changes (the classifier prompt/model/
+call path in `_classify_code` was not touched) and NOT the `repeat_penalty` default (tested both
+1.0 and 1.1 directly — identical CODE verdict either way). No pre-upgrade baseline exists to prove
+the Ollama version bump caused this rather than it having always been borderline, but the
+72-Ollama-release gap (0.32.1→0.32.14) is the only thing that changed in this path. **This now
+costs more than it used to**: a HINT-tier misclassification to CODER used to be free (same
+resident tag); it now triggers a real ~6-12 s swap. Worth watching via `route_metrics`
+(`job:route`, `rule_id:code_classifier`) rather than acting on a single test phrase — per
+`docs/ROUTING_ROADMAP.md`'s "earn a heuristic with data first" policy, retuning the classifier
+prompt needs its own broader validation, not a one-line reaction to this.
+
+**OpenCode**, previously configured against two dead backends (LM Studio never running; Lucebox's
+model directory gone), now points at this same Ollama tenant — one backend for the whole box. Its
+`local_code_index` MCP embeddings moved from LM Studio's dead nomic-embed endpoint to `bge-m3` via
+Ollama (also confirming the `LMSTUDIO_EMBEDDING_AUTOLOAD=0` guard actually prevents the 300 s hang
+the old fallback path risked — `bge-m3` was observed loaded and serving, not stuck). Full config in
+`~/.config/opencode/opencode.json` / `profile.env`; `validate-profile-sync.sh` passes.
+
 ## Rollback
 
 The 2026-07-26 consolidation deleted the models it replaced, so reverting means re-pulling. Costs are
@@ -286,6 +357,7 @@ download size, not just config.
 | **Task model → `gemma4:e2b`** | set `task.model.default` / `task.model.external` back, restart OpenWebUI. No download — it is still installed, and still carries `{"think": false}`. Note the visibility trap above: an id the registry cannot see is ignored in favour of the chat's model. |
 | **Image checkpoint → Krea 2 Turbo** | `self.unet` in `pipes/image_krea.py` and `unet_name` in `auto_assistant._build_t2i_wf`, then `python3 scripts/deploy_pipe.py --all`. The file was never deleted. |
 | **Re-create the main model** | The source GGUFs are kept at `/home/ohmz/models/hermes-genesis/` (18.3 GB) precisely so this does not need a re-download: `ollama create hermes-genesis:apex-compact -f Modelfile`. Worth keeping — the upstream repo's `:latest` tag resolves to **V3**, not the V5 build in use here, so a re-download would not reproduce it. |
+| **The coder split (2026-08-17)** | `ollama rm qwen38-coder:q4 qwen3.8:27b-q4_K_M` (frees ~18 GB); set `self.coder_model = "hermes-genesis:apex-compact"` in `pipes/auto_assistant.py` and `python3 scripts/deploy_pipe.py auto_assistant`, or `--rollback` for the whole pipe. Restore `opencode.json` from `~/.config/opencode/opencode.json.bak-pre-qwen38`. Ollama itself can go back to 0.32.1 with `OLLAMA_VERSION=0.32.1 curl -fsSL https://ollama.com/install.sh \| sh`, though nothing downstream requires it once the model is removed. |
 
 DB backups taken along the way: `webui.db.bak-genesis` (before the swap), `webui.db.bak-embedder`,
 `webui.db.bak-onepipe`, `webui.db.bak-autofull`.
