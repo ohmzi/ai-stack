@@ -27,6 +27,8 @@
 # LAN hosts. Pinning 172.16.240.0/24 sidesteps both.
 services:
   open-webui-public:
+    security_opt:
+      - no-new-privileges:true
     container_name: open-webui-public
     # Same digest the private instance's fork (compose/openwebui/fork/Dockerfile) builds its FROM
     # from — stock, unpatched. These two digests describe the same OWUI release and MUST move
@@ -211,6 +213,8 @@ services:
   # sets itself (unspoofable), so open-webui-public's trusted-header auth never shows a form. Full
   # config: compose/public/nginx/guest-gate.conf.
   owui-public-gate:
+    security_opt:
+      - no-new-privileges:true
     image: nginx:alpine
     container_name: owui-public-gate
     restart: unless-stopped
@@ -256,6 +260,8 @@ services:
   # Stock python image with the script mounted — no Dockerfile, because the service is stdlib-only
   # (http.server + sqlite3) and adding a build step would mean a rebuild for every one-line tweak.
   owui-public-quota:
+    security_opt:
+      - no-new-privileges:true
     image: python:3.12-alpine
     container_name: owui-public-quota
     restart: unless-stopped
@@ -296,6 +302,8 @@ services:
   # rejected because it would hand the public container ComfyUI (:8188, no auth) and the hermes
   # gateway (:8642) along with Ollama — see the isolation tests in tests/test_public_instance.py.
   owui-public-ollama:
+    security_opt:
+      - no-new-privileges:true
     image: alpine/socat
     container_name: owui-public-ollama
     restart: unless-stopped

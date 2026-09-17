@@ -17,6 +17,8 @@ services:
   # Document extraction. 0 VRAM. Bundles Tesseract (eng/fra/deu/ita/spa/jpn), which is what fixes
   # the .msg / .doc / legacy .ppt hard ingest errors.
   tika:
+    security_opt:
+      - no-new-privileges:true
     image: apache/tika:3.3.0.0-full
     container_name: tika
     restart: unless-stopped
@@ -33,6 +35,8 @@ services:
   # settings.yml MUST enable the json format — upstream ships [html] only and webapp.py returns 404
   # for format=json otherwise. That is the single most common SearXNG-with-OWUI failure.
   searxng:
+    security_opt:
+      - no-new-privileges:true
     # Pinned to a digest, not :latest. This is the stack's own search dependency — an upstream
     # push that changes the JSON shape or the engine roster degrades web search SILENTLY: the
     # assistant answers from training data and still looks grounded. Bump deliberately, and
@@ -92,6 +96,8 @@ services:
   # A settings.yml edit needs `up -d` (or `restart`) to be re-read; a change to THIS file needs
   # `up -d` so the container is recreated.
   searxng-hermes:
+    security_opt:
+      - no-new-privileges:true
     image: searxng/searxng@sha256:3bc6ae0e872ecd4b003e97e9cb58ec0fb56b02d46ad97ea67e2fa4ff2e8ff759
     container_name: searxng-hermes
     restart: unless-stopped
@@ -126,6 +132,8 @@ services:
   # Note the existing ebook2audiobook container bundles piper-tts/coqui-tts but is Gradio-only —
   # POST /v1/audio/speech returns 404 there, so it cannot serve OWUI without a shim.
   kokoro:
+    security_opt:
+      - no-new-privileges:true
     image: ghcr.io/remsky/kokoro-fastapi-cpu:v0.6.0
     container_name: kokoro
     restart: unless-stopped
@@ -156,6 +164,8 @@ services:
   # Infinity implements Cohere's schema, which is the shape OWUI expects — note HF TEI does NOT
   # (it returns a bare array rather than {results:[...]}) and is therefore incompatible.
   infinity-rerank:
+    security_opt:
+      - no-new-privileges:true
     image: michaelf34/infinity:0.0.77-cpu
     container_name: infinity-rerank
     restart: unless-stopped
