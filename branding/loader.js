@@ -1,5 +1,5 @@
 /* ============================================================================
-   Ohmz AI — app name override for Open WebUI 0.10.2
+   Ohmz AI — app name override for Open WebUI 0.11.3
    Installs as /app/backend/open_webui/static/loader.js, which index.html loads
    with `defer` in <head> (line 34) — before the SvelteKit entry (line 120), so
    this is in place before the app makes its first request.

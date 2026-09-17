@@ -34,7 +34,12 @@
 #   4. python3 tests/test_deployed.py, then confirm the three buttons still switch each other off.
 
 # The revision the pinned base image was built from. These two MUST move together.
-ARG OWUI_REV=ecd48e2f718220a6400ecf49eafd4867a38feb10
+#
+# v0.11.3 (2026-08-31). The jump from 0.10.2 is a REBASE, not a bump: 0.11 rewrote the composer
+# and the sidebar this patch edits (Chat.svelte +1608/-392, Sidebar.svelte substantially
+# rewritten), and added a fifth file to the patch — Placeholder.svelte, the landing-page composer
+# that 0.10.2 did not have. See fork/gen/README.md.
+ARG OWUI_REV=2a960a59fe1dbbd35282f0556b3666d81102e781
 
 FROM node:22-alpine AS webbuild
 ARG OWUI_REV
@@ -51,11 +56,16 @@ RUN git apply --verbose /tmp/task-mode.patch
 ENV APP_BUILD_HASH=${BUILD_HASH}
 RUN npm ci && npm run build
 
-# The manifest digest of ghcr.io/open-webui/open-webui:cuda as it was on 2026-08-03 — the same
-# image the unforked stack was running. Read it back with:
-#   docker inspect <image> --format '{{index .RepoDigests 0}}'
+# The manifest INDEX digest of ghcr.io/open-webui/open-webui:v0.11.3-cuda. Read it back with:
+#   docker buildx imagetools inspect ghcr.io/open-webui/open-webui:v0.11.3-cuda
+# — that prints the index digest on the `Digest:` line, which is the value to paste here.
 # (NOT `docker inspect <container> --format '{{.Image}}'`, which is the local config id and is not
-# resolvable from a registry.)
-FROM ghcr.io/open-webui/open-webui@sha256:d04b9ec1c9d5a6f8fb978158e5c7208d31beb2f9d1a27c58dd692dd8cee26f1a
+# resolvable from a registry. NOT the per-platform digest on the `Manifests:` lines either: those
+# pin one architecture, and an index digest is what keeps this build multi-arch like its base.)
+#
+# This SAME digest is the public instance's image — compose/public/docker-compose.yml. The two
+# must name one OWUI release, or the fork's frontend and the public backend disagree about API
+# shape. Move them together.
+FROM ghcr.io/open-webui/open-webui@sha256:f27666b889001e1d2c639ca4af527aad6e466bd1a1ac70cae5ce13dfe35ebae6
 # Everything else in the image is untouched.
 COPY --from=webbuild /src/build /app/build

@@ -129,9 +129,10 @@ Operator-critical, and until 2026-08-08 written down nowhere but code comments.
 | | |
 |---|---|
 | Image tag | `ai-stack/open-webui:task-mode` — what `compose/openwebui/run.sh` ends its `docker run` with |
+| Pinned to | Open WebUI **v0.11.3** (`OWUI_REV=2a960a59…`), base digest `sha256:f27666b8…` (`v0.11.3-cuda`). Bumped from 0.10.2 on 2026-09-17. |
 | Build | `docker build -t ai-stack/open-webui:task-mode compose/openwebui/fork/`, then `compose/openwebui/run.sh` (which already points at that tag) |
 | What is rebuilt | The frontend only. `compose/openwebui/fork/Dockerfile` clones open-webui at `OWUI_REV`, `git apply --verbose`s `task-mode.patch`, runs `npm ci && npm run build` in `node:22-alpine`, then COPYs `/src/build` onto a base pinned **by digest** rather than by the `cuda` tag. Backend, CUDA layers and every dependency stay byte-identical upstream — the patch cannot reach them. |
-| What it adds | Three mutually-exclusive mode buttons in the chat input (Internet / Code / Task), and a sidebar Background-tasks shortcut that resolves the delivery channel by name (`background-tasks`). |
+| What it adds | Three mutually-exclusive mode buttons in the chat input (Internet / Code / Task), and a sidebar Background-tasks shortcut that resolves the delivery channel by name (`background-tasks`). The patch touches **five** upstream files (`MessageInput`, `Placeholder`, `Chat`, `Sidebar`, `auth/+page`) — see `gen/README.md`. |
 | Rollback to stock | Put the digest from that Dockerfile's `FROM` line into `run.sh` instead. The fork adds nothing the backend depends on, so nothing else has to change and every pipe and filter keeps working. |
 
 After an upstream bump, in this order (`compose/openwebui/fork/Dockerfile` is the source for all four):
@@ -144,6 +145,28 @@ After an upstream bump, in this order (`compose/openwebui/fork/Dockerfile` is th
 3. Re-run `branding/apply.sh` — the static assets live inside the image, as always.
 4. `python3 tests/test_deployed.py`, then confirm **by hand** that the three buttons still switch
    each other off.
+
+**What the 0.11.3 bump actually cost (2026-09-17), as a calibration for the next one.** 0.10.2 →
+0.11.3 was a rebase, not a version bump: it rewrote the two components the patch leans on hardest
+(`Chat.svelte` +1608/−392, `Sidebar.svelte` substantially restructured) and broke 6 of the
+generators' anchors. All 6 were mechanical to re-derive. Two things were not:
+
+- **A new upstream component can need a new vendored file.** 0.11.3 factored the landing-page
+  composer into `Placeholder.svelte`, which renders its own `MessageInput` and declares props
+  explicitly. Svelte drops an undeclared prop *silently*, so `onModeChange` would have vanished
+  there — and the landing page is where a mode is picked before the chat has an id. `gen/02`'s
+  `_n == 3` assertion now guards the composer count. **Budget for the patch to grow a file.**
+- **The brand is a second, independent breakage surface.** `branding/apply.sh` patches
+  `index.html` with six unasserted `sed`s that exit 0 whether or not they substitute, so a moved
+  anchor is silent. `tests/test_branding.py` is the only thing that sees it — run it per instance.
+
+Also worth knowing: **the backend needed nothing.** Every contract the pipes and filters depend on
+was checked against 0.11.3 and holds — `adaptive_memory`'s six internal imports, `deploy_pipe.py`'s
+preflight (`extract_frontmatter`/`replace_imports`), the `user`⋈`auth` join, `metadata.filter_ids`
+and `metadata.features`, the `__task__` kwarg, and the `#### Code Interpreter` prompt marker. The
+one marker that looked missing (`User Memories (`) is emitted by our own `filters/adaptive_memory.py`,
+not upstream, and was never at risk. Check these again next time, but the frontend is the expensive
+half.
 
 **Nothing tests the running image.** `tests/test_deployed.py` compares Function rows and the two
 sidecar copies against the repo; it makes no assertion about the image the container was created

@@ -43,3 +43,17 @@ compose/ntfy/
 # findings.md ALONGSIDE them are the reviewable record and DO belong in git; the raw bodies are
 # working material, and the ones worth keeping get trimmed into tests/fixtures/flights/ by hand.
 docs/flight-recon/*/pages/
+
+# Fork patch-generator byproducts (compose/openwebui/fork/gen/README.md). Running 01-04 writes
+# the patched side of each `diff -u` beside the vendored source: `*.new` from 02 and 03,
+# `*.patched.svelte` from 01 and 04. `task-mode.patch` is the artifact; these are intermediates,
+# safe to delete, and nothing in the build reads them — `MessageInput.patched.svelte` is the one
+# exception, and only between 01 and 02, which run in the same sitting.
+#
+# These patterns are deliberately narrow. The VENDORED sources — MessageInput.svelte, Chat.svelte,
+# Sidebar.svelte, auth+page.svelte and (since 0.11.3) Placeholder.svelte — DO belong in git: they
+# are the known base a rebase starts from, and the whole reason gen/ exists. A `*.svelte` or
+# `Placeholder*` pattern here would silently untrack them and turn the next rebase into a
+# from-scratch derivation.
+*.new
+*.patched.svelte

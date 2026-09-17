@@ -13,6 +13,19 @@ docker exec open-webui cat /app/build/_app/immutable/chunks/<chunk>.js.map > mi.
 # then pull MessageInput.svelte / Chat.svelte / Sidebar.svelte out of sourcesContent
 ```
 
+> **Simpler, verified 2026-09-17.** You usually do not need the sourcemaps at all. The vendored
+> copies are byte-identical to upstream **git** at the `OWUI_REV` the image was built from, so the
+> tag itself is an equally good source and needs no running container:
+>
+> ```bash
+> git clone --filter=blob:none --no-checkout https://github.com/open-webui/open-webui.git
+> cd open-webui && git show v0.11.3:src/lib/components/chat/Chat.svelte > Chat.svelte
+> ```
+>
+> Measured before the 0.11.3 rebase: all four then-vendored files matched `git show $OWUI_REV:<path>`
+> by md5. If a future bump ever disagrees, the sourcemap route above is the tiebreaker — it is what
+> the image actually built.
+
 > **Corrected 2026-08-08.** That comment read `MessageInput.svelte / IntegrationsMenu.svelte /
 > Chat.svelte` until today, which named the wrong third file. `IntegrationsMenu.svelte` is not
 > vendored here and is never patched: `grep '^--- ' ../task-mode.patch` lists exactly three files
@@ -38,9 +51,27 @@ docker exec open-webui cat /app/build/_app/immutable/chunks/<chunk>.js.map > mi.
 > from before, so it is the easiest of the four to forget to re-extract after an upstream bump.
 > `grep '^--- ' ../task-mode.patch` should list four files after `04` has run.
 
-They expect the upstream `MessageInput.svelte`, `Chat.svelte`, `Sidebar.svelte` and
-`auth+page.svelte` beside them (vendored here so a rebase starts from a known base), and run in
-order:
+> **Extended 2026-09-17 (the 0.11.3 rebase).** A **fifth** file is now vendored:
+> `Placeholder.svelte` (`src/lib/components/chat/Placeholder.svelte`), patched by `02` — which
+> despite its name now makes edits in **three** files, not one. `grep '^--- ' ../task-mode.patch`
+> should list **five** files after `04` has run.
+>
+> Why it was needed: 0.11.3 factored the no-messages landing page out of `Chat.svelte` into
+> `Placeholder`, which renders its own `MessageInput` and declares its props explicitly (`export
+> let`, no `$$restProps`). Svelte drops an undeclared prop **silently**, so the `onModeChange`
+> callback that `02` wires into every composer host would have reached the landing-page composer
+> and gone nowhere — and the landing page is exactly where a mode gets picked before the chat has
+> an id, the case `MODE_KEY(null)` / `MODE_HANDOFF_MS` exist to serve. The symptom would have been
+> a Task mode chosen on the landing page that quietly reverted on the first message.
+>
+> `02`'s `_n == 3` assertion is the guard: it counts the composer hosts that carry
+> `onWebSearchToggle={handleWebSearchToggle}` and fails the build if upstream adds a fourth, so a
+> new composer cannot ship unwired. The 0.10.2 patch asserted `_n == 2` (two `MessageInput`
+> instances, no `Placeholder`).
+
+They expect the upstream `MessageInput.svelte`, `Placeholder.svelte`, `Chat.svelte`,
+`Sidebar.svelte` and `auth+page.svelte` beside them (vendored here so a rebase starts from a known
+base), and run in order:
 
 ```bash
 python3 01_mode_buttons.py /tmp/p1.patch      # also writes MessageInput.patched.svelte, which 02 reads
@@ -66,11 +97,15 @@ used to name on its own: `MessageInput.patched.svelte` (from `01`, and the input
 `Sidebar.svelte.new` (from `03`). Each is only the patched side of a `diff -u`; `task-mode.patch` is
 the artifact, so all four are safe to delete once `03` has finished, and nothing in the build reads
 them. `MessageInput.patched.svelte` has to survive between `01` and `02`, which loads it by name.
-None of the four is ignored: `git check-ignore -v` exits 1 for all of them and `.gitignore` has no
-`*.new` or `*.patched.svelte` entry (both measured 2026-08-08), so regenerating the patch leaves
-four untracked files in `git status` — easy to mistake for vendored sources someone forgot to
-commit. Adding those two patterns to `.gitignore` is the fix; it is not done — `.gitignore` was
-still unchanged when this note was written.
+**Fixed 2026-09-17.** None of them was ignored, so regenerating the patch left them sitting in
+`git status` looking exactly like vendored sources someone forgot to commit. `.gitignore` now
+carries `*.new` and `*.patched.svelte`. Both patterns are deliberately narrow — they do not match
+any vendored source, including `Placeholder.svelte`, which is the one file here whose name a
+looser pattern (`Placeholder*`, `*.svelte`) would have quietly untracked.
+
+As of the 0.11.3 rebase the run writes **six**, one per file `01`-`04` touches: the four above plus
+`Placeholder.svelte.new` (`02` now has four `EDITS` entries) and `auth+page.patched.svelte` (`04`,
+which the 2026-08-11 note predates).
 
 After an upstream bump, re-extract the three sources from the new image's sourcemaps, replace the
 vendored copies, and re-run. A hunk that no longer applies shows up as an assertion here, naming

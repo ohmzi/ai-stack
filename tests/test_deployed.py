@@ -124,12 +124,19 @@ def readme_roster():
 
 
 def picker_name(db, fid, content, is_active):
-    """What OpenWebUI 0.10.2 actually shows in the model picker for this function.
+    """What OpenWebUI actually shows in the model picker for this function.
 
     For a manifold pipe the label comes from the pipe's own `pipes()` return
-    (`functions.py:104`), and an active `model` row overrides it (`utils/models.py:152`).
-    The `function.name` column never reaches the picker, so comparing against it would pass
-    while the UI said something else. Returns None for anything not selectable.
+    (`functions.get_function_models`), and an active `model` row overrides it
+    (`utils.models.get_all_models`). The `function.name` column never reaches the picker, so
+    comparing against it would pass while the UI said something else. Returns None for anything
+    not selectable.
+
+    Citations name the owning FUNCTION, not a line number. They used to be line numbers, and the
+    0.10.2 -> 0.11.3 bump moved every one of them (`functions.py:104` is now the
+    `sub_pipe_name = p['name']` assignment; `utils/models.py:152` is now the
+    `model['name'] = custom_model.name` override). The behaviour was re-verified intact against
+    0.11.3 — but the line numbers were not worth re-chasing, because they rot again next bump.
     """
     if not is_active:
         return None

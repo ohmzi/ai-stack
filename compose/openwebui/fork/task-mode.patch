@@ -1,6 +1,6 @@
 --- a/src/lib/components/chat/MessageInput.svelte
 +++ b/src/lib/components/chat/MessageInput.svelte
-@@ -110,6 +110,9 @@
+@@ -127,6 +127,9 @@
  	export let onUpload: Function = (e) => {};
  	export let onChange: Function = () => {};
  	export let onWebSearchToggle: Function = () => {};
@@ -10,7 +10,7 @@
  
  	export let createMessagePair: Function;
  	export let stopResponse: Function;
-@@ -565,6 +568,51 @@
+@@ -825,6 +828,51 @@
  		codeInterpreterEnabled = false;
  	}
  
@@ -60,9 +60,9 @@
 +		'shrink-0 px-2 py-[5px] flex gap-1.5 items-center text-xs rounded-full transition-colors duration-300 focus:outline-hidden';
 +
  	// Clear selected terminal when model doesn't support terminal
- 	$: if ($selectedTerminalId && terminalCapableModels.length === 0) {
+ 	$: if ($selectedTerminalId && selectedModelIds.length > 0 && terminalCapableModels.length === 0) {
  		selectedTerminalId.set(null);
-@@ -1754,13 +1802,78 @@
+@@ -2257,13 +2305,78 @@
  									{/if}
  
  									<div class="flex flex-1 items-center min-w-0 overflow-x-auto scrollbar-none">
@@ -145,7 +145,7 @@
  												bind:selectedToolIds
  												bind:selectedSkillIds
  												bind:selectedFilterIds
-@@ -1862,7 +1975,7 @@
+@@ -2370,7 +2483,7 @@
  
  											{#each selectedFilterIds as filterId (filterId)}
  												{@const filter = toggleFilters.find((f) => f.id === filterId)}
@@ -154,38 +154,58 @@
  													<Tooltip content={filter?.name} placement="top">
  														<button
  															on:click|preventDefault={() => {
-@@ -1920,7 +2033,7 @@
+@@ -2428,7 +2541,7 @@
  												{/if}
  											{/each}
  
--											{#if webSearchEnabled}
+-											{#if webSearchEnabled && showWebSearchButton}
 +											{#if webSearchEnabled && !showWebSearchButton}
  												<Tooltip content={$i18n.t('Web Search')} placement="top">
  													<button
  														on:click|preventDefault={() => (webSearchEnabled = !webSearchEnabled)}
-@@ -1956,7 +2069,7 @@
+@@ -2464,7 +2577,7 @@
  												</Tooltip>
  											{/if}
  
--											{#if codeInterpreterEnabled}
+-											{#if codeInterpreterEnabled && showCodeInterpreterButton}
 +											{#if codeInterpreterEnabled && !showCodeInterpreterButton}
  												<Tooltip content={$i18n.t('Code Interpreter')} placement="top">
  													<button
  														aria-label={codeInterpreterEnabled
+--- a/src/lib/components/chat/Placeholder.svelte
++++ b/src/lib/components/chat/Placeholder.svelte
+@@ -63,6 +63,9 @@
+ 	export let onSelect = (e) => {};
+ 	export let onChange = (e) => {};
+ 	export let onWebSearchToggle: Function = () => {};
++	// ai-stack: forwarded straight through to MessageInput so a mode chosen on the landing page
++	// is remembered exactly like one chosen in the chat composer.
++	export let onModeChange: Function = () => {};
+ 	export let messageQueue: { id: string; prompt: string; files: any[] }[] = [];
+ 	export let onQueueSendNow: (id: string) => void = () => {};
+ 	export let onQueueEdit: (id: string) => void = () => {};
+@@ -261,6 +264,7 @@
+ 						{onQueueEdit}
+ 						{onQueueDelete}
+ 						{askUser}
++						{onModeChange}
+ 						{onWebSearchToggle}
+ 						on:chatVariables
+ 						on:submit={(e) => {
 --- a/src/lib/components/chat/Chat.svelte
 +++ b/src/lib/components/chat/Chat.svelte
-@@ -303,7 +303,9 @@
- 						codeInterpreterEnabled = input.codeInterpreterEnabled;
- 					}
- 				} catch (e) {}
--			} else {
-+			} else if (!restoreMode(chatIdProp)) {
+@@ -845,7 +845,9 @@
+ 				await processNextInQueue(chatIdProp);
+ 			}
+ 
+-			if (!(await restoreChatInput(storageChatInput))) {
++			if (!(await restoreChatInput(storageChatInput)) && !restoreMode(chatIdProp)) {
 +				// ai-stack: only fall back to the model's defaults when this chat has no mode of
 +				// its own. Otherwise sending a message would silently reset it.
  				await setDefaults();
  			}
  
-@@ -992,6 +994,11 @@
+@@ -1584,6 +1586,11 @@
  
  		const init = async () => {
  			if (!chatIdProp) {
@@ -197,19 +217,19 @@
  				loading = false;
  				await tick();
  			}
-@@ -1022,6 +1029,10 @@
- 						codeInterpreterEnabled = input.codeInterpreterEnabled;
- 					}
- 				} catch (e) {}
+@@ -1601,6 +1608,10 @@
+ 				codeInterpreterEnabled = false;
+ 
+ 				await restoreChatInput(storageChatInput);
 +			} else if (chatIdProp) {
 +				// ai-stack: opening a saved chat with no unsent draft — keep the mode it was left
 +				// in rather than resetting to the model's defaults.
 +				restoreMode(chatIdProp);
  			}
  
- 			const chatInput = document.getElementById('chat-input');
-@@ -2998,6 +3009,71 @@
- 		}
+ 			messageInput?.focus({ preventScroll: true });
+@@ -4054,6 +4065,71 @@
+ 		initiateOAuthRedirect(tool);
  	};
  
 +	// --- ai-stack: the selected mode belongs to the CHAT, not to the draft ------------------
@@ -280,25 +300,33 @@
  	const clearDraft = async (chatId: string | null = null) => {
  		if (saveDraftTimeout) {
  			clearTimeout(saveDraftTimeout);
-@@ -3352,6 +3428,7 @@
+@@ -4468,6 +4544,7 @@
  											}
  										}}
  										onWebSearchToggle={handleWebSearchToggle}
 +										onModeChange={() => saveMode(chatIdProp)}
- 										on:submit={async (e) => {
- 											clearDraft($chatId);
- 											if (e.detail || files.length > 0) {
-@@ -3394,6 +3471,7 @@
- 									{onSelect}
- 									{onUpload}
+ 										on:chatVariables={() => {
+ 											showChatVariablesModal = true;
+ 										}}
+@@ -4560,6 +4637,7 @@
+ 											}
+ 										}}
+ 										onWebSearchToggle={handleWebSearchToggle}
++										onModeChange={() => saveMode(chatIdProp)}
+ 										on:chatVariables={() => {
+ 											showChatVariablesModal = true;
+ 										}}
+@@ -4606,6 +4684,7 @@
+ 									onQueueEdit={editQueuedMessage}
+ 									onQueueDelete={deleteQueuedMessage}
  									onWebSearchToggle={handleWebSearchToggle}
 +										onModeChange={() => saveMode(chatIdProp)}
- 									onChange={(data) => {
- 										if (!$temporaryChatEnabled) {
- 											saveDraft(data);
+ 									on:chatVariables={() => {
+ 										showChatVariablesModal = true;
+ 									}}
 --- a/src/lib/components/layout/Sidebar.svelte
 +++ b/src/lib/components/layout/Sidebar.svelte
-@@ -118,6 +118,14 @@
+@@ -154,6 +154,14 @@
  
  	$: pinnedItems = $settings?.pinnedMenuItems ?? DEFAULT_PINNED_ITEMS;
  
@@ -313,47 +341,50 @@
  	const isMenuItemVisible = (id) => {
  		switch (id) {
  			case 'notes':
-@@ -1227,6 +1235,40 @@
- 							{/if}
- 						{/each}
- 					</div>
+@@ -1295,6 +1303,43 @@
+ 								{/if}
+ 							{/each}
+ 						</div>
 +
-+					<!-- ai-stack: alerts and run logs live in a channel; this is the way in -->
-+					{#if tasksChannel && $config?.features?.enable_channels && ($user?.role === 'admin' || ($user?.permissions?.features?.channels ?? true))}
-+						<div class="px-[0.4375rem] flex justify-center text-gray-800 dark:text-gray-200">
-+							<a
-+								id="sidebar-background-tasks-button"
-+								class="grow flex items-center space-x-3 rounded-2xl px-2.5 py-2 hover:bg-gray-100 dark:hover:bg-gray-900 transition"
-+								href="/channels/{tasksChannel.id}"
-+								on:click={itemClickHandler}
-+								draggable="false"
-+								aria-label={$i18n.t('Background tasks')}
-+							>
-+								<div class="self-center">
-+									<svg
-+										xmlns="http://www.w3.org/2000/svg"
-+										fill="none"
-+										viewBox="0 0 24 24"
-+										stroke-width="2"
-+										stroke="currentColor"
-+										class="size-4.5"
-+									>
-+										<path
-+											stroke-linecap="round"
-+											stroke-linejoin="round"
-+											d="M14.857 17.082a23.848 23.848 0 0 0 5.454-1.31A8.967 8.967 0 0 1 18 9.75V9A6 6 0 0 0 6 9v.75a8.967 8.967 0 0 1-2.312 6.022c1.733.64 3.56 1.085 5.455 1.31m5.714 0a24.255 24.255 0 0 1-5.714 0m5.714 0a3 3 0 1 1-5.714 0"
-+										/>
-+									</svg>
-+								</div>
-+								<div class="self-center text-sm font-primary">
-+									{$i18n.t('Background tasks')}
-+								</div>
-+							</a>
-+						</div>
-+					{/if}
- 				</div>
++						<!-- ai-stack: alerts and run logs live in a channel; this is the way in -->
++						{#if tasksChannel && $config?.features?.enable_channels && ($user?.role === 'admin' || ($user?.permissions?.features?.channels ?? true))}
++							<div class="px-1 flex justify-center text-gray-700 dark:text-gray-300">
++								<a
++									id="sidebar-background-tasks-button"
++									class="group grow flex items-center space-x-2 rounded-xl px-2 py-1.5 hover:bg-gray-100 dark:hover:bg-gray-900 transition outline-none"
++									href="/channels/{tasksChannel.id}"
++									on:click={itemClickHandler}
++									draggable="false"
++									aria-label={$i18n.t('Background tasks')}
++								>
++									<div class="self-center flex size-4 shrink-0 items-center justify-center">
++										<svg
++											xmlns="http://www.w3.org/2000/svg"
++											fill="none"
++											viewBox="0 0 24 24"
++											stroke-width="1.5"
++											stroke="currentColor"
++											class="size-4"
++										>
++											<path
++												stroke-linecap="round"
++												stroke-linejoin="round"
++												d="M14.857 17.082a23.848 23.848 0 0 0 5.454-1.31A8.967 8.967 0 0 1 18 9.75V9A6 6 0 0 0 6 9v.75a8.967 8.967 0 0 1-2.312 6.022c1.733.64 3.56 1.085 5.455 1.31m5.714 0a24.255 24.255 0 0 1-5.714 0m5.714 0a3 3 0 1 1-5.714 0"
++											/>
++										</svg>
++									</div>
++
++									<div class="flex flex-1 self-center translate-y-[0.5px]">
++										<div class=" self-center text-[0.8125rem] leading-5">
++											{$i18n.t('Background tasks')}
++										</div>
++									</div>
++								</a>
++							</div>
++						{/if}
+ 					</div>
  
- 				{#if ($models ?? []).length > 0 && (($settings?.pinnedModels ?? []).length > 0 || $config?.default_pinned_models)}
+ 					{#if $visiblePinnedModels.length > 0}
 --- a/src/routes/auth/+page.svelte
 +++ b/src/routes/auth/+page.svelte
 @@ -33,6 +33,21 @@
@@ -378,18 +409,18 @@
  	let form = null;
  
  	let name = '';
-@@ -257,7 +272,7 @@
+@@ -249,7 +264,7 @@
  				{:else}
  					<div class="my-auto flex flex-col justify-center items-center">
  						<div id="auth-login-card" class=" sm:max-w-md my-auto pb-10 w-full dark:text-gray-100">
 -							{#if $config?.metadata?.auth_logo_position === 'center'}
 +							{#if ($config?.metadata?.auth_logo_position ?? 'center') === 'center'}
  								<div class="flex justify-center mb-6">
- 									<img
- 										id="logo"
-@@ -278,13 +293,17 @@
+ 									<!-- LICENSE covers this Open WebUI sign-in logo.
+ 									Do not alter, remove, obscure, or replace it except as LICENSE permits:
+@@ -273,13 +288,17 @@
  								<div class="mb-1">
- 									<div class=" text-2xl font-medium">
+ 									<div class=" text-2xl font-normal">
  										{#if $config?.onboarding ?? false}
 -											{$i18n.t(`Get started with {{WEBUI_NAME}}`, { WEBUI_NAME: $WEBUI_NAME })}
 +											{@const p = ohmzBrandSplit(`Get started with {{WEBUI_NAME}}`)}
@@ -409,7 +440,7 @@
  										{/if}
  									</div>
  
-@@ -437,6 +456,27 @@
+@@ -448,6 +467,27 @@
  								</div>
  							</form>
  
@@ -437,7 +468,7 @@
  							{#if Object.keys($config?.oauth?.providers ?? {}).length > 0}
  								<div class="inline-flex items-center justify-center w-full">
  									<hr class="w-32 h-px my-4 border-0 dark:bg-gray-100/10 bg-gray-700/10" />
-@@ -607,7 +647,7 @@
+@@ -618,7 +658,7 @@
  			</div>
  		</div>
  

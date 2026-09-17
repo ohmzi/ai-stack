@@ -43,50 +43,65 @@ sub(
 
 # Rendered immediately after the pinned nav group, so it sits with the other "go somewhere" links
 # rather than among the chat rooms.
+#
+# RE-DERIVED for 0.11.3, and this hunk needed more than a moved anchor. Upstream restructured the
+# nav group: the pinned items moved into a `#pinned-menu-items-list` wrapper, the models guard
+# became `$visiblePinnedModels.length > 0` (it was an inline `($models ?? []).length > 0 && ...`),
+# and every sibling row was restyled — rounded-2xl -> rounded-xl, space-x-3 -> space-x-2,
+# py-2 -> py-1.5, icons at size-4 with stroke-width 1.5 rather than size-4.5 at 2.
+#
+# So the markup below is not the 0.10.2 markup re-indented: it is that markup restated in the
+# sidebar's new idiom, which is what keeps it looking native instead of conspicuously larger and
+# misaligned next to New Chat / Search / Notes. The load-bearing parts are unchanged — the
+# `sidebar-background-tasks-button` id (branding/ohmz.css may target it), the name-resolved
+# channel href, and the aria-label.
 old_close = """{/each}
-					</div>
-				</div>
+\t\t\t\t\t\t</div>
+\t\t\t\t\t</div>
 
-				{#if ($models ?? []).length > 0 && (($settings?.pinnedModels ?? []).length > 0 || $c"""
+\t\t\t\t\t{#if $visiblePinnedModels.length > 0"""
 new_close = """{/each}
-					</div>
+\t\t\t\t\t\t</div>
 
-					<!-- ai-stack: alerts and run logs live in a channel; this is the way in -->
-					{#if tasksChannel && $config?.features?.enable_channels && ($user?.role === 'admin' || ($user?.permissions?.features?.channels ?? true))}
-						<div class="px-[0.4375rem] flex justify-center text-gray-800 dark:text-gray-200">
-							<a
-								id="sidebar-background-tasks-button"
-								class="grow flex items-center space-x-3 rounded-2xl px-2.5 py-2 hover:bg-gray-100 dark:hover:bg-gray-900 transition"
-								href="/channels/{tasksChannel.id}"
-								on:click={itemClickHandler}
-								draggable="false"
-								aria-label={$i18n.t('Background tasks')}
-							>
-								<div class="self-center">
-									<svg
-										xmlns="http://www.w3.org/2000/svg"
-										fill="none"
-										viewBox="0 0 24 24"
-										stroke-width="2"
-										stroke="currentColor"
-										class="size-4.5"
-									>
-										<path
-											stroke-linecap="round"
-											stroke-linejoin="round"
-											d="M14.857 17.082a23.848 23.848 0 0 0 5.454-1.31A8.967 8.967 0 0 1 18 9.75V9A6 6 0 0 0 6 9v.75a8.967 8.967 0 0 1-2.312 6.022c1.733.64 3.56 1.085 5.455 1.31m5.714 0a24.255 24.255 0 0 1-5.714 0m5.714 0a3 3 0 1 1-5.714 0"
-										/>
-									</svg>
-								</div>
-								<div class="self-center text-sm font-primary">
-									{$i18n.t('Background tasks')}
-								</div>
-							</a>
-						</div>
-					{/if}
-				</div>
+\t\t\t\t\t\t<!-- ai-stack: alerts and run logs live in a channel; this is the way in -->
+\t\t\t\t\t\t{#if tasksChannel && $config?.features?.enable_channels && ($user?.role === 'admin' || ($user?.permissions?.features?.channels ?? true))}
+\t\t\t\t\t\t\t<div class="px-1 flex justify-center text-gray-700 dark:text-gray-300">
+\t\t\t\t\t\t\t\t<a
+\t\t\t\t\t\t\t\t\tid="sidebar-background-tasks-button"
+\t\t\t\t\t\t\t\t\tclass="group grow flex items-center space-x-2 rounded-xl px-2 py-1.5 hover:bg-gray-100 dark:hover:bg-gray-900 transition outline-none"
+\t\t\t\t\t\t\t\t\thref="/channels/{tasksChannel.id}"
+\t\t\t\t\t\t\t\t\ton:click={itemClickHandler}
+\t\t\t\t\t\t\t\t\tdraggable="false"
+\t\t\t\t\t\t\t\t\taria-label={$i18n.t('Background tasks')}
+\t\t\t\t\t\t\t\t>
+\t\t\t\t\t\t\t\t\t<div class="self-center flex size-4 shrink-0 items-center justify-center">
+\t\t\t\t\t\t\t\t\t\t<svg
+\t\t\t\t\t\t\t\t\t\t\txmlns="http://www.w3.org/2000/svg"
+\t\t\t\t\t\t\t\t\t\t\tfill="none"
+\t\t\t\t\t\t\t\t\t\t\tviewBox="0 0 24 24"
+\t\t\t\t\t\t\t\t\t\t\tstroke-width="1.5"
+\t\t\t\t\t\t\t\t\t\t\tstroke="currentColor"
+\t\t\t\t\t\t\t\t\t\t\tclass="size-4"
+\t\t\t\t\t\t\t\t\t\t>
+\t\t\t\t\t\t\t\t\t\t\t<path
+\t\t\t\t\t\t\t\t\t\t\t\tstroke-linecap="round"
+\t\t\t\t\t\t\t\t\t\t\t\tstroke-linejoin="round"
+\t\t\t\t\t\t\t\t\t\t\t\td="M14.857 17.082a23.848 23.848 0 0 0 5.454-1.31A8.967 8.967 0 0 1 18 9.75V9A6 6 0 0 0 6 9v.75a8.967 8.967 0 0 1-2.312 6.022c1.733.64 3.56 1.085 5.455 1.31m5.714 0a24.255 24.255 0 0 1-5.714 0m5.714 0a3 3 0 1 1-5.714 0"
+\t\t\t\t\t\t\t\t\t\t\t/>
+\t\t\t\t\t\t\t\t\t\t</svg>
+\t\t\t\t\t\t\t\t\t</div>
 
-				{#if ($models ?? []).length > 0 && (($settings?.pinnedModels ?? []).length > 0 || $c"""
+\t\t\t\t\t\t\t\t\t<div class="flex flex-1 self-center translate-y-[0.5px]">
+\t\t\t\t\t\t\t\t\t\t<div class=" self-center text-[0.8125rem] leading-5">
+\t\t\t\t\t\t\t\t\t\t\t{$i18n.t('Background tasks')}
+\t\t\t\t\t\t\t\t\t\t</div>
+\t\t\t\t\t\t\t\t\t</div>
+\t\t\t\t\t\t\t\t</a>
+\t\t\t\t\t\t\t</div>
+\t\t\t\t\t\t{/if}
+\t\t\t\t\t</div>
+
+\t\t\t\t\t{#if $visiblePinnedModels.length > 0"""
 sub(old_close, new_close, "tasks shortcut markup")
 
 out = os.path.join(SC, "Sidebar.svelte.new")

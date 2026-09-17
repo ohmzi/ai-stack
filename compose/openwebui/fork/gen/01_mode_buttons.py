@@ -185,12 +185,21 @@ sub(
 
 # 5. ...and so would the web-search and code-interpreter chips. Guarded rather than deleted, so
 #    a model where the button is hidden still gets upstream's chip.
-sub("""											{#if webSearchEnabled}
+#
+#    RE-DERIVED for 0.11.3. Upstream 0.10.2 gated these chips on the flag ALONE
+#    (`{#if webSearchEnabled}`); 0.11.3 gates them on the flag AND the button's own visibility
+#    (`{#if webSearchEnabled && showWebSearchButton}`), because it turned the chip from a passive
+#    indicator into an interactive toggle. The intent here is unchanged — the chip must not
+#    duplicate a mode button that is already on screen — so the re-derivation is the same
+#    expression with upstream's new positive gate NEGATED, not the old gate restored. Restoring
+#    `{#if webSearchEnabled}` would render the chip alongside our button and give one concept two
+#    controls, which is the thing this hunk exists to prevent.
+sub("""											{#if webSearchEnabled && showWebSearchButton}
 												<Tooltip content={$i18n.t('Web Search')} placement="top">""",
     """											{#if webSearchEnabled && !showWebSearchButton}
 												<Tooltip content={$i18n.t('Web Search')} placement="top">""",
     "web chip")
-sub("""											{#if codeInterpreterEnabled}
+sub("""											{#if codeInterpreterEnabled && showCodeInterpreterButton}
 												<Tooltip content={$i18n.t('Code Interpreter')} placement="top">""",
     """											{#if codeInterpreterEnabled && !showCodeInterpreterButton}
 												<Tooltip content={$i18n.t('Code Interpreter')} placement="top">""",

@@ -39,6 +39,36 @@ mi = sub(mi,
     "onModeChange call")
 EDITS.append(("src/lib/components/chat/MessageInput.svelte", "MessageInput.svelte", mi))
 
+# ------------------------------------------------------- Placeholder: forward the callback
+# NEW for 0.11.3, and the reason this generator now touches three files instead of two.
+#
+# 0.10.2 rendered MessageInput directly in both of Chat.svelte's composers. 0.11.3 factors the
+# no-messages landing page out into Placeholder, which renders its OWN MessageInput and declares
+# its props explicitly (`export let`, no $$restProps). Svelte drops an undeclared prop silently,
+# so a callback passed to <Placeholder> goes nowhere unless the component re-declares AND
+# forwards it.
+#
+# That matters because this is the landing page — precisely where a mode gets chosen before the
+# chat has an id, which is the case MODE_KEY(null) / MODE_HANDOFF_MS exist to serve. Without
+# this, picking Task on the landing page sets the local state but never reaches saveMode, and
+# the re-init that follows the first message falls through to setDefaults() and resets it.
+ph = load("Placeholder.svelte")
+ph = sub(ph,
+    """	export let onWebSearchToggle: Function = () => {};""",
+    """	export let onWebSearchToggle: Function = () => {};
+	// ai-stack: forwarded straight through to MessageInput so a mode chosen on the landing page
+	// is remembered exactly like one chosen in the chat composer.
+	export let onModeChange: Function = () => {};""",
+    "onModeChange prop")
+ph = sub(ph,
+    """						{askUser}
+						{onWebSearchToggle}""",
+    """						{askUser}
+						{onModeChange}
+						{onWebSearchToggle}""",
+    "onModeChange forward")
+EDITS.append(("src/lib/components/chat/Placeholder.svelte", "Placeholder.svelte", ph))
+
 # ---------------------------------------------------------------- Chat: remember the user's choice
 ch = load("Chat.svelte")
 
@@ -113,96 +143,70 @@ ch = sub(ch,
     "mode helpers")
 
 # navigateHandler: the path that actually caused the reported reset.
+#
+# RE-DERIVED for 0.11.3. Upstream now routes the draft restore through a named
+# `restoreChatInput()` and guards `setDefaults()` behind its failure — structurally the shape
+# this hunk has always wanted, so the guard JOINS the condition instead of replacing an
+# if/else. The short-circuit is load-bearing: when a draft did restore, the draft's own mode
+# is the legitimate one and `restoreMode` must not run a second time over it.
 ch = sub(ch,
-    """			} else {
-				await setDefaults();
-			}
+    """\t\t\tif (!(await restoreChatInput(storageChatInput))) {
+\t\t\t\tawait setDefaults();
+\t\t\t}
 
-			const chatInput = document.getElementById('chat-input');
-			chatInput?.focus();
-		} else {
-			await goto('/');
-		}
-	};""",
-    """			} else if (!restoreMode(chatIdProp)) {
-				// ai-stack: only fall back to the model's defaults when this chat has no mode of
-				// its own. Otherwise sending a message would silently reset it.
-				await setDefaults();
-			}
+\t\t\tmessageInput?.focus({ preventScroll: true });""",
+    """\t\t\tif (!(await restoreChatInput(storageChatInput)) && !restoreMode(chatIdProp)) {
+\t\t\t\t// ai-stack: only fall back to the model's defaults when this chat has no mode of
+\t\t\t\t// its own. Otherwise sending a message would silently reset it.
+\t\t\t\tawait setDefaults();
+\t\t\t}
 
-			const chatInput = document.getElementById('chat-input');
-			chatInput?.focus();
-		} else {
-			await goto('/');
-		}
-	};""",
+\t\t\tmessageInput?.focus({ preventScroll: true });""",
     "navigateHandler restore")
 
 # onMount init: same rule when a saved chat is opened directly.
 ch = sub(ch,
-    """			if (!chatIdProp) {
-				loading = false;
-				await tick();""",
-    """			if (!chatIdProp) {
-				// ai-stack: a brand-new chat starts from the model's defaults (Internet on), so a
-				// mode left over from an earlier new chat must not be inherited here.
-				try {
-					sessionStorage.removeItem(MODE_KEY(null));
-				} catch (e) {}
-				loading = false;
-				await tick();""",
+    """\t\t\tif (!chatIdProp) {
+\t\t\t\tloading = false;
+\t\t\t\tawait tick();""",
+    """\t\t\tif (!chatIdProp) {
+\t\t\t\t// ai-stack: a brand-new chat starts from the model's defaults (Internet on), so a
+\t\t\t\t// mode left over from an earlier new chat must not be inherited here.
+\t\t\t\ttry {
+\t\t\t\t\tsessionStorage.removeItem(MODE_KEY(null));
+\t\t\t\t} catch (e) {}
+\t\t\t\tloading = false;
+\t\t\t\tawait tick();""",
     "new chat clears pending mode")
 
 ch = sub(ch,
-    """				try {
-					const input = JSON.parse(storageChatInput);
+    """\t\t\t\tawait restoreChatInput(storageChatInput);
+\t\t\t}
 
-					if (!$temporaryChatEnabled) {
-						messageInput?.setText(input.prompt);
-						files = input.files;
-						selectedToolIds = input.selectedToolIds;
-						selectedSkillIds = input.selectedSkillIds ?? [];
-						selectedFilterIds = input.selectedFilterIds;
-						webSearchEnabled = input.webSearchEnabled;
-						imageGenerationEnabled = input.imageGenerationEnabled;
-						codeInterpreterEnabled = input.codeInterpreterEnabled;
-					}
-				} catch (e) {}
-			}
+\t\t\tmessageInput?.focus({ preventScroll: true });
+\t\t};
+\t\tinit();""",
+    """\t\t\t\tawait restoreChatInput(storageChatInput);
+\t\t\t} else if (chatIdProp) {
+\t\t\t\t// ai-stack: opening a saved chat with no unsent draft — keep the mode it was left
+\t\t\t\t// in rather than resetting to the model's defaults.
+\t\t\t\trestoreMode(chatIdProp);
+\t\t\t}
 
-			const chatInput = document.getElementById('chat-input');
-			chatInput?.focus();
-		};
-		init();""",
-    """				try {
-					const input = JSON.parse(storageChatInput);
-
-					if (!$temporaryChatEnabled) {
-						messageInput?.setText(input.prompt);
-						files = input.files;
-						selectedToolIds = input.selectedToolIds;
-						selectedSkillIds = input.selectedSkillIds ?? [];
-						selectedFilterIds = input.selectedFilterIds;
-						webSearchEnabled = input.webSearchEnabled;
-						imageGenerationEnabled = input.imageGenerationEnabled;
-						codeInterpreterEnabled = input.codeInterpreterEnabled;
-					}
-				} catch (e) {}
-			} else if (chatIdProp) {
-				// ai-stack: opening a saved chat with no unsent draft — keep the mode it was left
-				// in rather than resetting to the model's defaults.
-				restoreMode(chatIdProp);
-			}
-
-			const chatInput = document.getElementById('chat-input');
-			chatInput?.focus();
-		};
-		init();""",
+\t\t\tmessageInput?.focus({ preventScroll: true });
+\t\t};
+\t\tinit();""",
     "onMount restore")
 
-# Wire the callback through to BOTH MessageInput instances (the empty-chat one and the active one).
+# Wire the callback through to ALL THREE composer hosts, not the two 0.10.2 had. 0.11.3 added
+# the third by factoring the landing page out into <Placeholder> — see that file's edits above,
+# which are what make this third site actually forward the prop instead of swallowing it.
+#
+# The replace below already covers every site; this count is the guard that keeps it that way.
+# A fourth composer added upstream must fail HERE, in the build, rather than ship as a mode
+# control that looks right and quietly forgets what the user picked.
 _n = ch.count("onWebSearchToggle={handleWebSearchToggle}")
-assert _n == 2, f"expected 2 MessageInput instances, found {_n}"
+assert _n == 3, f"expected 3 composer hosts (2 MessageInput + 1 Placeholder), found {_n}"
 ch = ch.replace("onWebSearchToggle={handleWebSearchToggle}",
                 "onWebSearchToggle={handleWebSearchToggle}\n"
                 "\t\t\t\t\t\t\t\t\t\tonModeChange={() => saveMode(chatIdProp)}")

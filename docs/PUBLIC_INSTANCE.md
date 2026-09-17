@@ -52,7 +52,7 @@ config: [`../compose/public/nginx/`](../compose/public/nginx/).
 
 ## How "no login" actually works
 
-OpenWebUI 0.10.2 has a built-in escape hatch from password auth: **trusted-header auth**
+OpenWebUI 0.11.3 has a built-in escape hatch from password auth: **trusted-header auth**
 (`WEBUI_AUTH_TRUSTED_EMAIL_HEADER`). Set it, and the backend trusts whatever email arrives in that
 header instead of a session cookie of its own — auto-creating a user for an email it hasn't seen,
 regardless of `ENABLE_SIGNUP`. The frontend's `/auth` page auto-signs-in and never renders a form
@@ -194,7 +194,7 @@ routed through `auto_assistant`; the workspace entry (`model` table row, survive
 `ENABLE_PERSISTENT_CONFIG=false` because grants and model rows are separate tables, not config) gives
 it a short standalone system prompt instead.
 
-Model visibility in 0.10.2 is deny-by-default: every model is admin-only until an explicit
+Model visibility in 0.11.3 is deny-by-default: every model is admin-only until an explicit
 `access_grant` row exists (the private instance's own memory notes say the same). One row does the
 whole job here — `model=hermes-genesis:apex-compact`, `group=Guests`, `permission=read` — and every
 other Ollama tag (`gemma3:1b`, `hermes-genesis:agent`, `bge-m3`, …) stays invisible with no hiding
@@ -212,9 +212,11 @@ permission exists, it's off — the compose file's `USER_PERMISSIONS_*` block:
 | Sidebar FOLDERS section | `USER_PERMISSIONS_FEATURES_FOLDERS=false` + instance-wide `ENABLE_FOLDERS=false` |
 | Sidebar MODELS (pinned-shortcut) section | not a permission — `DEFAULT_PINNED_MODELS` is simply never set; `Sidebar.svelte` only renders it when something is pinned |
 
-Three more have **no permission at all** in 0.10.2 — verified by reading the vendored source
-(`src/lib/components/chat/Navbar.svelte`, `src/lib/components/layout/Sidebar/UserMenu.svelte`,
-`src/routes/auth/+page.svelte`):
+Three more have **no permission at all** in 0.11.3 — verified by reading the vendored source
+(`src/lib/components/chat/Navbar.svelte`, `src/lib/components/layout/Sidebar.svelte`,
+`src/routes/auth/+page.svelte`; the user-menu button lived in `Sidebar/UserMenu.svelte` until
+0.10.2 and moved into `Sidebar.svelte`, which is why the path here changed at the 0.11.3 bump even
+though `UserMenu.svelte` itself still exists):
 
 - the "···" chat-context menu (`#chat-context-menu-button`, gated only on the chat having an id)
 - the account-avatar menu (`button[aria-label="User menu"]`, gated on nothing — any signed-in
@@ -384,6 +386,24 @@ sqlite surgery) so chats and sessions actually cascade — that endpoint also in
 touch the primary admin or the caller's own account, a second guard on top of the script's own
 `^guest-[0-9a-f]{32}@public\.ohmz\.cloud$` filter. Schedule it as a systemd timer alongside
 `hermes-gateway.service` / `flightclaw.service`.
+
+**An OWUI upgrade can be BLOCKED by that same accumulation — purge before you bump.** Open WebUI
+0.11.3 ships migration `f0bd01a18a3d_add_unique_normalized_user_email_index`, which adds a unique
+index on normalized email and **refuses to run while duplicate emails exist**. The guest-minting
+path can produce them: on 2026-08-11 two guests were each created 4× — four rows sharing one
+timestamp, which reads as a race in the gate rather than a retry — and the container crash-looped on
+every start at `config.py:81 -> run_migrations()` until they were gone. Hit for real on the 0.11.3
+bump, 2026-09-17.
+
+The migration fails **cleanly**, which is what makes this recoverable: alembic rolls back,
+`alembic_version` stays on the old revision, and the DB is left at the old schema — not half-migrated.
+So the fix is a rollback, not a repair: re-point the digest at the previous release, bring it up, run
+the purge above, then re-apply the new digest. Here that deleted 48 guests (every one >24h idle,
+owning 0 chats between them) and the migration ran on the next start.
+
+The private instance is not exposed to this — it has no guest flow, so no duplicate emails — but any
+instance that mints users automatically is. `owner@aipublic.ohmz.cloud` is the only row here that
+must survive, and neither the email-shape filter nor the endpoint's own guards can reach it.
 
 **Cloudflare Tunnel routing is dashboard-only and unrecorded here.** The tunnel is token-based
 (`/etc/systemd/system/cloudflared.service`); there is no local ingress config file — adding or

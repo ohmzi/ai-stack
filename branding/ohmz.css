@@ -1,11 +1,17 @@
 /* ============================================================================
-   Ohmz AI — theme for Open WebUI 0.10.2
+   Ohmz AI — theme for Open WebUI 0.11.3
    Installs as /app/backend/open_webui/static/custom.css — the directory
-   main.py mounts at /static, which index.html already <link>s. (Note it is
-   NOT /app/build/static; that path exists but is served to nobody.)
+   main.py mounts at /static, which index.html already <link>s. It is ALSO
+   installed to /app/build/static/custom.css, and that is not redundant:
+   config.py rebuilds the served static dir from /app/build/static on every
+   container start, so a copy that lives only in the served dir is erased by
+   the next restart. (This header claimed the opposite until 2026-09-17 — that
+   /app/build/static "is served to nobody". It is what the brand is restored
+   FROM; see branding/apply.sh, install_both.)
    Built from "OhmzAI Brand.dc.html": warm-dark shell, one amber accent.
 
-   Approach: 0.10.2 is Tailwind v4, so the entire chassis is painted from a
+   Approach: 0.11.3 is Tailwind v4 — re-checked at the upgrade, unchanged from
+   0.10.2 — so the entire chassis is painted from a
    --color-gray-* ramp that ships pure neutral (oklch(L% 0 0)). Re-declaring
    that ramp warm rebrands every surface at once — no !important selector
    chase. The app's own oled-dark preset does the same thing, which is how the

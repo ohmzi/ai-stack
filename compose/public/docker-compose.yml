@@ -38,7 +38,7 @@ services:
     # Deliberately NOT ai-stack/open-webui:task-mode: that fork's Internet/Code/Task buttons drive
     # web search, the code interpreter and the task_mode filter — all off or entirely absent here —
     # so on this instance they would be three controls that render and visibly do nothing.
-    image: ghcr.io/open-webui/open-webui@sha256:d04b9ec1c9d5a6f8fb978158e5c7208d31beb2f9d1a27c58dd692dd8cee26f1a
+    image: ghcr.io/open-webui/open-webui@sha256:f27666b889001e1d2c639ca4af527aad6e466bd1a1ac70cae5ce13dfe35ebae6
     restart: unless-stopped
     networks:
       - owui-public
