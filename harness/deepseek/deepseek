@@ -41,7 +41,13 @@ read -r ROUTER_HOST ROUTER_PORT < <(
 BASE_URL="http://${ROUTER_HOST}:${ROUTER_PORT}"
 
 # A token is only needed for the cloud leg; the router passes it through verbatim.
-# Precedence: real env > secrets.env > whatever the ambient shell already exported.
+#
+# Precedence is DEEPSEEK_API_TOKEN, then ANTHROPIC_AUTH_TOKEN -- but note that
+# secrets.env is SOURCED below, so it overwrites an ambient variable of the same
+# name rather than losing to it. The file therefore wins over the shell, which is
+# the opposite of what "environment beats file" intuition suggests. It only matters
+# when both places set the same variable; on this host secrets.env does not exist
+# and the token arrives from ~/.bashrc.
 # shellcheck disable=SC1090
 [[ -r "$SECRETS" ]] && source "$SECRETS"
 AUTH_TOKEN="${DEEPSEEK_API_TOKEN:-${ANTHROPIC_AUTH_TOKEN:-}}"

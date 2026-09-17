@@ -1,0 +1,19 @@
+[Unit]
+Description=deepseek-router (Anthropic API router: DeepSeek cloud + local Ollama)
+Documentation=file:%h/ai-stack/harness/deepseek/README.md
+# The relay is useless without its local upstream, and it reads the Ollama-backed
+# provider on every request. Ordered after Ollama so a cold boot does not race it.
+After=network-online.target ollama.service
+Wants=network-online.target
+# Stopping Ollama should stop the relay rather than leave it 502-ing.
+PartOf=ollama.service
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/python3 %h/.config/deepseek/router.py
+Environment=PYTHONUNBUFFERED=1
+Restart=on-failure
+RestartSec=2
+
+[Install]
+WantedBy=default.target
