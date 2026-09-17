@@ -10,6 +10,7 @@ own tag — see "The coder split (2026-08-17)" below for the full account.
 |---|---|---|---|---|
 | **Chat + vision** | `hermes-genesis:apex-compact` (MoE, ~3 B active of 34.7 B) | **18285 MiB** | **135.3** | Chat and vision, and the uncensored prompt helpers — across `auto_assistant`, `photoreal` and `image_krea`. No longer the coder — see below. |
 | **Coder** | `qwen38-coder:q4` (Qwen3.8-27B dense Q4_K_M, official Ollama build, mmproj dropped) | **16881 MiB** @ 32K ctx | not benchmarked | The coder route in `auto_assistant.py` (`self.coder_model`), and the sole model OpenCode talks to. Cannot co-reside with the chat tenant — see below. |
+| **Coder — Claude Code** | `qwen38-coder:q4-128k` (same weights as `qwen38-coder:q4`) | **21857 MiB** @ 128K ctx, 100% GPU | not benchmarked | The tag the `deepseek` harness serves to Claude Code (its local `sonnet` alias). Same weights as the coder via `ollama create` `FROM qwen38-coder:q4`, with only `PARAMETER num_ctx 131072` overridden — so it shares the 32768 tag's template and sampling parameters, and adds ~0 disk — but Ollama keys runners by model+options, making it a **second ~21 GB runner** that cannot co-reside with the 32768-ctx coder tenant or the chat tenant on one 24 GB card. **That consequence is reasoned, not measured under contention.** Full account: "The Claude Code 128K tag (2026-09-17)" below. |
 | **Task model** | `gemma3:1b` | **1313 MiB** | 235.4 | Chat titles, tags, RAG query generation. **Reverted from `gemma4:e2b` on 2026-08-01** — see "the phantom": e2b was measured EVICTING the 16.70 GiB tenant on every title generation. `gemma3:1b` co-resides (21298/24576 measured). |
 | **QA judge** | `gemma4:e2b` | 3307 MiB | 166.6 | Still the eval judge (cross-family control). Kept on disk; no longer in the request path. ⚠️ see "the phantom". |
 | **Router classifier** | `gemma3:1b` | **1313 MiB** | 235.4 | The HINT-tier chat-vs-code classifier in the pipe. Co-resides with BOTH the chat tenant and the coder — measured 18957 MiB with the coder, 2026-08-17. |
@@ -342,6 +343,52 @@ model directory gone), now points at this same Ollama tenant — one backend for
 Ollama (also confirming the `LMSTUDIO_EMBEDDING_AUTOLOAD=0` guard actually prevents the 300 s hang
 the old fallback path risked — `bge-m3` was observed loaded and serving, not stuck). Full config in
 `~/.config/opencode/opencode.json` / `profile.env`; `validate-profile-sync.sh` passes.
+
+## The Claude Code 128K tag (2026-09-17)
+
+The `deepseek` harness exists to run Claude Code against a backend selectable mid-session, because
+Claude Code reads `ANTHROPIC_BASE_URL` once at launch and has no documented way to switch backends
+inside one session. Its local alias is this tag.
+
+**Why a second tag.** The stock `qwen38-coder:q4` pins `num_ctx 32768`, which is fine for OpenCode —
+it sends a lean prompt — and unusable as a Claude Code backend: Claude Code's baseline request alone
+(system prompt plus every tool schema) measures roughly 25K tokens, so a 32K window leaves almost
+nothing for the actual conversation. The first real turn overflows, and Ollama answers:
+
+```
+400 request (33142 tokens) exceeds the available context size (32768 tokens)
+```
+
+**The tag:** `qwen38-coder:q4-128k`, built with
+`ollama create qwen38-coder:q4-128k -f models/qwen38-coder-128k.Modelfile`
+(`/home/ohmz/ai-stack/harness/deepseek/models/qwen38-coder-128k.Modelfile`). It is
+`FROM qwen38-coder:q4` with a single override, `PARAMETER num_ctx 131072`, so it inherits that tag's
+template and Qwen's published sampling (temp 0.7 / top_p 0.8 / top_k 20 / presence_penalty 1.0 /
+repeat_penalty 1.0). The two tags answer with identical style and differ only in how much they can
+hold — same weights, so **~0 extra disk**.
+
+**Real VRAM, measured 2026-09-17:** 21857 MiB resident (`nvidia-smi`), `ollama ps` reporting 21 GB,
+100% GPU, CONTEXT 131072. The full window fits in VRAM with no CPU offload. The reason it fits is the
+q8_0 KV cache (`OLLAMA_KV_CACHE_TYPE=q8_0`): it works out to roughly **40 KB/token**, not the
+~128 KB an fp16 estimate predicts. 128K is therefore the comfortable ceiling on a 24 GB card; 256K
+would not fit and would start spilling.
+
+**The window advertised is smaller than the tag's.** The router reserves `output_reserve` 32768 —
+Claude Code asks for `max_tokens=32000`, and the backend window covers prompt *and* completion — so
+what Claude Code is told it has is 98304, not 131072. Advertising the raw window leaves nothing for
+the reply and the request fails 400.
+
+**⚠️ The co-residency cost is reasoned, not measured under contention.** Ollama keys runners by
+model+options, so a 131072-ctx tag of the same weights is a **second ~21 GB runner** that cannot
+co-reside with the 32768-ctx coder tenant or with the chat tenant on one 24 GB card. That follows
+from the 21857 MiB footprint measured above plus the model+options rule this file already documents
+for `hermes-genesis:agent`. It has **not** been measured under contention, and is flagged rather
+than formatted like the measured rows, because "every number here is measured" is the claim this
+file opens with.
+
+**One bookkeeping consequence:** the header above counts tags, not weights, so this tag makes
+**seven** where the 2026-08-17 header still says six. The weights are unchanged; the resident runner
+is not.
 
 ## Rollback
 

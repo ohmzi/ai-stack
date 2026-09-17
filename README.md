@@ -222,6 +222,15 @@ in general: hiding a model also makes it uncallable through OpenWebUI
 ([openwebui-config-snapshot.md](docs/openwebui-config-snapshot.md) has the mechanism, and the
 task-model consequence).
 
+A second consumer of the local models now exists, and it does not go through Open WebUI at
+all: the `deepseek` harness, which runs Claude Code against `qwen38-coder:q4-128k` or the
+DeepSeek cloud API and can switch between the two mid-session. It exists because Claude Code
+reads `ANTHROPIC_BASE_URL` once at launch and has no documented way to change backends inside one
+session; the harness runs a local relay that picks an upstream by the model name in the request
+body, which is what makes `/model` switch live. The 128K tag is a separate local runner measured at
+21 GB and 100% GPU — the full window fits in VRAM with no CPU offload. Routing rules, context
+sizing and the launcher flags: [harness/deepseek/README.md](harness/deepseek/README.md).
+
 Image generation is **RedCraft** (`redcraft23INT8INT4FP8_30Krea2.safetensors`, a Krea 2
 base) at the creator's own settings — 8 steps, cfg 1.0, `er_sde`/simple. Krea 2 Turbo is
 still on disk beside it; reverting is a one-line change in both image pipes.
@@ -418,6 +427,7 @@ Methodology and the current baseline: [docs/QA_TEST_PLAN.md](docs/QA_TEST_PLAN.m
 | [PUBLIC_INSTANCE.md](docs/PUBLIC_INSTANCE.md) | The no-login public instance: gate mechanism, isolation, bootstrap order |
 | [HERMES_AGENT.md](docs/HERMES_AGENT.md) | Standing jobs: what runs, why, how to undo it |
 | [MODELS.md](docs/MODELS.md) | Model roles, measured VRAM, the consolidation |
+| [harness/deepseek/README.md](harness/deepseek/README.md) | The `deepseek` harness: Claude Code on the local 128K coder or the DeepSeek cloud API, switchable mid-session |
 | [QA_TEST_PLAN.md](docs/QA_TEST_PLAN.md) | Methodology and baselines |
 | [TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md) | Failures seen in practice |
 | [IMAGE_CONTINUATION.md](docs/IMAGE_CONTINUATION.md) | Why a follow-up edits *that* picture: the task guard, the reference store, the prompt contracts |
