@@ -359,5 +359,35 @@ download size, not just config.
 | **Re-create the main model** | The source GGUFs are kept at `/home/ohmz/models/hermes-genesis/` (18.3 GB) precisely so this does not need a re-download: `ollama create hermes-genesis:apex-compact -f Modelfile`. Worth keeping — the upstream repo's `:latest` tag resolves to **V3**, not the V5 build in use here, so a re-download would not reproduce it. |
 | **The coder split (2026-08-17)** | `ollama rm qwen38-coder:q4 qwen3.8:27b-q4_K_M` (frees ~18 GB); set `self.coder_model = "hermes-genesis:apex-compact"` in `pipes/auto_assistant.py` and `python3 scripts/deploy_pipe.py auto_assistant`, or `--rollback` for the whole pipe. Restore `opencode.json` from `~/.config/opencode/opencode.json.bak-pre-qwen38`. Ollama itself can go back to 0.32.1 with `OLLAMA_VERSION=0.32.1 curl -fsSL https://ollama.com/install.sh \| sh`, though nothing downstream requires it once the model is removed. |
 
+| **Ollama 0.34.1 (2026-09-17)** | Both halves are still on disk. `sudo systemctl stop ollama && sudo rm -rf /usr/local/lib/ollama && sudo mv /usr/local/lib/ollama.0.32.14 /usr/local/lib/ollama && sudo mv /usr/local/bin/ollama.0.32.14 /usr/local/bin/ollama && sudo systemctl start ollama`. Delete the two backups once 0.34.1 has settled — together they are 2.1 GB on a 92%-full disk. |
+
+**Upgrading Ollama here: use the release tarball, not `install.sh`.** The install
+script rewrites `/etc/systemd/system/ollama.service`, and this box's unit carries a
+hand-maintained `Environment="PATH=…"` line the script does not reproduce. The
+drop-in (`ollama.service.d/multi-model.conf` — `MAX_LOADED_MODELS`,
+`FLASH_ATTENTION`, `KV_CACHE_TYPE`, `CONTEXT_LENGTH`, `KEEP_ALIVE`) is a separate
+file and survives either way. So: stop the service, move the binary and
+`/usr/local/lib/ollama` aside, unpack the tarball's `bin/` and `lib/` over
+`/usr/local`, start. The binary and the lib tree MUST move together — 0.34.1 ships
+`libggml-base.so.0.23.0` where 0.32.14 had `0.20.0`, and a mismatched pair fails at
+load rather than at startup.
+
+Done 2026-09-17, 0.32.14 → **0.34.1**, with nothing loaded at the time (idle GPU),
+so no in-flight generation was interrupted. 0.34.1 selects **`cuda_v13`** on this
+box (driver 13.0; the tarball ships `cuda_v12` and `cuda_v13` both) — verified in
+the startup line as `library=CUDA … libdirs=ollama,cuda_v13`. All seven models
+loaded and generated afterwards, `hermes-genesis:apex-compact` included. Nothing in
+the 0.33/0.34 notes invalidates an existing GGUF: the changes are a faster
+`/api/tags` on large libraries, deprecated `typical_p` (existing GGUF keep support),
+and MLX/`ollama create` tooling — the last only affects *creating* from safetensors,
+which is not how anything here was built.
+
+The `gemma3:1b` classifier phrase this file already flags above behaves the same
+after the bump — `tests/test_autoroute.py --live` still reports CODER for "my python
+keeps dying on me". That run also reports a second failure, "HINT does consult the
+classifier", which is a **test artifact rather than a regression**: `CLASSIFIER_CALLS`
+is appended only inside `if not LIVE:` (`test_autoroute.py:86-90`), so under `--live`
+that counter is always empty and the check cannot pass. Neither failure is new.
+
 DB backups taken along the way: `webui.db.bak-genesis` (before the swap), `webui.db.bak-embedder`,
 `webui.db.bak-onepipe`, `webui.db.bak-autofull`.
