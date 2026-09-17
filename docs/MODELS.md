@@ -10,14 +10,16 @@ own tag — see "The coder split (2026-08-17)" below for the full account.
 |---|---|---|---|---|
 | **Chat + vision** | `hermes-genesis:apex-compact` (MoE, ~3 B active of 34.7 B) | **18285 MiB** | **135.3** | Chat and vision, and the uncensored prompt helpers — across `auto_assistant`, `photoreal` and `image_krea`. No longer the coder — see below. |
 | **Coder** | `qwen38-coder:q4` (Qwen3.8-27B dense Q4_K_M, official Ollama build, mmproj dropped) | **16881 MiB** @ 32K ctx | not benchmarked | The coder route in `auto_assistant.py` (`self.coder_model`), and the sole model OpenCode talks to. Cannot co-reside with the chat tenant — see below. |
-| **Coder — Claude Code** | `qwen38-coder:q4-128k` (same weights as `qwen38-coder:q4`) | **21857 MiB** @ 128K ctx, 100% GPU | not benchmarked | The tag the `deepseek` harness serves to Claude Code (its local `sonnet` alias). Same weights as the coder via `ollama create` `FROM qwen38-coder:q4`, with only `PARAMETER num_ctx 131072` overridden — so it shares the 32768 tag's template and sampling parameters, and adds ~0 disk — but Ollama keys runners by model+options, making it a **second ~21 GB runner** that cannot co-reside with the 32768-ctx coder tenant or the chat tenant on one 24 GB card. **That consequence is reasoned, not measured under contention.** Full account: "The Claude Code 128K tag (2026-09-17)" below. |
+| **Coder — Claude Code** | `qwen38-coder:q4-128k` (same weights as `qwen38-coder:q4`) | **21857 MiB** @ 128K ctx, 100% GPU ⚠️ (**a resident total, not a delta** — see below) | not benchmarked | The tag the `deepseek` harness serves to Claude Code (its local `sonnet` alias). Same weights as the coder via `ollama create` `FROM qwen38-coder:q4`, with only `PARAMETER num_ctx 131072` overridden — so it shares the 32768 tag's template and sampling parameters, and adds ~0 disk — but Ollama keys runners by model+options, making it a **second ~21 GB runner** that cannot co-reside with the 32768-ctx coder tenant or the chat tenant on one 24 GB card. **That consequence is reasoned, not measured under contention.** Full account: "The Claude Code 128K tag (2026-09-17)" below. |
 | **Task model** | `gemma3:1b` | **1313 MiB** | 235.4 | Chat titles, tags, RAG query generation. **Reverted from `gemma4:e2b` on 2026-08-01** — see "the phantom": e2b was measured EVICTING the 16.70 GiB tenant on every title generation. `gemma3:1b` co-resides (21298/24576 measured). |
 | **QA judge** | `gemma4:e2b` | 3307 MiB | 166.6 | Still the eval judge (cross-family control). Kept on disk; no longer in the request path. ⚠️ see "the phantom". |
 | **Router classifier** | `gemma3:1b` | **1313 MiB** | 235.4 | The HINT-tier chat-vs-code classifier in the pipe. Co-resides with BOTH the chat tenant and the coder — measured 18957 MiB with the coder, 2026-08-17. |
 | **Embeddings** | `bge-m3:latest` | ~941 MiB, transient (664 MiB observed resident) | — | RAG embeddings via the Ollama engine. 1024-dim, 8192-token window. Also OpenCode's `local_code_index` embedder since 2026-08-17 (was LM Studio's nomic-embed, 768-dim, dead backend). |
 | **Background agent** | `hermes-genesis:agent` | ~17 GB (**not measured here** — see note) | — | The tag `hermes-agent` runs cron jobs on. Same weights as `apex-compact` via `ollama create` + `PARAMETER num_ctx 65536`, so ~0 extra disk — but Ollama keys runners by model+options, making it a **separate ~17 GB runner** that cannot co-reside with the 32768-ctx chat tenant. A tick firing mid-conversation evicts chat and the next turn pays a cold reload, **measured at 22.7 s**. That is why the pipe releases the chat tenant before handing off, and why the GPU guard exists. Full account: [HERMES_AGENT.md](HERMES_AGENT.md). |
 
-> **The agent row is the one number on this page that is not an `nvidia-smi` delta.** It was missing
+> **The agent row is one of two numbers on this page that are not an `nvidia-smi` delta** — the
+> other is the `qwen38-coder:q4-128k` row, a resident total rather than a delta (see "The Claude Code
+> 128K tag" below). It was missing
 > from this table entirely until 2026-08-08 — the paragraph above counted it toward "FIVE models"
 > while the table listed only the other four distinct tags, so the doc contradicted itself for a
 > week. The `~17 GB` is carried over from `HERMES_AGENT.md` and the pipe's own comment rather than
@@ -363,9 +365,10 @@ nothing for the actual conversation. The first real turn overflows, and Ollama a
 `ollama create qwen38-coder:q4-128k -f models/qwen38-coder-128k.Modelfile`
 (`/home/ohmz/ai-stack/harness/deepseek/models/qwen38-coder-128k.Modelfile`). It is
 `FROM qwen38-coder:q4` with a single override, `PARAMETER num_ctx 131072`, so it inherits that tag's
-template and Qwen's published sampling (temp 0.7 / top_p 0.8 / top_k 20 / presence_penalty 1.0 /
-repeat_penalty 1.0). The two tags answer with identical style and differ only in how much they can
-hold — same weights, so **~0 extra disk**.
+template and its pinned non-thinking sampling profile (temp 0.7 / top_p 0.8 / top_k 20 /
+`repeat_penalty` 1.0, and `presence_penalty` 1.0 — which the base tag deliberately sets *below*
+Qwen's published 1.5, for the reasons in its own Modelfile comment). The two tags answer with
+identical style and differ only in how much they can hold — same weights, so **~0 extra disk**.
 
 **Real VRAM, measured 2026-09-17:** 21857 MiB resident (`nvidia-smi`), `ollama ps` reporting 21 GB,
 100% GPU, CONTEXT 131072. The full window fits in VRAM with no CPU offload. The reason it fits is the
@@ -377,6 +380,14 @@ would not fit and would start spilling.
 Claude Code asks for `max_tokens=32000`, and the backend window covers prompt *and* completion — so
 what Claude Code is told it has is 98304, not 131072. Advertising the raw window leaves nothing for
 the reply and the request fails 400.
+
+**⚠️ The 21857 MiB above is a resident total, not a delta, and is not comparable to the coder row.**
+Every other measured figure in the table is an `nvidia-smi` delta against an idle baseline — the 32K
+coder row's 16881 MiB is 17644 − 763 — whereas this one is the card's absolute `memory.used` with the
+tag loaded. Subtracting an idle baseline from it would be guesswork, because this file carries two
+different baselines: the **~630 MiB** headline (186 MiB desktop + 444 MiB ComfyUI) and the **763 MiB**
+used for the 2026-08-17 measurement. Re-measure the baseline before deriving a co-tenant budget from
+this row. The row is flagged rather than quietly reformatted for the same reason as the note below.
 
 **⚠️ The co-residency cost is reasoned, not measured under contention.** Ollama keys runners by
 model+options, so a 131072-ctx tag of the same weights is a **second ~21 GB runner** that cannot

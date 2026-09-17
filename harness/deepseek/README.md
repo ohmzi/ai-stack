@@ -204,19 +204,23 @@ and sampling parameters (temperature 0.7, top_k 20, top_p 0.8, presence_penalty 
 repeat_penalty 1), so the two tags answer with identical style and differ **only** in how much they
 can hold.
 
-### Two things that are per-provider, not per-model
+### Two sizing details that are easy to get wrong
 
 Both are real and both can bite:
 
-- **The advertised window is computed from the provider, not the model.** `usable_window()` returns
-  `context_window - output_reserve` for whichever provider matched. Since `context_window: 131072`
-  is a property of the `local` provider, **every** model routed to `local` advertises 98304 —
-  including `qwen38-coder:q4`, whose real window is 32768. The launcher's defaults do not avoid
-  this: only its `sonnet` alias points at the 128K tag, while `haiku` is `gemma3:1b` — a tag with
-  no `num_ctx` parameter at all, running at the server's `OLLAMA_CONTEXT_LENGTH` (32768 on this
-  host) and still being advertised 98304. The router does not police window size. If you route
-  Claude Code at a smaller tag, the 400 comes from Ollama, not from the router. Check with
-  `python3 router.py --route MODEL`.
+- **The advertised window is per-model, and the provider default is the *safe* one.**
+  `usable_window()` looks the model up in the provider's `model_windows` first, and only then falls
+  back to the provider's own `context_window`. The `local` provider's default is deliberately the
+  smallest window on the box — `32768 − 8192 = 24576` — so a tag added to Ollama later can never be
+  advertised more context than it actually has. The tags that really are bigger opt in explicitly:
+  `qwen38-coder:q4-128k` (131072, reserve 32768) and `hermes-genesis:agent` (65536).
+
+  This matters because the alias table spans both sizes. Only `sonnet` points at the 128K tag;
+  `haiku` is `gemma3:1b`, which carries no `num_ctx` parameter at all and so runs at the server's
+  `OLLAMA_CONTEXT_LENGTH` (32768 here). Sizing the window per *provider* — which this did until
+  2026-09-17 — reports a confident 98304 for that 32768 model: three times its real window, and a
+  400 waiting the moment anyone switches to it. Check any model with
+  `python3 router.py --window MODEL`; `--route MODEL` prints the upstream and both numbers.
 - **Token counting is estimated, not measured.** Ollama has no `count_tokens` endpoint (it answers
   with a plain-text 404 that Claude Code cannot parse), so when a provider sets
   `supports_count_tokens: false` the relay synthesises `{"input_tokens": ceil(chars/4)}` over the
@@ -391,7 +395,7 @@ nvidia-smi       # expect ~21857 MiB resident
 
 | Symptom | Cause | Fix |
 |---|---|---|
-| `400 … request (NNNNN tokens) exceeds the available context size (32768 tokens)` from Ollama | The model actually in use was built at 32768 (`qwen38-coder:q4`), but a full Claude Code turn — ~25K baseline plus conversation — runs past it. The router does not police this: the advertised window comes from the provider (`local` → 98304), not from the model's real `num_ctx`. | Route the session at `qwen38-coder:q4-128k` instead, or build a tag with a bigger `num_ctx`. `python3 router.py --route MODEL` shows the upstream; `--window MODEL` shows what gets advertised. |
+| `400 … request (NNNNN tokens) exceeds the available context size (NNNNN tokens)` from Ollama | The session was told it has more context than the model actually has. `CLAUDE_CODE_MAX_CONTEXT_TOKENS` is read **once, at launch**, so a session that switched to a local model mid-flight, or that was started outside the launcher, is running against a window it was never given. `model_windows` keeps the *advertised* figure honest per model, but it cannot retroactively resize a running session. | Relaunch through the launcher, which sets the window from `router.py --window` for the model being served. Route the session at `qwen38-coder:q4-128k` (131072) rather than a 32768 tag, or build a tag with a larger `num_ctx`. `--route MODEL` prints the upstream and both numbers. |
 | `Prompt is too long` — Claude Code refuses *before* sending anything | The advertised window is smaller than the ~25K baseline request. Measured: advertising 24576 is enough to trigger it. | Raise `CLAUDE_CODE_MAX_CONTEXT_TOKENS`, but not above the backend's usable window. The launcher already sets it to the local window (98304) by default — a session started some other way may not have it. |
 | `500` with no useful body, or `System message must be at the beginning` in Ollama's log | Claude Code injected a `role: "system"` message mid-conversation and Qwen's chat template refused it. | Ensure the matched provider has `normalize_system: true` (it is set for `local`). §5.1. The router logs `hoisted mid-conversation system message(s)` when it fires — if that line is absent, the request never reached the shim. |
 | The model answers nothing / a `400` right after `/model` to a local name | Claude Code sent `thinking: {"type": "adaptive"}` to a name it does not recognise. | Covered by the `inject` block on `local` (§5.2). If you add a provider, add it there too. |
