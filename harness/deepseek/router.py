@@ -162,17 +162,26 @@ def estimate_tokens(payload: dict) -> int:
     return max(1, (chars + 3) // 4)
 
 
-def usable_window(provider: dict) -> int | None:
+def usable_window(provider: dict, model: str | None = None) -> int | None:
     """Context window to advertise to the client, leaving room to generate.
 
     The backend's window covers prompt AND completion, so handing Claude Code the
     raw number means a full prompt leaves nothing for the reply and the request
     400s. Advertise `context_window - output_reserve` instead.
+
+    `context_window` on a provider describes the *provider*, but the models behind
+    it do not share a window: the local provider fronts a 131072 coder tag, a 32768
+    tag of the same weights, and gemma3:1b, which carries no num_ctx at all and so
+    runs at the server's OLLAMA_CONTEXT_LENGTH. Without `model_windows`, every one
+    of them would be reported at the 128K tag's numbers -- so switching to `haiku`
+    would tell Claude Code it has three times the context the model actually has.
     """
-    window = provider.get("context_window")
+    override = (provider.get("model_windows") or {}).get(model or "") or {}
+    window = override.get("context_window", provider.get("context_window"))
     if not window:
         return None
-    return window - provider.get("output_reserve", 0)
+    reserve = override.get("output_reserve", provider.get("output_reserve", 0))
+    return window - reserve
 
 
 class Router(BaseHTTPRequestHandler):
@@ -386,17 +395,18 @@ def main() -> int:
         cfg = load_config()
         for model in sys.argv[sys.argv.index("--route") + 1:]:
             prov = select_provider(cfg, model)
-            window = usable_window(prov)
-            suffix = ""
-            if window:
-                suffix = f"  (usable {window} of {prov['context_window']})"
+            window = usable_window(prov, model)
+            real = ((prov.get("model_windows") or {}).get(model) or {}).get(
+                "context_window", prov.get("context_window")
+            )
+            suffix = f"  (usable {window} of {real})" if window else ""
             print(f"{model}\t-> {prov['name']}{suffix}")
         return 0
 
     if "--window" in sys.argv:
         cfg = load_config()
         for model in sys.argv[sys.argv.index("--window") + 1:]:
-            print(usable_window(select_provider(cfg, model)) or "")
+            print(usable_window(select_provider(cfg, model), model) or "")
         return 0
 
     cfg = load_config()

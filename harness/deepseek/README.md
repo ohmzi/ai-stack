@@ -14,8 +14,9 @@ no restart.
 
 The reason this is cheap is that both upstreams already speak the **Anthropic Messages API
 natively**: the DeepSeek cloud API at `/anthropic`, and Ollama 0.34.1 at `/v1/messages`. Nothing
-needs translating. The relay is a pass-through: it reads the model name, picks a provider, and
-copies the bytes.
+needs translating. The relay is close to a pass-through: it reads the model name, picks a provider,
+and forwards the request — parsing and re-serialising the body so it can apply the per-provider
+shims in §5. A body that does not parse as JSON is the one case forwarded as raw bytes.
 
 ```
 harness/deepseek/
@@ -39,7 +40,7 @@ harness/deepseek/
         ┌───────────────────────────────┐
         │  deepseek-router  :8788       │   reads payload["model"],
         │  (ThreadingHTTPServer)        │   first glob match in router.json wins,
-        │                               │   then a byte-for-byte relay
+        │                               │   then relays it to that upstream
         └───────┬────────────────┬──────┘
                 │                │
    auth: passthrough│            │auth: dummy  (authorization: Bearer ollama)
@@ -57,7 +58,7 @@ The relay is deliberately thin. It parses the body to read `model` (which decide
 `max_tokens` (for the log line) and to apply the per-provider shims in §5, then re-serialises and
 forwards it. Headers are copied verbatim except for the
 hop-by-hop set (`connection`, `transfer-encoding`, `host`, `content-length`, …) — and
-`accept-encoding`, which is dropped so the body stays an uncompressed byte copy. Responses are
+`accept-encoding`, which is dropped so neither body is compressed in flight. Responses are
 relayed both ways: a known `content-length` is streamed in 64 KiB chunks, and a response without
 one (every SSE stream) is re-chunked as it arrives using `read1()` — `read()` would block until a
 never-ending stream completed.
@@ -78,7 +79,8 @@ Claude Code:
 - `GET /v1/models` is synthesised from the config, not proxied. Note what it lists: only the
   glob-free model names, so the local provider's six exact tags appear and **none of the cloud
   names do** — every cloud pattern (`deepseek-flash*`, `deepseek*`) contains a wildcard and is
-  filtered out. The listing is therefore not the routing table; `deepseek --routes` is.
+  filtered out. The listing is therefore not the routing table; `deepseek --routes MODEL` is, as is
+  the table `deepseek --status` prints.
 
 Client disconnects are routine rather than errors: `handle()` swallows
 `ConnectionResetError`/`BrokenPipeError`, and a stream that dies mid-flight logs
@@ -95,8 +97,10 @@ deepseek                     # DeepSeek cloud, default; window capped at the loc
 deepseek --local             # local Qwen 3.8 27B on the RTX 3090
 deepseek --cloud             # cloud, no cap — full cloud window
 deepseek --model NAME        # any routable model name
-deepseek --status, -s        # router health, token presence, routing table
-deepseek --routes [MODEL]    # which upstream a model resolves to
+deepseek --status, -s        # router health, token presence, routing table; starts the router
+                             # if it is down, rather than only reporting
+deepseek --routes [MODEL]    # which upstream a model resolves to; with no MODEL, the
+                             # cloud model only
 deepseek --restart           # bounce the router
 deepseek --help, -h          # the header of the script itself
 
@@ -110,6 +114,15 @@ The router is started **on demand** — there is no systemd unit on this host, s
 and `--restart` bounces that instead. `--status` reports router health either way, plus which
 backends the three aliases point at and whether a cloud token was found.) A failed start does
 not fail silently — it points at the log and at `journalctl --user -u deepseek-router.service`.
+
+`--status` is **not read-only**: `show_status()` ends with `ensure_router`, so using it as a health
+check starts the router when it is down rather than only reporting on it. That is convenient when
+you want the router up and fine when you do not, but it means `--status` is not a way to observe
+the router's state without changing it.
+
+`--routes` with no argument is narrower than it looks: the launcher substitutes the cloud model
+(`"${@:-$CLOUD_MODEL}"`), so a bare `deepseek --routes` answers for `deepseek-flash[1m]` alone.
+Pass the names you actually care about, or read the table `--status` prints.
 
 Host and port are read from `router.json` with `jq`, falling back to `127.0.0.1 8788` if `jq` is
 missing — which is why `install.sh` warns when it is absent.
@@ -198,10 +211,12 @@ Both are real and both can bite:
 - **The advertised window is computed from the provider, not the model.** `usable_window()` returns
   `context_window - output_reserve` for whichever provider matched. Since `context_window: 131072`
   is a property of the `local` provider, **every** model routed to `local` advertises 98304 —
-  including `qwen38-coder:q4`, whose real window is 32768. This is not a problem in the launcher's
-  default configuration (both aliases point at the 128K tag), but it means the router does not
-  police window size. If you route Claude Code at a smaller tag, the 400 comes from Ollama, not
-  from the router. Check with `python3 router.py --route MODEL`.
+  including `qwen38-coder:q4`, whose real window is 32768. The launcher's defaults do not avoid
+  this: only its `sonnet` alias points at the 128K tag, while `haiku` is `gemma3:1b` — a tag with
+  no `num_ctx` parameter at all, running at the server's `OLLAMA_CONTEXT_LENGTH` (32768 on this
+  host) and still being advertised 98304. The router does not police window size. If you route
+  Claude Code at a smaller tag, the 400 comes from Ollama, not from the router. Check with
+  `python3 router.py --route MODEL`.
 - **Token counting is estimated, not measured.** Ollama has no `count_tokens` endpoint (it answers
   with a plain-text 404 that Claude Code cannot parse), so when a provider sets
   `supports_count_tokens: false` the relay synthesises `{"input_tokens": ceil(chars/4)}` over the
@@ -209,9 +224,7 @@ Both are real and both can bite:
   model measures ~4.5 chars/token and JSON tool schemas are denser, so dividing by 4 lands
   **slightly high on purpose**: an undercount lets the prompt grow past the real window and Ollama
   answers with a hard 400, whereas an overcount just triggers auto-compact a little early. Erring
-  high is the cheap direction. (The `estimate_tokens` docstring still claims "~3 chars/token rather
-  than the usual ~4"; the code divides by 4 — the docstring is stale, the comment beside the
-  division is the accurate one.)
+  high is the cheap direction.
 
 ## 5. The local-backend shims
 
@@ -245,8 +258,9 @@ the `deepseek` provider leaves them alone — fewer moving parts on the leg that
 `max_tokens`.
 
 Claude Code sends `thinking: {"type": "adaptive"}` to model names it does not recognise as current
-Claude models — which is every name in this table, since they are all local tags. A local
-llama.cpp/Ollama backend answers adaptive thinking with a `400`.
+Claude models — every local tag in the §3 table qualifies. A local llama.cpp/Ollama backend answers
+adaptive thinking with a `400`. The shim is configured on `local` only; the cloud leg is left
+alone, so the `opus` alias is unaffected.
 
 A provider's `inject` block **forces** fields, deliberately overriding whatever the client sent.
 For `local` that is `{"thinking": {"type": "disabled"}}`. Disabling it sidesteps the 400 *and*
@@ -332,14 +346,22 @@ works without one, and only the cloud leg fails.
 ### Building the Ollama tag
 
 The launcher's `sonnet` alias has nothing to talk to until the 128K tag exists. The tag builds
-`FROM qwen38-coder:q4`, so that base tag must be present first:
+`FROM qwen38-coder:q4`, so that base tag must be present first — and the base tag is **not a
+registry model**. This stack built it from the official Qwen3.8-27B `q4_K_M` GGUF with a
+single-`FROM` Modelfile that drops the ~884 MiB vision projector and pins `num_ctx 32768`
+(`docs/MODELS.md` records it at `/home/ohmz/models/qwen38-coder/Modelfile`). That file is not in
+this repo, so a machine mounting this harness must reproduce it or import the finished tag; the
+`FROM` in it points at a local blob, not at a registry name.
 
 ```bash
-ollama pull qwen38-coder:q4                      # base tag (num_ctx 32768); import it if it is
-                                                 # not the registry copy this stack uses
+ollama pull qwen3.8:27b-q4_K_M          # the official Q4_K_M build the base tag derives from
+ollama create qwen38-coder:q4 -f <the single-FROM Modelfile described above>
 cd ai-stack/harness/deepseek
 ollama create qwen38-coder:q4-128k -f models/qwen38-coder-128k.Modelfile
 ```
+
+The base tag carries no `TEMPLATE` line either: its template comes from the GGUF itself
+(`RENDERER qwen3.8` / `PARSER qwen3.5`), which the derived tag inherits unchanged.
 
 Two things the Modelfile does **not** do, both of which the VRAM figures in §4 depend on:
 

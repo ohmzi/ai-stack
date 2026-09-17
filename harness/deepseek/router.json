@@ -27,9 +27,14 @@
       "auth": "dummy",
       "supports_count_tokens": false,
       "normalize_system": true,
-      "context_window": 131072,
-      "_output_reserve": "Claude Code asks for max_tokens=32000; the backend window covers prompt + completion, so reserve that much or a full prompt overflows.",
-      "output_reserve": 32768,
+      "_context": "SAFE DEFAULT, deliberately not the largest window on the box. A provider-level window is a lie for tags that do not share it, so an unlisted model inherits 32768 - 8192 = 24576 and a tag added later can never be advertised more context than it actually has. Measured 2026-09-17: only qwen38-coder:q4-128k is 131072; qwen38-coder:q4 pins 32768; gemma3:1b, gemma4:e2b, qwen3.8:27b-q4_K_M and hermes-genesis:apex-compact carry no num_ctx at all and run at the server's OLLAMA_CONTEXT_LENGTH, 32768.",
+      "context_window": 32768,
+      "output_reserve": 8192,
+      "_model_windows": "Opt-in overrides for the models that really are bigger. The 128K tag also needs the larger reserve: Claude Code asks for max_tokens=32000, and the backend window covers prompt + completion.",
+      "model_windows": {
+        "qwen38-coder:q4-128k": { "context_window": 131072, "output_reserve": 32768 },
+        "hermes-genesis:agent": { "context_window": 65536, "output_reserve": 8192 }
+      },
       "inject": {
         "thinking": { "type": "disabled" }
       },
