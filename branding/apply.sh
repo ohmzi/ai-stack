@@ -296,6 +296,35 @@ else
   echo "  none — no chunk names a branded asset (unexpected; check FINGERPRINTED)"
 fi
 
+# Root-relative URLs are a SECOND namespace, and the /static/-anchored pattern
+# above is blind to it. apply.sh populates both: favicon.png and favicon.ico are
+# installed at the site ROOT as well as under /static, because the root is where
+# scrapers and OS shortcut-makers probe (see BUILD_ROOT above).
+#
+# The SPA uses the ROOT one as its image-error FALLBACK — 38 references compile
+# down to `on:error={(e) => (e.currentTarget.src = '/favicon.png')}` — so any
+# avatar with no custom profile image lands on it. Those URLs never changed, so
+# the browser's cached stock copy was served forever, while the file on disk and
+# its /static/ twin were both already correct. Reported 2026-09-17 as "the icon
+# in the middle above the chatbox is still old on mobile": that is the empty-chat
+# hero's model avatar (Placeholder.svelte), and the giveaway was that the sidebar
+# right beside it had already updated.
+#
+# The `(^|[^/A-Za-z0-9_.-])` guard is load-bearing: without it the alternation
+# also fires on the tail of the /static/favicon.png?v=… URLs the step above just
+# wrote, producing a doubled query string.
+ROOT_ASSETS='favicon\.png|favicon\.ico'
+ROOT_SED="s#(^|[^/A-Za-z0-9_.-])/($ROOT_ASSETS)(\?v=[A-Za-z0-9]+)?#\1/\2?v=$STAMP#g"
+ROOT_CHUNKS=$(docker exec "$CONTAINER" grep -rlE "/($ROOT_ASSETS)" "$BUILD_APP" \
+                --include='*.js' 2>/dev/null || true)
+echo "fingerprinting root-relative fallbacks (v=$STAMP)"
+docker exec "$CONTAINER" sh -c \
+  "sed -i -E '$ROOT_SED' $INDEX $STATIC/site.webmanifest $BUILD_STATIC/site.webmanifest"
+if [ -n "$ROOT_CHUNKS" ]; then
+  printf '%s\n' "$ROOT_CHUNKS" | docker exec -i "$CONTAINER" xargs -r sed -i -E "$ROOT_SED"
+  echo "  $(printf '%s\n' "$ROOT_CHUNKS" | grep -c .) chunk file(s) re-stamped"
+fi
+
 # The shell's own branding — see the header. Every one of these is idempotent:
 # each rewrites a value in place, and the apple-mobile-web-app-title tag is
 # removed before it is re-added so a re-run cannot stack duplicates. It is
