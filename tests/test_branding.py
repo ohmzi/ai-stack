@@ -330,6 +330,41 @@ def verify_cache(stage):
           f"/static/loader.js carries {cc_static!r} — the change leaked off the SPA mount")
 
 
+def verify_site_root(stage):
+    """The two site-root files Android reads — and the soft 404 that used to answer them.
+
+    SPAStaticFiles answers any non-.js miss with index.html and a 200, so before these files
+    existed /.well-known/assetlinks.json returned ~11 KB of HTML with a content-type of
+    text/html: a "200 OK" in the one place that must never lie, because it is where Android
+    checks that this site owns the app it just installed. Android reads robots.txt FIRST and will
+    not fetch a path that is disallowed, so the stock `Disallow: /` stopped it before it asked.
+
+    Neither step exists on iOS, which is why the same site installs cleanly from Safari and
+    failed from Chrome on Android — reported 2026-09-17.
+    """
+    raw, _ = fetch_abs("/robots.txt")
+    body = (raw or b"").decode("utf-8", "replace")
+    check(f"{stage}: robots.txt is served", bool(raw), "missing or unreachable")
+    check(f"{stage}: robots.txt unblocks the path the Android verifier reads",
+          "allow: /.well-known/" in body.lower(),
+          "no Allow rule — Android reads robots.txt first and will not fetch a disallowed path")
+    check(f"{stage}: robots.txt still disallows the rest of a private instance",
+          "disallow: /" in body.lower(),
+          "the instance is private; Disallow: / should still be there")
+
+    asset, ctype = fetch_abs("/.well-known/assetlinks.json")
+    check(f"{stage}: assetlinks.json is JSON, not the SPA shell",
+          bool(asset) and "html" not in (ctype or ""),
+          f"content-type is {ctype!r} — the catch-all is answering it with HTML")
+    if asset:
+        try:
+            parsed = json.loads(asset)
+            check(f"{stage}: assetlinks.json parses as a JSON array",
+                  isinstance(parsed, list), f"got {type(parsed).__name__}")
+        except Exception as e:
+            check(f"{stage}: assetlinks.json parses as a JSON array", False, str(e))
+
+
 def verify_copy(stage):
     """The UI copy that still said WebUI.
 
@@ -402,6 +437,9 @@ def main():
     print("--- the shell revalidates instead of being reused blind ---")
     verify_cache("live")
 
+    print("--- the site root answers Android's install checks ---")
+    verify_site_root("live")
+
     print("--- the UI copy no longer says WebUI ---")
     verify_copy("live")
 
@@ -418,6 +456,9 @@ def main():
         # over from the unpatched file would restore the old SPAStaticFiles on the next boot), and
         # the header has to survive a restart exactly like the skin does.
         verify_cache("after restart")
+        # The site-root files live in /app/build, which a restart does NOT rebuild (only a
+        # recreate or an image pull wipes it) — so this also pins that assumption.
+        verify_site_root("after restart")
         verify_copy("after restart")
 
     fails = results.count(False)

@@ -1,0 +1,15 @@
+# Served at the site root, replacing Open WebUI's stock two-liner
+# ("User-agent: *" / "Disallow: /"). Installed by branding/apply.sh.
+#
+# The instance is private and stays disallowed. The one exception is for Android: its Digital
+# Asset Links verifier reads robots.txt BEFORE fetching /.well-known/assetlinks.json, and refuses
+# to fetch a path that is disallowed. Under a bare `Disallow: /` the file is therefore never even
+# requested, and a Chrome "Install app" can never be verified — while on iOS there is no such
+# verifier, which is exactly why the same site installs cleanly there and not on Android.
+#
+# Allow and Disallow are evaluated together regardless of order, and the more specific rule wins,
+# so this stays private while unblocking the one path. Full account: branding/README.md,
+# "The Android install path".
+User-agent: *
+Allow: /.well-known/
+Disallow: /
