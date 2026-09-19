@@ -444,7 +444,7 @@
  			}
  
  			messageInput?.focus({ preventScroll: true });
-@@ -4054,6 +4065,71 @@
+@@ -4054,6 +4065,103 @@
  		initiateOAuthRedirect(tool);
  	};
  
@@ -464,24 +464,42 @@
 +	const MODE_HANDOFF_MS = 120000;
 +
 +	const saveMode = (id: string | null = null) => {
++		const blob = {
++			t: Date.now(),
++			selectedFilterIds,
++			webSearchEnabled,
++			codeInterpreterEnabled,
++			imageGenerationEnabled
++		};
 +		try {
-+			sessionStorage.setItem(
-+				MODE_KEY(id),
-+				JSON.stringify({
-+					t: Date.now(),
-+					selectedFilterIds,
-+					webSearchEnabled,
-+					codeInterpreterEnabled,
-+					imageGenerationEnabled
-+				})
-+			);
++			sessionStorage.setItem(MODE_KEY(id), JSON.stringify(blob));
 +		} catch (e) {}
++		// ...and onto the CHAT, which is what makes the mode survive the tab. sessionStorage dies
++		// with the browser: reopen the chat tomorrow, or on another device, and setDefaults() puts
++		// Internet back on and the buttons go dark.
++		//
++		// A PARTIAL chat object is the shape this endpoint supports — updateChatById posts
++		// {chat: <this>} and the server merges top-level keys — so nothing but chat_mode is
++		// touched. It deliberately carries no `history` and no `messages`: the server decides
++		// whether to bump updated_at from exactly those two, so a mode change does not shove the
++		// chat to the top of the sidebar as though it had been edited.
++		//
++		// Only with an id. A mode chosen on the landing page has no chat yet; MODE_KEY(null)
++		// carries it to the message that creates one, and the saveMode(id) that follows persists
++		// it then. Fire-and-forget: a failed write costs the mode on the next reload, never the
++		// click. This still runs ONLY from the mode buttons' own callback — the rule above.
++		if (id) {
++			updateChatById(localStorage.token, id, { chat_mode: blob }).catch(() => {});
++		}
 +	};
 +
-+	const applyMode = (raw: string | null) => {
++	const applyMode = (raw: any) => {
 +		if (!raw) return false;
 +		try {
-+			const m = JSON.parse(raw);
++			// A JSON string out of sessionStorage, or the object the chat row hands back — the
++			// same blob either way. The stored form is not re-encoded on the way out, so parsing
++			// it as a string here would be a bug that only shows up once the server copy exists.
++			const m = typeof raw === 'string' ? JSON.parse(raw) : raw;
 +			selectedFilterIds = m.selectedFilterIds ?? [];
 +			webSearchEnabled = !!m.webSearchEnabled;
 +			codeInterpreterEnabled = !!m.codeInterpreterEnabled;
@@ -496,6 +514,20 @@
 +	const restoreMode = (id: string | null = null) => {
 +		try {
 +			if (applyMode(sessionStorage.getItem(MODE_KEY(id)))) return true;
++			// The chat's own record of itself. This is the layer that survives closing the
++			// browser, clearing site data, and opening the chat somewhere else entirely — none of
++			// which sessionStorage can do, which is why the mode used to come back as Internet.
++			//
++			// Read-only with respect to MODE_KEY(null): a mode restored from HERE is never written
++			// into the pending slot. That slot is the one deliberate cross-chat handoff, bounded by
++			// MODE_HANDOFF_MS, and feeding a stored mode into it is how one chat's mode could be
++			// adopted by a later, unrelated one.
++			//
++			// `chat` is assigned by loadChat(), which navigateHandler awaits before calling this.
++			// On the onMount path it may still be undefined; that call then falls through exactly
++			// as it does today, and the navigateHandler pass applies the stored mode a moment
++			// later. Worst case is one frame of the default mode, never a wrong turn.
++			if (id && applyMode(chat?.chat?.chat_mode)) return true;
 +			if (!id) return false;
 +			// The chat has just been created: adopt what was chosen while it had no id.
 +			const pending = sessionStorage.getItem(MODE_KEY(null));
@@ -516,7 +548,7 @@
  	const clearDraft = async (chatId: string | null = null) => {
  		if (saveDraftTimeout) {
  			clearTimeout(saveDraftTimeout);
-@@ -4468,6 +4544,7 @@
+@@ -4468,6 +4576,7 @@
  											}
  										}}
  										onWebSearchToggle={handleWebSearchToggle}
@@ -524,7 +556,7 @@
  										on:chatVariables={() => {
  											showChatVariablesModal = true;
  										}}
-@@ -4560,6 +4637,7 @@
+@@ -4560,6 +4669,7 @@
  											}
  										}}
  										onWebSearchToggle={handleWebSearchToggle}
@@ -532,7 +564,7 @@
  										on:chatVariables={() => {
  											showChatVariablesModal = true;
  										}}
-@@ -4606,6 +4684,7 @@
+@@ -4606,6 +4716,7 @@
  									onQueueEdit={editQueuedMessage}
  									onQueueDelete={deleteQueuedMessage}
  									onWebSearchToggle={handleWebSearchToggle}
@@ -693,3 +725,75 @@
  			<div class="fixed m-10 z-50">
  				<div class="flex space-x-2">
  					<div class=" self-center">
+--- a/src/lib/components/chat/Messages/ResponseMessage.svelte
++++ b/src/lib/components/chat/Messages/ResponseMessage.svelte
+@@ -10,6 +10,30 @@
+ 
+ 	const dispatch = createEventDispatcher();
+ 
++	// --- ai-stack: generation stats under a reply -------------------------------------------------
++	// OpenWebUI v0.3 showed response_token/s here; v0.11 cut the tooltip back to a raw dump of
++	// `message.usage`. Restored, and widened: the Assistant pipe also reports MEASURED facts for
++	// replies that streamed no tokens — a render's pipeline and steps, a notebook answer's source
++	// and citation count — so this renders whatever the payload actually carries rather than
++	// assuming an Ollama timing block. Where there is no rate to derive it says nothing about a
++	// rate, which is the honest answer: those payloads have no token counts behind them.
++	const generationStats = (usage: any) => {
++		if (!usage || typeof usage !== 'object') return { tokenRate: null, lines: [] };
++		const perSec = (count: any, durNs: any) =>
++			typeof count === 'number' && typeof durNs === 'number' && count > 0 && durNs > 0
++				? Math.round((count / (durNs / 1e9)) * 10) / 10
++				: null;
++		const tokenRate = perSec(usage.eval_count, usage.eval_duration);
++		const promptRate = perSec(usage.prompt_eval_count, usage.prompt_eval_duration);
++		const lines: string[] = [];
++		if (tokenRate !== null) lines.push(`tokens/s:          ${tokenRate}`);
++		if (promptRate !== null) lines.push(`prompt tokens/s:   ${promptRate}`);
++		for (const [k, v] of Object.entries(usage)) {
++			lines.push(`${k}: ${typeof v === 'object' && v !== null ? JSON.stringify(v) : v}`);
++		}
++		return { tokenRate, lines };
++	};
++
+ 	import { createNewFeedback, getFeedbackById, updateFeedbackById } from '$lib/apis/evaluations';
+ 	import { getChatById } from '$lib/apis/chats';
+ 	import { generateTags } from '$lib/apis';
+@@ -1195,25 +1219,16 @@
+ 								{/if}
+ 
+ 								{#if message.usage}
++									{@const _stats = generationStats(message.usage)}
+ 									<Tooltip
+-										content={message.usage
+-											? `<pre>${sanitizeResponseContent(
+-													JSON.stringify(message.usage, null, 2)
+-														.replace(/"([^(")"]+)":/g, '$1:')
+-														.slice(1, -1)
+-														.split('\n')
+-														.map((line) => line.slice(2))
+-														.map((line) => (line.endsWith(',') ? line.slice(0, -1) : line))
+-														.join('\n')
+-												)}</pre>`
+-											: ''}
++										content={`<pre>${sanitizeResponseContent(generationStats(message.usage).lines.join('\n'))}</pre>`}
+ 										placement="bottom"
+ 									>
+ 										<button
+ 											aria-hidden="true"
+ 											class=" {isLastMessage || ($settings?.highContrastMode ?? false)
+ 												? 'visible'
+-												: 'hover-reveal'} p-1.5 hover:bg-black/5 dark:hover:bg-white/5 rounded-lg dark:hover:text-white hover:text-black transition whitespace-pre-wrap"
++												: 'hover-reveal'} flex items-center gap-0.5 p-1.5 hover:bg-black/5 dark:hover:bg-white/5 rounded-lg dark:hover:text-white hover:text-black transition whitespace-pre-wrap"
+ 											on:click={() => {
+ 												console.log(message);
+ 											}}
+@@ -1234,6 +1249,9 @@
+ 													d="M11.25 11.25l.041-.02a.75.75 0 011.063.852l-.708 2.836a.75.75 0 001.063.853l.041-.021M21 12a9 9 0 11-18 0 9 9 0 0118 0zm-9-3.75h.008v.008H12V8.25z"
+ 												/>
+ 											</svg>
++											{#if _stats.tokenRate !== null}
++												<span class="text-xs font-normal">{_stats.tokenRate} tok/s</span>
++											{/if}
+ 										</button>
+ 									</Tooltip>
+ 								{/if}

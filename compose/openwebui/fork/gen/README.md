@@ -54,7 +54,7 @@ docker exec open-webui cat /app/build/_app/immutable/chunks/<chunk>.js.map > mi.
 > **Extended 2026-09-17 (the 0.11.3 rebase).** A **fifth** file is now vendored:
 > `Placeholder.svelte` (`src/lib/components/chat/Placeholder.svelte`), patched by `02` — which
 > despite its name now makes edits in **four** files, not one. `grep '^--- ' ../task-mode.patch`
-> should list **six** files after `04` has run. (Still six after `05` was added on 2026-09-17 —
+> should list **seven** files after `06` has run. (Still six after `05` was added on 2026-09-17 —
 > that one emits `shell-cache.patch`, a separate artifact. See "`05` is the odd one out" below.)
 >
 > **Extended 2026-09-18.** A sixth file joined: `Suggestions.svelte`
@@ -76,15 +76,30 @@ docker exec open-webui cat /app/build/_app/immutable/chunks/<chunk>.js.map > mi.
 > new composer cannot ship unwired. The 0.10.2 patch asserted `_n == 2` (two `MessageInput`
 > instances, no `Placeholder`).
 
-They expect the upstream `MessageInput.svelte`, `Placeholder.svelte`, `Chat.svelte`,
-`Sidebar.svelte` and `auth+page.svelte` beside them (vendored here so a rebase starts from a known
-base), and run in order:
+> **Extended 2026-09-19.** A **seventh** file joined: `Messages/ResponseMessage.svelte`, vendored
+> as `ResponseMessage.svelte` and patched by the new `06_generation_info.py`. It restores what
+> OpenWebUI v0.3 showed and v0.11 cut back — `response_token/s` on the info button under a reply,
+> where v0.11 dumps the raw `message.usage` instead — and widens it to render the MEASURED facts
+> the pipe now reports for replies that streamed no tokens (a render's `method`/`took`, a notebook
+> answer's `answer`/`citations`/`note`).
+>
+> Two things about it differ from `01`-`04` and are worth knowing before a rebase. It is the only
+> generator that patches a file **outside** `src/lib/components/chat/`'s top level, so it is the
+> second-easiest to forget to re-extract (after `auth+page.svelte`). And it anchors on **tab counts**
+> it does not own: the tooltip it replaces is nested ten levels deep, so the anchors are built with
+> `"\t" * n` and an off-by-one there is a silent near-miss — the assertion catches it as a count of
+> zero, which is the failure mode to expect.
+
+They expect the upstream `MessageInput.svelte`, `Placeholder.svelte`, `Suggestions.svelte`,
+`Chat.svelte`, `Sidebar.svelte`, `auth+page.svelte` and `ResponseMessage.svelte` beside them
+(vendored here so a rebase starts from a known base), and run in order:
 
 ```bash
 python3 01_mode_buttons.py /tmp/p1.patch      # also writes MessageInput.patched.svelte, which 02 reads
 python3 02_mode_persistence.py ../task-mode.patch
 python3 03_tasks_shortcut.py ../task-mode.patch --append
 python3 04_guest_link.py ../task-mode.patch --append
+python3 06_generation_info.py ../task-mode.patch --append
 python3 05_shell_cache.py ../shell-cache.patch    # a SECOND artifact — see below
 ```
 
@@ -145,7 +160,7 @@ artifacts:
   `/app/build`. `05` edits a Python file that is never built and is LAYERED over the base image's
   own copy. One patch file would imply a sequencing that does not exist.
 - **A count that other docs depend on.** `task-mode.patch` is documented here and in
-  `docs/STACK_SETUP.md` as touching exactly **six** files, and operators are told to check that
+  `docs/STACK_SETUP.md` as touching exactly **seven** files, and operators are told to check that
   with `grep '^--- ' ../task-mode.patch`. Folding `main.py` in would make it seven and quietly
   break four statements that are used as a verification step. **`main.py` is intentionally not in
   it** — do not "fix" that.
@@ -174,7 +189,7 @@ carries `*.new` and `*.patched.svelte`. Both patterns are deliberately narrow �
 any vendored source, including `Placeholder.svelte`, which is the one file here whose name a
 looser pattern (`Placeholder*`, `*.svelte`) would have quietly untracked.
 
-As of the 0.11.3 rebase the run writes **six**, one per file `01`-`04` touches: the four above plus
+As of the 0.11.3 rebase the run writes **seven**, one per file `01`-`04` and `06` touch: the four above plus
 `Placeholder.svelte.new` (`02` now has four `EDITS` entries) and `auth+page.patched.svelte` (`04`,
 which the 2026-08-11 note predates).
 

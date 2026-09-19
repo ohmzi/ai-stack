@@ -31,7 +31,7 @@ reasoned about:
     single most important request while the build stayed green.
 
 Its OWN patch, not an --append to task-mode.patch. That one is documented (gen/README.md:36-37,
-:52, :57) and relied on (docs/STACK_SETUP.md:135) as "exactly six frontend files", and is applied
+:52, :57) and relied on (docs/STACK_SETUP.md:139) as "exactly seven frontend files", and is applied
 BEFORE `npm run build` because it edits compiled Svelte. main.py is a backend file, is never built,
 and is COPY'd from the build stage into the runtime stage by the Dockerfile. Keeping them apart also
 means a failed `git apply` names the right artifact, and an upstream rebase of a 4669-line

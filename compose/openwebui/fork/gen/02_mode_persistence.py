@@ -264,24 +264,42 @@ ch = sub(ch,
 	const MODE_HANDOFF_MS = 120000;
 
 	const saveMode = (id: string | null = null) => {
+		const blob = {
+			t: Date.now(),
+			selectedFilterIds,
+			webSearchEnabled,
+			codeInterpreterEnabled,
+			imageGenerationEnabled
+		};
 		try {
-			sessionStorage.setItem(
-				MODE_KEY(id),
-				JSON.stringify({
-					t: Date.now(),
-					selectedFilterIds,
-					webSearchEnabled,
-					codeInterpreterEnabled,
-					imageGenerationEnabled
-				})
-			);
+			sessionStorage.setItem(MODE_KEY(id), JSON.stringify(blob));
 		} catch (e) {}
+		// ...and onto the CHAT, which is what makes the mode survive the tab. sessionStorage dies
+		// with the browser: reopen the chat tomorrow, or on another device, and setDefaults() puts
+		// Internet back on and the buttons go dark.
+		//
+		// A PARTIAL chat object is the shape this endpoint supports — updateChatById posts
+		// {chat: <this>} and the server merges top-level keys — so nothing but chat_mode is
+		// touched. It deliberately carries no `history` and no `messages`: the server decides
+		// whether to bump updated_at from exactly those two, so a mode change does not shove the
+		// chat to the top of the sidebar as though it had been edited.
+		//
+		// Only with an id. A mode chosen on the landing page has no chat yet; MODE_KEY(null)
+		// carries it to the message that creates one, and the saveMode(id) that follows persists
+		// it then. Fire-and-forget: a failed write costs the mode on the next reload, never the
+		// click. This still runs ONLY from the mode buttons' own callback — the rule above.
+		if (id) {
+			updateChatById(localStorage.token, id, { chat_mode: blob }).catch(() => {});
+		}
 	};
 
-	const applyMode = (raw: string | null) => {
+	const applyMode = (raw: any) => {
 		if (!raw) return false;
 		try {
-			const m = JSON.parse(raw);
+			// A JSON string out of sessionStorage, or the object the chat row hands back — the
+			// same blob either way. The stored form is not re-encoded on the way out, so parsing
+			// it as a string here would be a bug that only shows up once the server copy exists.
+			const m = typeof raw === 'string' ? JSON.parse(raw) : raw;
 			selectedFilterIds = m.selectedFilterIds ?? [];
 			webSearchEnabled = !!m.webSearchEnabled;
 			codeInterpreterEnabled = !!m.codeInterpreterEnabled;
@@ -296,6 +314,20 @@ ch = sub(ch,
 	const restoreMode = (id: string | null = null) => {
 		try {
 			if (applyMode(sessionStorage.getItem(MODE_KEY(id)))) return true;
+			// The chat's own record of itself. This is the layer that survives closing the
+			// browser, clearing site data, and opening the chat somewhere else entirely — none of
+			// which sessionStorage can do, which is why the mode used to come back as Internet.
+			//
+			// Read-only with respect to MODE_KEY(null): a mode restored from HERE is never written
+			// into the pending slot. That slot is the one deliberate cross-chat handoff, bounded by
+			// MODE_HANDOFF_MS, and feeding a stored mode into it is how one chat's mode could be
+			// adopted by a later, unrelated one.
+			//
+			// `chat` is assigned by loadChat(), which navigateHandler awaits before calling this.
+			// On the onMount path it may still be undefined; that call then falls through exactly
+			// as it does today, and the navigateHandler pass applies the stored mode a moment
+			// later. Worst case is one frame of the default mode, never a wrong turn.
+			if (id && applyMode(chat?.chat?.chat_mode)) return true;
 			if (!id) return false;
 			// The chat has just been created: adopt what was chosen while it had no id.
 			const pending = sessionStorage.getItem(MODE_KEY(null));

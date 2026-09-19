@@ -51,8 +51,9 @@ docs/flight-recon/*/pages/
 # exception, and only between 01 and 02, which run in the same sitting.
 #
 # These patterns are deliberately narrow. The VENDORED sources — MessageInput.svelte, Chat.svelte,
-# Sidebar.svelte, auth+page.svelte and (since 0.11.3) Placeholder.svelte — DO belong in git: they
-# are the known base a rebase starts from, and the whole reason gen/ exists. A `*.svelte` or
+# Sidebar.svelte, auth+page.svelte, Placeholder.svelte and Suggestions.svelte (both since 0.11.3)
+# and ResponseMessage.svelte (since 2026-09-19) — DO belong in git: they are the known base a
+# rebase starts from, and the whole reason gen/ exists. A `*.svelte` or
 # `Placeholder*` pattern here would silently untrack them and turn the next rebase into a
 # from-scratch derivation.
 *.new

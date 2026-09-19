@@ -18,7 +18,8 @@
 # ----------------
 # The frontend, plus EXACTLY ONE backend file. The patches are:
 #
-#   task-mode.patch    (gen/01-04)  six Svelte sources — the Internet/Code/Task/Notebook mode buttons.
+#   task-mode.patch    (gen/01-04, 06)  seven Svelte sources — the Internet/Code/Task/Notebook mode
+#                                   buttons, the per-chat mode memory, and the generation-stats button.
 #                                   Applied before `npm run build`; the result REPLACES /app/build.
 #   shell-cache.patch  (gen/05)     backend/open_webui/main.py — one class, SPAStaticFiles, which
 #                                   serves the SPA shell with `Cache-Control: no-cache` so a
