@@ -5917,6 +5917,7 @@ class Pipe:
         half-delivered or refused answer is worse than no suggestion — it would invite the user to
         ask next about something the assistant never actually said.
         """
+        t0 = time.monotonic()
         await self._status(emitter, f"Searching **{name}**…", done=False)
         payload = nbr.build_ask_payload(question, nb_id, models)
         headers = nbr.ask_headers(OPEN_NOTEBOOK_PASSWORD or None)
@@ -6006,6 +6007,9 @@ class Pipe:
             if footer:
                 yield footer
             await self._status(emitter, "Done", done=True)
+            await self._stats(emitter, answer=name, took=self._fmt_dur(time.monotonic() - t0),
+                              citations=len(streamer.targets),
+                              note="no tokens/s — Open Notebook reports no token counts")
             kick("".join(parts))
             return
 
@@ -6021,6 +6025,15 @@ class Pipe:
 
         yield self._nb_with_sources(final)
         await self._status(emitter, "Done", done=True)
+        # Older servers send the whole answer in one `final_answer`, so there are no numbered
+        # targets to count — renumber() is a local parse, not a request, and best-effort.
+        try:
+            cites = len(nbr.renumber(final)[1])
+        except Exception:
+            cites = 0
+        await self._stats(emitter, answer=name, took=self._fmt_dur(time.monotonic() - t0),
+                          citations=cites,
+                          note="no tokens/s — Open Notebook reports no token counts")
         kick(final)
 
     def _nb_with_sources(self, answer):
@@ -7651,9 +7664,35 @@ class Pipe:
         """Collapse the live status to a final 'Generated in 4m 12s · …' line (or clear it on error)."""
         if self._is_media(result):
             await self._status(emitter, f"{verb} in {self._fmt_dur(elapsed)} · {detail}", done=True)
+            # The same figures, into the info button, so every reply has one. The status line
+            # already says this and already persists (the emitter's own 'status' branch writes it
+            # to the chat row), so this is deliberately a duplicate rather than the only copy.
+            await self._stats(emitter, method=detail, took=self._fmt_dur(elapsed))
         else:
             await self._status(emitter, "", done=True)  # error text is already in the message body
         return result
+
+    async def _stats(self, emitter, **fields):
+        """Put generation stats in the info button under a reply.
+
+        Emitted through the event emitter rather than yielded as a `{"usage": ...}` frame, and the
+        difference matters: a yielded frame goes through middleware's merge_usage, whose
+        normalize_usage unconditionally writes `input_tokens`, `output_tokens` and `total_tokens`
+        — as ZERO when the payload carries no token counts. For a notebook answer or a render that
+        is not "no data", it is OWUI asserting the model produced no tokens, which is false and
+        would sit in the tooltip looking exactly as authoritative as the measured lines beside it.
+        The emitter delivers precisely these fields and nothing else.
+
+        The cost of that choice, stated plainly: these figures live for the current view only. A
+        pipe cannot write them to the chat row. The Ollama chat path CAN, and does — it has real
+        token counts, which is why it uses the other channel.
+        """
+        if not emitter or not fields:
+            return
+        try:
+            await emitter({"type": "chat:completion", "data": {"usage": fields}})
+        except Exception:
+            pass
 
     async def pipe(self, body: dict, __metadata__=None, __event_emitter__=None, __event_call__=None,
                    __user__=None, __task__=None):

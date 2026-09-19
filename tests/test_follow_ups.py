@@ -374,8 +374,20 @@ def main():
             mod.aiohttp = real_aiohttp
         return seen
 
+    EVENTS.clear()
     seen = run(drive_nb([{"type": "final_answer", "content": "Zakat is 2.5%."}]))
     check("a notebook answer suggests follow-ups", len(seen) == 1, repr(seen))
+
+    # The info button under a notebook answer. Open Notebook reports no token counts, so it
+    # carries measured facts and says why there is no rate, rather than a fabricated one.
+    stats = [e for e in EVENTS if e.get("type") == "chat:completion"]
+    check("a notebook answer also emits generation stats", len(stats) == 1, repr(EVENTS))
+    usage = (stats[0].get("data") or {}).get("usage") if stats else {}
+    check("...naming the notebook and the duration",
+          usage.get("answer") == "Islamic guidance" and str(usage.get("took", "")).endswith("s"),
+          repr(usage))
+    check("...and saying there is no tokens/s rather than inventing one",
+          "no token" in str(usage.get("note", "")).lower() and "tokens/s" not in usage, repr(usage))
     if seen:
         check("...tagged as notebook mode", seen[0]["mode"] == "notebook", repr(seen[0]["mode"]))
         check("...carrying the question and the answer",

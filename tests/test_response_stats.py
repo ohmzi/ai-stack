@@ -197,7 +197,40 @@ async def main():
     check("pipe(stream=False): nothing yielded", usages == [], repr(usages))
     check("pipe(stream=False): reply text is unchanged", text == "Hello", repr(text))
 
-    # --- 7. the extractor itself --------------------------------------------------------
+    # --- 7. replies that streamed no tokens: renders and notebook answers ----------------
+    # These carry MEASURED facts (duration, what made it) and never a rate, because there are no
+    # token counts to divide. They go through the event emitter rather than a yielded frame: a
+    # yielded frame passes middleware's normalize_usage, which would write input_tokens: 0,
+    # output_tokens: 0 and total_tokens: 0 into the tooltip — OWUI asserting a model produced no
+    # tokens, sitting beside measured lines looking equally authoritative.
+    print("\n--- measured stats for replies that streamed no tokens ---")
+    events = []
+
+    async def emit(ev):
+        events.append(ev)
+
+    p = mod.Pipe()
+    await p._finish(emit, "![stub](data:,)", "Generated", 65.0,
+                    "RedCraft · 1024×1024 · 8 steps")
+    usage = [e for e in events if e.get("type") == "chat:completion"]
+    check("a render emits generation stats", len(usage) == 1, repr(events))
+    stats = (usage[0].get("data") or {}).get("usage") if usage else {}
+    check("...carrying the same figures as the status line",
+          "RedCraft" in str(stats.get("method")) and "1m 05s" == stats.get("took"), repr(stats))
+    check("...and no fabricated token fields",
+          not any(k in stats for k in ("input_tokens", "output_tokens", "total_tokens")),
+          repr(stats))
+
+    events.clear()
+    await p._finish(emit, "⚠️ render failed", "Generated", 3.0, "")
+    check("a failed render emits no stats",
+          [e for e in events if e.get("type") == "chat:completion"] == [], repr(events))
+
+    events.clear()
+    await mod.Pipe()._stats(None, took="1s")
+    check("no emitter -> no stats, no crash", events == [], repr(events))
+
+    # --- 8. the extractor itself --------------------------------------------------------
     f = mod.Pipe._usage_from_ollama
     check("extractor: no timing fields -> None", f({"done": True}) is None)
     check("extractor: zero durations -> no rate and no crash",

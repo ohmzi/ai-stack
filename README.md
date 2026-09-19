@@ -77,12 +77,17 @@ Highlights:
   idle-gated ComfyUI unloads, and recovery from a wedged allocator on OOM.
 - **Native status line** — a live elapsed ticker collapsing to
   `Generated in 1m 05s · RedCraft · 1024×1024 · 8 steps`.
-- **Generation stats under a reply** — hover the `ⓘ` for tokens/s, prompt tokens/s and Ollama's
-  raw timing block, on any turn a model actually streamed. The pipe yields those numbers as a
-  `{"usage": ...}` frame rather than an emitter event, so OpenWebUI attaches them to the message and
-  saves them: the figure survives a reload. Turns no model streamed — Notebook mode, the Task
-  agent, an image or video render — show no button at all, because a rate for them would be
-  fiction.
+- **Generation stats under a reply** — hover the `ⓘ`. On a chat turn that is tokens/s, prompt
+  tokens/s and Ollama's raw timing block; the pipe yields those as a `{"usage": ...}` frame rather
+  than an emitter event, so they attach to the message and are saved, and the figure survives a
+  reload. Renders and Notebook answers show the button too, with **measured** facts instead of a
+  rate — `Generated in 1m 05s · RedCraft · 1024×1024 · 8 steps` for a render, the notebook and its
+  citation count for a notebook answer. Those go through the emitter rather than a yielded frame,
+  because a yielded frame passes OpenWebUI's `normalize_usage`, which writes `input_tokens: 0`,
+  `output_tokens: 0` and `total_tokens: 0` for any payload without token counts — OWUI asserting a
+  model produced no tokens, sitting beside measured lines and looking just as authoritative. The
+  cost of that choice: those figures live for the current view. No rate is shown where none can be
+  measured, and the tooltip says so rather than leaving a gap that reads as a bug.
 - **Follow-up chips written for the mode you are in** — after a reply the pipe reads back the
   **whole conversation** and proposes what to ask next, in the idiom of the mode: tests and edge
   cases in a Code chat, notebook phrasings in a Notebook chat, "has this changed since" in an
