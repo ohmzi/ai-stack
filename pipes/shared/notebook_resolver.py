@@ -647,6 +647,59 @@ def format_sources(resolved: Sequence[Dict[str, str]]) -> str:
     return "\n".join(lines)
 
 
+# A marker is at most "[source_insight:" + a 12-char key + "]" ~= 30 chars. Anything longer
+# than this with no closing bracket is prose, not a marker still arriving.
+_MARKER_MAX = 64
+
+
+class StreamingRenumber:
+    """Incremental twin of renumber(), for text that is still arriving.
+
+    renumber() can only rewrite a finished string. Numbering is assigned in order of first
+    appearance, though, so it can be decided the moment each marker completes -- which is
+    what lets an answer stream and still come out numbered, instead of forcing a choice
+    between citations and first-token latency.
+
+    Usage: feed() each delta and emit what it returns; call flush() once the stream ends so
+    a held-back partial marker is not swallowed. `.targets` accumulates in the same order
+    renumber() would produce, so it feeds resolve_citations() unchanged.
+    """
+
+    def __init__(self) -> None:
+        self._pending = ""
+        self._order: List[Tuple[str, str]] = []
+        self._index: Dict[Tuple[str, str], int] = {}
+
+    @property
+    def targets(self) -> List[Tuple[str, str]]:
+        return list(self._order)
+
+    def feed(self, text: str, final: bool = False) -> str:
+        buffer = self._pending + (text or "")
+        self._pending = ""
+        if not final:
+            # Hold back a marker that is still arriving: everything from an unmatched "["
+            # onwards. Once it exceeds _MARKER_MAX it cannot be a marker, so release it --
+            # that keeps a stray "[" in prose from stalling the stream forever.
+            open_at = buffer.rfind("[")
+            if open_at != -1 and open_at > buffer.rfind("]"):
+                tail = buffer[open_at:]
+                if len(tail) <= _MARKER_MAX:
+                    self._pending = tail
+                    buffer = buffer[:open_at]
+        return MARKER_RE.sub(self._number, buffer)
+
+    def flush(self) -> str:
+        return self.feed("", final=True)
+
+    def _number(self, m: "re.Match[str]") -> str:
+        key = (m.group(1), m.group(2))
+        if key not in self._index:
+            self._order.append(key)
+            self._index[key] = len(self._order)
+        return f"[{self._index[key]}]"
+
+
 # ---------------------------------------------------------------------------------------------
 # Open Notebook client. Synchronous on purpose: the pipe wraps each call in asyncio.to_thread,
 # which is how this stack already reaches the hermes gateway.

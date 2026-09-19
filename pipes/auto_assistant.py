@@ -5794,6 +5794,11 @@ class Pipe:
         timeout = aiohttp.ClientTimeout(total=None, sock_connect=15,
                                         sock_read=NOTEBOOK_ASK_TIMEOUT_S)
         final, seen, err = "", 0, ""
+        # The synthesis arrives delta by delta (`final_answer_delta`), numbered on the fly so
+        # the answer streams AND keeps its citations. Older servers send only the whole
+        # `final_answer`, which falls through to the original single-yield path below.
+        streamer = nbr.StreamingRenumber()
+        streamed = False
         try:
             async with aiohttp.ClientSession(timeout=timeout) as s:
                 async with s.post(nbr.ask_stream_url(OPEN_NOTEBOOK_URL), json=payload,
@@ -5823,6 +5828,16 @@ class Pipe:
                             await self._status(emitter, f"Reading **{name}**… ({seen})")
                         elif kind == "final_answer":
                             final = frame.get("content") or frame.get("final_answer") or final
+                        elif kind == "final_answer_delta":
+                            piece = streamer.feed(frame.get("content") or "")
+                            if piece:
+                                streamed = True
+                                yield piece
+                        elif kind == "final_answer_delta_end":
+                            tail = streamer.flush()
+                            if tail:
+                                streamed = True
+                                yield tail
                         elif kind == "complete":
                             final = frame.get("final_answer") or final
                         elif kind == "error":
@@ -5830,6 +5845,13 @@ class Pipe:
         except asyncio.CancelledError:
             raise
         except Exception as e:
+            if streamed:
+                # Partial text is already on screen, so it cannot be re-rendered or
+                # renumbered now — say what happened instead of pretending it completed.
+                yield self._nb_footer(streamer.targets)
+                yield "\n\n⚠️ The answer was cut off — Open Notebook's stream ended early."
+                await self._status(emitter, "Done", done=True)
+                return
             if final:
                 yield self._nb_with_sources(final) + (
                     "\n\n⚠️ The answer was cut off — Open Notebook's stream ended early.")
@@ -5838,6 +5860,15 @@ class Pipe:
             yield (f"Open Notebook isn't reachable at {OPEN_NOTEBOOK_URL} — nothing was asked. "
                    f"[{type(e).__name__}]")
             await self._status(emitter, "Failed", done=True)
+            return
+
+        if streamed:
+            # Body is already delivered; only the Sources footer is outstanding, and it
+            # needs network round trips — so it lands after the prose, never blocking it.
+            footer = self._nb_footer(streamer.targets)
+            if footer:
+                yield footer
+            await self._status(emitter, "Done", done=True)
             return
 
         if err and not final:
@@ -5869,6 +5900,22 @@ class Pipe:
             return text + nbr.format_sources(resolved)
         except Exception:
             return answer
+
+    def _nb_footer(self, targets):
+        """Sources footer for an answer whose body already streamed.
+
+        The markers were numbered as they arrived, so there is no text left to rewrite —
+        only the footer to fetch. Best-effort by design: resolution costs one request per
+        citation, and losing the footer is a far smaller failure than losing the answer.
+        """
+        try:
+            if not targets:
+                return ""
+            resolved = nbr.resolve_citations(OPEN_NOTEBOOK_URL, OPEN_NOTEBOOK_PASSWORD or None,
+                                             targets, timeout=NOTEBOOK_CALL_TIMEOUT_S)
+            return nbr.format_sources(resolved)
+        except Exception:
+            return ""
 
     # ---------- the Code control ----------
     @staticmethod
