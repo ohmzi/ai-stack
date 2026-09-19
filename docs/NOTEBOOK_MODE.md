@@ -103,6 +103,38 @@ The question handed to Open Notebook has the name and the boilerplate stripped
 (`"check islamic guidance to answer this question: what does zakat mean?"` → `"what does zakat
 mean?"`). Naming a notebook with no question parks it and asks what to ask.
 
+### A settled notebook is remembered for the chat
+
+Added 2026-09-19. Resolving from the user's words is right for the first turn and wrong for every
+turn after it: once a chat is plainly about Islamic guidance, being asked which notebook you meant —
+again, and again — reads as though the assistant forgot the conversation between messages.
+
+So once a notebook is settled — named unambiguously, or picked from the candidates — it is recorded
+for that chat, and a later turn that names none is answered from it instead of re-asking. Naming a
+different notebook always wins and replaces the memory.
+
+Three properties are deliberate, and each one is a failure this mode must not have:
+
+- **It cannot cross chats.** The store is keyed on the chat id *and* the user handle, and there is
+  deliberately **no "most recent notebook" fallback**: a missing chat id means *no memory*, never
+  someone else's. A memory read back in the wrong chat answers from the wrong book while the
+  interface says otherwise, which is the one failure the whole feature is built to avoid. The guard
+  is the same one `_park_jobs` uses for the same reason.
+- **A notebook that has gone falls back to asking.** It is re-resolved against the live list every
+  turn, so one deleted in Open Notebook between two messages is not answered from. Answering from a
+  book that is gone would be a fabrication.
+- **An unanswerable notebook is never remembered.** `_nb_answer` refuses a notebook with no sources;
+  recording one would turn "which notebook?" into a refusal replayed on every later turn, with no
+  way back to the list.
+
+It lives at `/app/backend/data/notebook_memory.json` (override with `NOTEBOOK_MEMORY`), written
+atomically and bounded to the newest 200 chats. A file on the data volume rather than a dict beside
+`_notebook_pending` — which is in-memory and wiped by every redeploy, and losing the memory that way
+is most of the annoyance. A chat that falls off the end is simply asked once more.
+
+`tests/test_notebook_memory.py` pins all of it, including both contamination cases and the
+deletion case.
+
 ## The catalogue ("what's in here, and how do I ask about it?")
 
 With Notebook on, a question *about the collection* rather than about its contents is answered from
@@ -144,6 +176,19 @@ generator additionally persists them onto the chat row (`Chats.upsert_message_to
 and a pipe cannot reach that, so they may not survive a reload. And the mode is not required to be
 on for the chips to make sense, but they only appear when the catalogue answers, which happens
 inside the mode.
+
+**A notebook answer gets generated chips too**, via the same `_suggest_follow_ups` the chat paths
+use — offered at the two exits in `_nb_stream` where an answer actually reached the user, and at no
+other. The other exits are failures and truncations, and a suggestion built on a half-delivered
+answer is worse than none: it invites the user to ask next about something the assistant never
+said. This path asks the **1B**, not the model that answered (that model lives inside Open Notebook
+and the pipe cannot address it), so there is no warm tag to reuse and loading the 17 GB chat tenant
+purely to write three questions would be absurd.
+
+So Notebook mode has both kinds of chip, and they are different on purpose. A **catalogue** question
+gets the deterministic ones, built from your real notebook names — every chip a phrasing the
+resolver actually resolves. An **answer** gets generated ones, written from the whole conversation.
+The first is a map of what exists; the second is a way onward.
 
 **The classifier is high-precision on purpose.** `book` appears in ordinary questions constantly —
 this box's own session history opens with *"What does **this book** talk about in regards to living

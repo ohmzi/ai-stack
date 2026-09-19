@@ -77,6 +77,24 @@ Highlights:
   idle-gated ComfyUI unloads, and recovery from a wedged allocator on OOM.
 - **Native status line** — a live elapsed ticker collapsing to
   `Generated in 1m 05s · RedCraft · 1024×1024 · 8 steps`.
+- **Generation stats under a reply** — hover the `ⓘ` for tokens/s, prompt tokens/s and Ollama's
+  raw timing block, on any turn a model actually streamed. The pipe yields those numbers as a
+  `{"usage": ...}` frame rather than an emitter event, so OpenWebUI attaches them to the message and
+  saves them: the figure survives a reload. Turns no model streamed — Notebook mode, the Task
+  agent, an image or video render — show no button at all, because a rate for them would be
+  fiction.
+- **Follow-up chips written for the mode you are in** — after a reply the pipe reads back the
+  **whole conversation** and proposes what to ask next, in the idiom of the mode: tests and edge
+  cases in a Code chat, notebook phrasings in a Notebook chat, "has this changed since" in an
+  Internet chat. The model asked is **the one that just answered** — it is warm by construction, so
+  this can never cost a load or evict the tenant that wrote the reply, and in a Code chat that means
+  the coder tenant rather than a 17 GB swap. Notebook answers, which run no Ollama model, fall back
+  to the 1B. The log is capped to the chat model's own window, oldest turns dropped first, and
+  injected web/RAG context is stripped — it is not conversation the user can see. OpenWebUI's own
+  generator would fill this slot but cannot run here (see below), so the pipe emits the same
+  `chat:message:follow_ups` event it uses for the notebook catalogue. It asks for one question per
+  line rather than JSON, because asked for JSON the 1B returns three concatenated objects —
+  measured, not assumed. Chips live for the current view; a pipe cannot write them to the chat row.
 
 ## Filters
 
@@ -84,7 +102,7 @@ Highlights:
 |---|---|
 | `adaptive_memory` | Vendored Adaptive Memory v4.4.1 (`1818TusculumSt/owui-adaptive-memory`) — extracts, dedupes and embeds per-user memories, then prepends them to the last user message. Attached to `Assistant` specifically rather than globally. Provenance and the license caveat: [docs/CAPABILITY_UPGRADE_PLAN.md](docs/CAPABILITY_UPGRADE_PLAN.md). |
 | `task_mode` | The **Task** control in the chat input — one of the mutually-exclusive mode buttons the frontend fork adds (Internet / Code / Task / Notebook). While it is on, the turn goes to the hermes background-task agent instead of being guessed at from the user's wording, and Internet / Code are stood down server-side for that turn. Off by default. The *filter* is stateless — read per turn, never remembered server-side — but the fork's `Chat.svelte` does remember the choice **per chat**, and deliberately only when the user made it, so an incidental reset cannot silently re-arm a mode. `toggle` must be set on the *instance*, not the module: OpenWebUI reads it off the instantiated Filter, and a module-level-only `toggle` loads fine, passes every static check, and produces no control in the UI. |
-| `notebook_mode` | The **Notebook** control in the chat input — the fourth of the mutually-exclusive mode buttons. While it is on, the turn is answered from one notebook in Open Notebook, chosen by matching the notebook's name against the user's own words ("check islamic guidance to answer this question"). Matching is deterministic string scoring, never a model's guess, because answering from the wrong notebook while the interface says otherwise is the one failure this feature must not have. Asking *about the collection* ("what kind of books are there", "how do I ask a question") is answered from the notebook list and its sources — also deterministically, so it names your real notebooks and real books and shows a phrasing that works. When the name is ambiguous it offers the closest matches and holds the question until the user picks; when the notebook has no sources, or Open Notebook is not reachable, or the running Open Notebook is a version that ignores a notebook scope, it refuses and says why rather than falling through to normal chat. Off by default. Setup, the scoring table and the version requirement: [docs/NOTEBOOK_MODE.md](docs/NOTEBOOK_MODE.md). |
+| `notebook_mode` | The **Notebook** control in the chat input — the fourth of the mutually-exclusive mode buttons. While it is on, the turn is answered from one notebook in Open Notebook, chosen by matching the notebook's name against the user's own words ("check islamic guidance to answer this question"). Matching is deterministic string scoring, never a model's guess, because answering from the wrong notebook while the interface says otherwise is the one failure this feature must not have. Asking *about the collection* ("what kind of books are there", "how do I ask a question") is answered from the notebook list and its sources — also deterministically, so it names your real notebooks and real books and shows a phrasing that works. When the name is ambiguous it offers the closest matches and holds the question until the user picks — and once a chat has settled on a notebook it is **remembered for that chat**, so later turns that name none are answered from it rather than re-asking. That memory is a file on the data volume, so it survives redeploys, and it is keyed on the chat id *and* the user, because a memory read back in the wrong chat answers from the wrong book while the interface says otherwise. When the notebook has no sources, or Open Notebook is not reachable, or the running Open Notebook is a version that ignores a notebook scope, it refuses and says why rather than falling through to normal chat. Off by default. Setup, the scoring table and the version requirement: [docs/NOTEBOOK_MODE.md](docs/NOTEBOOK_MODE.md). |
 
 ### The picker is curated on purpose
 

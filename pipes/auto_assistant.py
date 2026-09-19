@@ -386,6 +386,20 @@ FLIGHT_MAX_TURNS = 6       # asks before the flow gives up and says so rather th
 ALERT_CONTACTS_FILE = os.environ.get("ALERT_CONTACTS",
                                      "/app/backend/data/alerts/contacts.json")
 ALERT_PROFILE_FILE = os.environ.get("ALERT_PROFILE", "/app/backend/data/alerts/profile.json")
+# Which notebook a chat settled on, so Notebook mode does not re-ask. On the data volume rather
+# than in a dict beside _notebook_pending, which is the whole point: that one is per-process and is
+# wiped by every deploy, and being asked to name the same notebook again after a deploy is exactly
+# the behaviour this exists to stop.
+#
+#   {chat_id: {"h": handle, "t": epoch, "id": notebook_id, "n": notebook_name}}
+#
+# `h` is the same ownership guard TASK_OWNERS_FILE carries and for the same reason: chat ids should
+# already be per-user, but a lookup must not be able to answer from another person's notebook if
+# they are not. Bounded by count, oldest first — a chat that falls off the end is simply asked once
+# more, which is the failure this can afford.
+NOTEBOOK_MEMORY_FILE = os.environ.get("NOTEBOOK_MEMORY",
+                                      "/app/backend/data/notebook_memory.json")
+NOTEBOOK_MEMORY_MAX = 200
 # Who owns which background job. hermes has no per-job owner field and cannot be given one that
 # survives an upgrade (its REST PATCH whitelist rejects unknown keys, the agent's cronjob tool
 # cannot set them, and the pipe cannot import hermes across the container boundary), so ownership
@@ -427,6 +441,35 @@ AUTO_ROUTE_CODER = True
 # turn would pay two loads instead of none.
 ROUTE_CLASSIFIER_MODEL = "gemma3:1b"
 ROUTE_CLASSIFIER_TIMEOUT = 12       # seconds; on any failure we fall back to normal chat
+
+# Follow-up chips under a reply. Same 1B as the router — measured co-resident with the chat tenant,
+# which is the whole reason this can run without taking the GPU lock or evicting the model that just
+# answered. gemma4:e2b is deliberately NOT used: it evicts the chat tenant (docs/MODELS.md).
+FOLLOWUP_MODEL = ROUTE_CLASSIFIER_MODEL
+FOLLOWUP_TIMEOUT = 30               # seconds; generous, because nothing waits on it
+FOLLOWUP_MAX = 3                    # chips to show
+# Lines that are not a question, in the two shapes measured from gemma3:1b. Asked for three lines,
+# it sometimes opens with a lead-in ("Okay, here are three short questions the user might ask
+# next:") and sometimes declines outright — and in a one-question-per-line format a refusal is
+# indistinguishable from a single suggestion, so the chip reads "I cannot help with that." Nothing
+# that announces a list is a question, nothing that ends in a colon is, and nothing that refuses is.
+FOLLOWUP_PREAMBLE = re.compile(
+    r"^(?:ok(?:ay)?|sure|certainly|alright|of course|here(?:'s| is| are)|these are"
+    r"|the following|and here|below are"
+    r"|i (?:cannot|can't|can not|am unable|'m unable)|i'm sorry|i am sorry|sorry|as an ai"
+    r"|unfortunately)\b", re.I)
+# What the conversation is FOR, which is the only thing that makes a suggestion better than the
+# static pools on the landing page: "add tests for that" is a good next question in a code chat and
+# a nonsense one in a chat that just summarised a document.
+FOLLOWUP_MODE_HINT = {
+    "code": "This is a coding conversation. Suggest concrete next steps on the same code — tests, "
+            "edge cases, refactors, or how to run it.",
+    "notebook": "This conversation is answered from a notebook of documents. Suggest questions to "
+                "ask that notebook next, phrased as the user would say them.",
+    "web": "This conversation used a web search for current information. Suggest follow-ups that "
+           "would need fresh or up-to-date facts.",
+    "plain": "Suggest follow-ups that go deeper into what was just discussed.",
+}
 
 # Let OpenWebUI's own system messages through on the 'auto' entry — native memory, folder system
 # prompts, and anything else injected as role=system. Historically 'auto' replaced every system
@@ -2512,6 +2555,57 @@ class Pipe:
 
     def _contact(self, handle):
         return (self._read_json(ALERT_CONTACTS_FILE, {}) or {}).get(handle) or {}
+
+    # ---------- notebook memory ----------
+    def _nb_recall(self, cid, handle):
+        """The notebook this chat settled on, or None.
+
+        None for every way of not knowing: no chat id, no record, a record belonging to someone
+        else. The caller cannot tell those apart and must not try — each one means "ask", which is
+        the safe answer. There is deliberately NO fallback to "the most recent notebook": that is
+        precisely how one chat comes to answer from another chat's book.
+        """
+        if not cid:
+            return None
+        entry = (self._read_json(NOTEBOOK_MEMORY_FILE, {}) or {}).get(cid)
+        if not isinstance(entry, dict) or not entry.get("id"):
+            return None
+        if (entry.get("h") or "user") != (handle or "user"):
+            return None
+        return {"id": entry["id"], "name": entry.get("n") or ""}
+
+    def _nb_remember(self, cid, handle, nb):
+        """Record the notebook this chat settled on. Best-effort by design: every failure path
+        costs one re-ask, and none of them may cost the answer itself."""
+        if not cid:
+            return
+        nb_id = nb.get("id") if isinstance(nb, dict) else getattr(nb, "id", "")
+        name = nb.get("name") if isinstance(nb, dict) else getattr(nb, "name", "")
+        count = nb.get("source_count") if isinstance(nb, dict) else getattr(nb, "source_count", 0)
+        # Never remember a notebook that cannot answer. _nb_answer refuses an empty one, so
+        # recording it would turn "which notebook?" into a refusal replayed on every later turn,
+        # with no way back to the list. An unusable notebook must stay unremembered.
+        if not nb_id or not count:
+            return
+        try:
+            store = self._read_json(NOTEBOOK_MEMORY_FILE, {}) or {}
+            if not isinstance(store, dict):
+                store = {}
+            store.pop(cid, None)      # move-to-end, so the bound drops the least recently used
+            store[cid] = {"h": handle or "user", "t": time.time(), "id": nb_id, "n": name}
+            if len(store) > NOTEBOOK_MEMORY_MAX:
+                for stale in sorted(store, key=lambda k: store[k].get("t") or 0
+                                    )[:len(store) - NOTEBOOK_MEMORY_MAX]:
+                    store.pop(stale, None)
+            # Atomic replace, same as _write_owners: a concurrent turn reads this file to decide
+            # whether to ask, and a half-written map reads as "no memory" for every chat at once.
+            os.makedirs(os.path.dirname(NOTEBOOK_MEMORY_FILE), exist_ok=True)
+            tmp = NOTEBOOK_MEMORY_FILE + ".tmp"
+            with open(tmp, "w") as f:
+                json.dump(store, f, indent=2)
+            os.replace(tmp, NOTEBOOK_MEMORY_FILE)
+        except Exception:
+            pass
 
     @staticmethod
     def _owui_email(handle):
@@ -5598,7 +5692,7 @@ class Pipe:
         except Exception:
             return mod
 
-    async def _notebook_mode_turn(self, cid, text, src, emitter):
+    async def _notebook_mode_turn(self, cid, text, src, emitter, handle="user"):
         """The whole turn, given that the user turned Notebook on.
 
         Returns an async iterable to hand back from pipe(), or None to fall through. The ONLY
@@ -5606,6 +5700,10 @@ class Pipe:
         Every other outcome — including every failure — returns a message, because falling through
         to normal chat while the interface says Notebook would answer from a model that has no
         notebook behind it at all.
+
+        `handle` is not used for routing. It rides along only so the notebook this chat settled on
+        can be recorded and read back under an owner, and a chat that is somehow not the reader's
+        is asked rather than answered.
         """
         global nbr
         nbr = self._sidecar_current(nbr)
@@ -5634,6 +5732,7 @@ class Pipe:
                     cand = pend["cands"][idx]
                     self._notebook_pending.pop(cid, None)
                     self._route_metric("notebook", 0, "confirmed", text)
+                    self._nb_remember(cid, handle, cand)
                     return await self._nb_answer(cand, pend["q"], cid, emitter)
                 # Nothing resolved: re-ask, and never silently drop the parked question.
                 pend["turns"] = pend.get("turns", 0) + 1
@@ -5651,6 +5750,7 @@ class Pipe:
             self._notebook_pending.pop(cid, None)
             if nb and (text or "").strip():
                 self._route_metric("notebook", 0, "question_after_pick", text)
+                self._nb_remember(cid, handle, nb)
                 return await self._nb_answer(nb, text, cid, emitter)
 
         # --- the ordinary path: work out which notebook, then answer --------------------------
@@ -5667,12 +5767,28 @@ class Pipe:
         top = res.rows[0] if res.rows else None
         self._route_metric("notebook", 0, f"resolve:{res.kind}", text)
 
+        # The notebook this chat already settled on. Consulted ONLY when the user did not name one
+        # this turn: naming a book is always an instruction, and replaces the memory below.
+        # Re-resolved against the live `rows` rather than trusted, because a notebook deleted in
+        # Open Notebook since must fall back to asking — answering from a book that is gone is the
+        # silent-wrong-answer failure this whole mode exists to prevent.
+        remembered = None
+        if res.kind != "answer":
+            mem = self._nb_recall(cid, handle)
+            if mem:
+                # nbr._rid, not r.id: `rows` is a Row in production and a plain dict under the
+                # test harness, and the resolver's accessors are what read both.
+                remembered = next((r for r in rows if nbr._rid(r) == mem["id"]), None)
+
         # "What is in here, and how do I ask about it?" — answered from the collection itself,
         # never from a model. Checked BEFORE the answer path so "what books are in islamic
         # guidance" describes that notebook instead of asking it a question.
         if nbr.is_catalog_request(text):
             scoped = ({"id": top.id, "name": top.name, "source_count": top.source_count}
-                      if (res.kind == "answer" and top) else None)
+                      if (res.kind == "answer" and top)
+                      else ({"id": nbr._rid(remembered), "name": nbr._rname(remembered),
+                             "source_count": nbr._rcount(remembered)}
+                            if remembered else None))
             self._route_metric("notebook", 0, "catalog:scoped" if scoped else "catalog", text)
             return self._once(await self._nb_catalog(scoped, emitter))
 
@@ -5680,7 +5796,15 @@ class Pipe:
             # Pass the stripped question EVEN WHEN IT IS EMPTY. Falling back to the raw text here
             # would ask the notebook "check islamic guidance", which is an instruction to us, not
             # a question for it — _nb_answer parks the notebook and asks what to ask instead.
+            self._nb_remember(cid, handle, top)
             return await self._nb_answer(top, res.question, cid, emitter)
+
+        # Settled earlier in this chat, and not contradicted since: answer from it rather than
+        # asking again. This is the point of the memory — the re-ask is what made Notebook mode
+        # feel as though it had forgotten the conversation between one turn and the next.
+        if remembered is not None:
+            self._route_metric("notebook", 0, "remembered", text)
+            return await self._nb_answer(remembered, res.question, cid, emitter)
 
         if res.kind == "confirm" and top:
             # Park the question so the next message can settle the notebook and still answer the
@@ -5787,6 +5911,11 @@ class Pipe:
         model's full reasoning and search terms, and each `answer` frame is an intermediate answer
         for one search — yielding either would show the user pages of scaffolding before the
         reply they asked for.
+
+        Follow-up chips are offered at the TWO exits where an answer actually reached the user, and
+        nowhere else. The other exits are failures and truncations, and a suggestion built on a
+        half-delivered or refused answer is worse than no suggestion — it would invite the user to
+        ask next about something the assistant never actually said.
         """
         await self._status(emitter, f"Searching **{name}**…", done=False)
         payload = nbr.build_ask_payload(question, nb_id, models)
@@ -5799,6 +5928,12 @@ class Pipe:
         # `final_answer`, which falls through to the original single-yield path below.
         streamer = nbr.StreamingRenumber()
         streamed = False
+        parts = []      # the answer as delivered, for the follow-up prompt
+        # The 1B, deliberately: this path ran no Ollama model of its own — the answer came from
+        # Open Notebook's model, which the pipe cannot address — so there is no warm tag to reuse
+        # and loading the 17 GB chat tenant just to write three questions would be absurd.
+        kick = self._suggester([{"role": "user", "content": question}], emitter, mode="notebook") \
+            or (lambda *_a, **_k: None)
         try:
             async with aiohttp.ClientSession(timeout=timeout) as s:
                 async with s.post(nbr.ask_stream_url(OPEN_NOTEBOOK_URL), json=payload,
@@ -5832,11 +5967,13 @@ class Pipe:
                             piece = streamer.feed(frame.get("content") or "")
                             if piece:
                                 streamed = True
+                                parts.append(piece)
                                 yield piece
                         elif kind == "final_answer_delta_end":
                             tail = streamer.flush()
                             if tail:
                                 streamed = True
+                                parts.append(tail)
                                 yield tail
                         elif kind == "complete":
                             final = frame.get("final_answer") or final
@@ -5869,6 +6006,7 @@ class Pipe:
             if footer:
                 yield footer
             await self._status(emitter, "Done", done=True)
+            kick("".join(parts))
             return
 
         if err and not final:
@@ -5883,6 +6021,7 @@ class Pipe:
 
         yield self._nb_with_sources(final)
         await self._status(emitter, "Done", done=True)
+        kick(final)
 
     def _nb_with_sources(self, answer):
         """Renumber the model's inline markers and append a resolved Sources footer.
@@ -6937,12 +7076,26 @@ class Pipe:
             n *= 2
         return min(n, CTX_MAX)
 
-    async def _achat_stream(self, messages, guard_text=None, keep_system=False, force_model=None):
+    async def _achat_stream(self, messages, guard_text=None, keep_system=False, force_model=None,
+                            stream=False, suggest=None):
         """Streamed Ollama chat.
 
         The default guard is the general-assistant one. Callers override it for coding turns — the
         guard is deliberately NOT shared, because telling a coding model to "NEVER output JSON" would
         break it outright.
+
+        `stream` is the CALLER's own streaming flag, and it gates one thing: whether this generator
+        may also yield a `{"usage": ...}` dict (see the done-line branch below). It must stay False
+        by default. `get_message_content` (functions.py) serves a non-streaming caller with
+        `''.join([str(s) async for s in res])`, so a dict yielded to one would be stringified into
+        the reply text — and this method returns a generator either way, so the non-streaming shape
+        is reachable. Wrong in this direction costs a stat line; wrong in the other corrupts a reply.
+
+        `suggest`, when given, is called with the finished reply just before this generator returns.
+        It is how follow-up chips get generated without holding the stream open for a second model
+        call: the reply is already delivered by then, and the callee schedules rather than waits.
+        Never called on a path that errored — a suggestion built on a half-finished or failed reply
+        would be worse than none.
         """
         # Two jobs. (1) Keep the model from inventing "dalle"/tool-call JSON: media is routed by the
         # app, not requested by the model. (2) Preserve [id] citation markers verbatim — with legacy
@@ -7006,6 +7159,7 @@ class Pipe:
         # measured empirically 2026-08-17. Same `is`-identity test _sampling already uses, so there
         # is exactly one way to recognise the coder route.
         is_coder = guard_text is self._CODER_GUARD
+        parts = []          # the reply so far, kept only when a caller wants to suggest from it
         try:
             # sock_read (not a fixed total) catches an idle hang without killing a long, actively
             # streaming reply.
@@ -7035,9 +7189,29 @@ class Pipe:
                             return
                         tok = (d.get("message") or {}).get("content", "")
                         if tok:
+                            if suggest:
+                                parts.append(tok)
                             yield tok
+                        # The terminal line is the only one carrying Ollama's timing block, and it
+                        # used to be discarded here. Yielded as a DICT on purpose: that makes
+                        # process_line (functions.py) emit it as a raw `data: {json}` SSE frame
+                        # instead of wrapping it as a chat delta, which is what lets middleware see
+                        # data['usage'], attach it to the assistant message and PERSIST it. An
+                        # emitter event would only reach the browser — get_event_emitter has no
+                        # DB-write branch for chat:completion, and the frontend no longer saves the
+                        # completed chat either — so the figure would vanish on every reload.
+                        if d.get("done") and stream:
+                            usage = self._usage_from_ollama(d)
+                            if usage:
+                                yield {"usage": usage}
         except Exception as e:
             yield f"⚠️ Chat backend error: {e}"
+        else:
+            if suggest:
+                # The tag that answered travels with the reply: it is warm right now, and asking
+                # anything else — the chat model after a coder turn, say — would evict the tenant
+                # that just wrote the thing the chips are supposed to follow on from.
+                suggest("".join(parts), model)
 
     # Guard used when a turn is routed to the coder tenant. Note what it does NOT say: the default
     # guard forbids emitting JSON, which would be actively harmful here — JSON is frequently the
@@ -7067,7 +7241,7 @@ class Pipe:
     # sensible behaviour instead of erroring.
     _KNOWLEDGE_GUARD = None      # None -> _achat_stream uses the default general-assistant guard
 
-    def _entry_chat_stream(self, entry, messages):
+    def _entry_chat_stream(self, entry, messages, stream=False, suggest=None):
         """Chat path for the non-'auto' manifold entries. No media routing reaches here at all.
 
         The coder entry loads a large tenant (Phase 8: ~17.7 GB), so it is serialized under the same
@@ -7087,7 +7261,8 @@ class Pipe:
         # one generator in another breaks close propagation — aclose() on the outer raises
         # GeneratorExit there, and the inner is only finalised whenever GC gets to it, so a client
         # disconnect would hold _GEN_LOCK (and the GPU) for an unbounded time.
-        inner = self._achat_stream(messages, guard_text=guard, keep_system=True, force_model=model)
+        inner = self._achat_stream(messages, guard_text=guard, keep_system=True, force_model=model,
+                                   stream=stream, suggest=suggest)
         return self._locked_stream(inner) if entry == "coder" else inner
 
     async def _gen_and_cache(self, cid, prompt, ref, msgs=None, original=None):
@@ -7193,6 +7368,213 @@ class Pipe:
             except Exception:
                 pass
 
+    @staticmethod
+    def _usage_from_ollama(d):
+        """The generation stats Ollama reports on its terminal `done` line, or None.
+
+        Feeds the info button OpenWebUI renders under a reply whenever `message.usage` exists —
+        the button OpenWebUI v0.3 had and v0.11 still has, but whose tooltip was cut back to a raw
+        dump. Returns None when the line carries no timings at all, which is what makes the button
+        appear "where possible": a turn that never ran an Ollama chat (Notebook mode, the hermes
+        agent, an image or video render) yields nothing and so shows no button, rather than
+        inventing a rate for a job no model streamed.
+
+        Ollama reports durations in NANOseconds. The two derived rates go first because the tooltip
+        renders this dict in insertion order, so `tokens/s` is the line you see without reading.
+        The raw fields are carried verbatim alongside them because the rates alone are lossy —
+        eval_count is the only thing that says how much text the rate was measured over — and
+        because middleware's merge_usage derives input/output/total_tokens from exactly these keys.
+        """
+        def _n(key):
+            v = d.get(key)
+            return v if isinstance(v, (int, float)) and v > 0 else None
+
+        # A done line with nothing measured on it is not a zero-rate turn, it is no turn to
+        # measure — return None so the caller yields nothing and no button is drawn.
+        if _n("total_duration") is None and _n("eval_count") is None:
+            return None
+
+        usage = {}
+        for label, count_key, dur_key in (("tokens/s", "eval_count", "eval_duration"),
+                                          ("prompt tokens/s", "prompt_eval_count",
+                                           "prompt_eval_duration")):
+            count, dur = _n(count_key), _n(dur_key)
+            if count is not None and dur is not None:
+                usage[label] = round(count / (dur / 1e9), 2)
+        for key in ("eval_count", "eval_duration", "prompt_eval_count", "prompt_eval_duration",
+                    "total_duration", "load_duration"):
+            value = _n(key)
+            if value is not None:
+                usage[key] = value
+        return usage or None
+
+    def _ui_mode(self, meta):
+        """Which of the five UI states this turn is in: code / notebook / web / plain.
+
+        Deliberately derived from the SAME signals the routing above used — the toggle filters'
+        stamps and the feature flags — rather than from anything the client asserted separately, so
+        the chips cannot describe a mode the turn did not actually run in. "task" cannot appear:
+        Task claims the whole turn and returns before any chat path is reached.
+        """
+        if self._notebook_mode(meta):
+            return "notebook"
+        if self._code_mode(meta):
+            return "code"
+        if ((meta or {}).get("features") or {}).get("web_search"):
+            return "web"
+        return "plain"
+
+    def _suggester(self, msgs, emitter, meta=None, mode=None):
+        """A `(answer_text, model) -> None` that kicks off follow-up generation, or None.
+
+        Returned as a callable rather than having _achat_stream generate anything itself, because
+        the policy — which conversation, which mode, whether there is a client to tell — belongs
+        with the routing that already knows it. `_achat_stream` only knows when the reply ended,
+        and WHICH MODEL ended it, which it passes back for the reason below.
+
+        `model` is the tag that wrote the reply, and it is the default generator: it is warm by
+        construction, so asking it again can never cost a load or evict the tenant that just
+        answered — including in a Code chat, where that tenant is a 17 GB coder the chat model
+        would displace. Callers that did not run a model themselves leave it None and get the 1B.
+        """
+        if not emitter or not msgs:
+            return None
+        mode = mode or self._ui_mode(meta or {})
+
+        def kick(answer, model=None):
+            # Nothing waits on this: the reply has already been delivered and _achat_stream is
+            # about to return. The task is the loop's, not the request's, so it survives the
+            # response finishing — which is the only reason the chips can be generated at all
+            # without holding the stream open for a second model call on every turn.
+            try:
+                asyncio.get_running_loop().create_task(
+                    self._suggest_follow_ups(msgs, answer, emitter, mode, model))
+            except Exception:
+                pass
+        return kick
+
+    @staticmethod
+    def _parse_follow_ups(raw):
+        """One question per line, cleaned up — NOT JSON, and that is a measured decision.
+
+        The obvious shape is the one OpenWebUI's own generator asks for, `{"follow_ups": [...]}`,
+        and gemma3:1b cannot hold it: asked for exactly that, it returned THREE concatenated JSON
+        objects, the first of them malformed ('..."giving?","]}'). OpenWebUI's own parser slices
+        first-brace-to-last, so it fails on that too — this is the model, not the framing. A 1B is
+        good at "three lines", so it is asked for three lines.
+
+        The filters below all exist for the ways a small model decorates a list, each of which
+        would otherwise reach the screen as a chip: numbering, bullets, a fence, a line of preamble,
+        or an essay where a question was asked for. Anything that does not survive is dropped rather
+        than repaired — a chip is a suggestion, and a wrong one is worse than a missing one.
+        """
+        seen, out = set(), []
+        for line in (raw or "").splitlines():
+            s = re.sub(r"^\s*(?:[-*•]|\d+[.)])\s*", "", line.strip()).strip()
+            s = s.strip('"').strip("'").strip()
+            if len(s) < 8 or len(s) > 160:
+                continue
+            if s.startswith(("{", "}", "[", "]", "```", "<", "#")) or s.endswith(":"):
+                continue
+            if FOLLOWUP_PREAMBLE.match(s):
+                continue
+            if s.lower() in seen:
+                continue
+            seen.add(s.lower())
+            out.append(s)
+            if len(out) >= FOLLOWUP_MAX:
+                break
+        return out
+
+    def _followup_log(self, msgs, answer):
+        """The WHOLE conversation, formatted for the follow-up prompt — oldest dropped to fit.
+
+        Whole, not a window: measured against gemma3:1b at 20,142 tok/s prompt eval, an 11k-token
+        log costs it half a second, so there is no reason to show the model less of the chat than
+        the user can see. The cap exists for the marathon case, where "all of it" stops being free
+        and the alternative is Ollama silently evicting the front of the window anyway — better to
+        drop the oldest turns on purpose, at a size we chose, than to have it happen invisibly.
+
+        Injected context is stripped from user turns. Web-search results and retrieved documents
+        are prepended to the last user message and are not part of the conversation the user sees;
+        carrying them would spend most of the budget on text nobody is asking follow-ups about.
+
+        The 3.2 chars/token estimate is _fit_ctx's, kept deliberately pessimistic so the budget
+        lands under the real one.
+        """
+        turns = []
+        for m in msgs:
+            role = m.get("role")
+            if role not in ("user", "assistant"):
+                continue
+            text = str(m.get("content") or "")
+            if role == "user":
+                text = self._strip_injected_context(text)
+            if text.strip():
+                turns.append((role, text.strip()))
+        if (answer or "").strip():
+            turns.append(("assistant", answer.strip()))
+
+        budget = (CTX_MAX - CTX_HEADROOM) * 3.2
+        used, kept = 0, []
+        for role, text in reversed(turns):          # newest first, so the oldest falls off
+            cost = len(text) + 16
+            if kept and used + cost > budget:
+                break
+            used += cost
+            kept.append((role, text))
+        kept.reverse()
+        return "\n\n".join(f"{'User' if r == 'user' else 'Assistant'}: {t}" for r, t in kept)
+
+    async def _suggest_follow_ups(self, msgs, answer, emitter, mode, model=None):
+        """Ask a model what to suggest next, and emit it as chips under the reply.
+
+        Every failure is silent and costs nothing but the chips: an absent model, a timeout, a
+        refusal. This is a decoration on a reply that has already been delivered, so it must never
+        be able to affect one — hence the bare except and the metric row, which exists only so a run
+        of failures is visible somewhere rather than looking like the feature was never built.
+        """
+        t0 = time.monotonic()
+        try:
+            convo = self._followup_log(msgs, answer)
+            if not convo:
+                return
+            # The model that wrote the reply, when there was one. It is warm by construction, so
+            # this cannot cost a load; the 1B is the fallback for paths that ran no Ollama model
+            # (the notebook answers), where the alternative would be loading the 17 GB chat tenant
+            # purely to write three questions.
+            model = model or FOLLOWUP_MODEL
+            prompt = (f"Here is a conversation.\n\n{convo}\n\n"
+                      + FOLLOWUP_MODE_HINT.get(mode, FOLLOWUP_MODE_HINT["plain"]) + "\n\n"
+                      "Write 3 short questions the user might ask next. Each must stand alone and "
+                      "be answerable from this conversation. Vary them rather than asking the same "
+                      "thing three ways, and write them in the user's own voice, not as "
+                      "instructions to you.\n"
+                      "Output ONLY the 3 questions, one per line. No numbering, no preamble, no "
+                      "quotes, no JSON.")
+
+            def ask():
+                return requests.post(
+                    f"{self.ollama}/api/generate",
+                    json={"model": model, "prompt": prompt, "stream": False,
+                          "think": False, "options": {"temperature": 0.7, "num_predict": 200}},
+                    timeout=FOLLOWUP_TIMEOUT)
+
+            r = await asyncio.to_thread(ask)
+            if r.status_code != 200:
+                self._metric(job="follow_ups", ok=False, error=f"http_{r.status_code}",
+                             latency_ms=round((time.monotonic() - t0) * 1000))
+                return
+            raw = (r.json() or {}).get("response") or ""
+            out = self._parse_follow_ups(raw)
+            self._metric(job="follow_ups", ok=bool(out), mode=mode, model=model, n=len(out),
+                         latency_ms=round((time.monotonic() - t0) * 1000))
+            if out:
+                await emitter({"type": "chat:message:follow_ups", "data": {"follow_ups": out}})
+        except Exception as e:
+            self._metric(job="follow_ups", ok=False, error=type(e).__name__,
+                         latency_ms=round((time.monotonic() - t0) * 1000))
+
     async def _confirm_render(self, event_call, kind, detail, expensive=True):
         """Ask before spending minutes of GPU on a render. True = go ahead.
 
@@ -7278,6 +7660,11 @@ class Pipe:
         emitter = __event_emitter__
         # None whenever nothing can be asked (direct API, eval harness); _confirm_render fails open.
         confirm = __event_call__
+        # The caller's own streaming flag, read once and handed to every _achat_stream below. It
+        # gates ONE thing there — whether a generation-stats dict may be yielded — and it has to
+        # come from the request rather than be assumed: a non-streaming caller would stringify
+        # that dict into the reply text. See _achat_stream's docstring.
+        stream = bool(body.get("stream"))
         msgs = body.get("messages", [])
         text, ref = self._last_user(msgs)
         # OpenWebUI PREPENDS retrieved file/knowledge/web-search context to the LAST USER message
@@ -7330,7 +7717,9 @@ class Pipe:
         entry = self._entry(body)
         if entry != "auto":
             self._route_metric(f"entry:{entry}", 0, "manifold_entry")
-            return self._entry_chat_stream(entry, self._ollama_messages(msgs))
+            _ent = self._ollama_messages(msgs)
+            return self._entry_chat_stream(entry, _ent, stream=stream,
+                                           suggest=self._suggester(_ent, emitter, __metadata__))
         cid = self._chat_id(body, __metadata__)
         # The Task control (filters/task_mode.py). Placed ABOVE every media branch and the coder
         # tier on purpose: each of those returns unconditionally once it matches, so anything below
@@ -7361,7 +7750,10 @@ class Pipe:
         # model with no notebook behind it at all.
         nb_src = self._notebook_mode(__metadata__)
         if nb_src and (text or "").strip():
-            done = await self._notebook_mode_turn(cid, text, nb_src, emitter)
+            # The handle is the same ownership key the alert stores use. It decides only whether a
+            # remembered notebook may be read back in this chat, never which notebook is used.
+            done = await self._notebook_mode_turn(cid, text, nb_src, emitter,
+                                                  handle=self._alert_username(__user__))
             if done is not None:
                 return done
         # What media does this conversation currently revolve around? History first, then the
@@ -7743,7 +8135,8 @@ class Pipe:
             # propagation and would hold the GPU on a disconnect, which is the bug just fixed.
             return self._locked_stream(self._achat_stream(
                 omsgs, guard_text=self._CODER_GUARD, keep_system=AUTO_KEEP_SYSTEM,
-                force_model=self.coder_model), emitter=emitter)
+                force_model=self.coder_model, stream=stream,
+                suggest=self._suggester(omsgs, emitter, __metadata__)), emitter=emitter)
         # Plain chat takes no lock and still will not — it contends and works, and blocking it
         # would trade a slow success for a guaranteed wait of up to a full render. It just stops
         # looking hung. One note, not a live strip: chat never calls _status again, so a done=False
@@ -7752,4 +8145,5 @@ class Pipe:
             await self._status(emitter, "GPU is rendering — this reply may be slow to start.",
                                done=True)
         self._route_metric("chat:vision" if attached_img else "chat", 0, "fallthrough", text)
-        return self._achat_stream(omsgs, keep_system=AUTO_KEEP_SYSTEM)
+        return self._achat_stream(omsgs, keep_system=AUTO_KEEP_SYSTEM, stream=stream,
+                                  suggest=self._suggester(omsgs, emitter, __metadata__))
