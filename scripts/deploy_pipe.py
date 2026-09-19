@@ -64,6 +64,7 @@ PIPES = {
 # script necessary in the first place.
 FILTERS = {
     "task_mode": "filters/task_mode.py",
+    "notebook_mode": "filters/notebook_mode.py",
 }
 
 # Files a pipe imports from OpenWebUI's data volume. Pipes are exec'd standalone and cannot
@@ -74,6 +75,7 @@ FILTERS = {
 SIDECARS = {
     "pipes/shared/identity_edit.py": "/app/backend/data/identity_edit.py",
     "pipes/shared/media_session.py": "/app/backend/data/media_session.py",
+    "pipes/shared/notebook_resolver.py": "/app/backend/data/notebook_resolver.py",
 }
 
 REPLACEMENTS = ("from utils", "from apps", "from main", "from config")
@@ -343,8 +345,14 @@ def main():
     print("sidecars:")
     rc |= deploy_sidecars(a.dry_run)
     if not a.dry_run and rc == 0:
-        print("\nNo OpenWebUI restart needed — it re-reads the row per request and reloads "
-              "when the content changes.")
+        print("\nNo OpenWebUI restart needed for a PIPE — it re-reads the row per request and "
+              "reloads when the content changes.")
+        print("A SIDECAR is different: an imported module lives in sys.modules for the life of the "
+              "process, so a\nchanged sidecar keeps running the OLD code until the container "
+              "restarts, and the symptom is an\nAttributeError naming something that is plainly in "
+              "the file on disk (seen 2026-09-18 with the\nnotebook resolver). auto_assistant.py "
+              "re-stats its resolver each notebook turn and reloads on change,\nso the usual case "
+              "self-heals; any other sidecar importer still needs: docker restart open-webui")
         print("Confirm with: python3 tests/test_deployed.py")
     return rc
 

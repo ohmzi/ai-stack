@@ -20,6 +20,16 @@ try:
 except Exception:  # noqa: BLE001 - the pipe must always load
     ms = None
 
+# Notebook mode (filters/notebook_mode.py). Same arrangement as media_session: the resolver is a
+# sidecar on the data mount, imported defensively so a missing copy degrades to "Notebook mode
+# unavailable" rather than taking the whole pipe down with it.
+try:
+    if "/app/backend/data" not in sys.path:
+        sys.path.insert(0, "/app/backend/data")
+    import notebook_resolver as nbr
+except Exception:  # noqa: BLE001 - the pipe must always load
+    nbr = None
+
 # Serialize the VRAM-manipulating generation section so two concurrent Assistant invocations
 # can't both free/reload models on the single 24 GB card and OOM each other.
 def _extract_balanced(text, start_pos, opener, closer):
@@ -310,6 +320,35 @@ JOBS_MAX = 25           # rows rendered before "…and N more"; keeps a runaway 
 CONFIRM_TTL_S = 600     # an armed delete older than this is refused, not silently ignored
 PARK_TTL_S = 86400      # a rendered list older than this stops backing ordinals
 
+# ---------- the Notebook control (filters/notebook_mode.py) --------------------------------------
+# "Answer this from my Islamic guidance notebook" had no way to be expressed: nothing in this
+# stack had ever spoken to Open Notebook, and the assistant has no notion of a notebook. Like
+# Task, the control settles WHETHER the turn goes somewhere else; the resolver below settles
+# WHERE, and it does so by string matching rather than by asking a model to guess — the whole
+# value of the feature is that it answers from the notebook you named, so guessing at the name
+# would be guessing at the feature.
+#
+# The id must match filters/notebook_mode.py's NOTEBOOK_MODE_ID. tests/test_notebook_mode.py pins
+# that, because a rename on one side alone leaves a control that does nothing and reports nothing.
+NOTEBOOK_MODE_ID = "notebook_mode"
+# OpenWebUI runs network_mode: host, so 127.0.0.1 is the host's loopback. Same shape as
+# FLIGHTCLAW_URL above: a module constant with an env override, because the operator may move the
+# service and a hard-coded address would silently stop resolving.
+OPEN_NOTEBOOK_URL = os.environ.get("OPEN_NOTEBOOK_URL", "http://127.0.0.1:5055")
+# Sent as a bearer token when set. Auth is OFF on this deployment today (GET /api/auth/status
+# reports auth_enabled:false) but assuming that is how a 401 becomes a mystery.
+OPEN_NOTEBOOK_PASSWORD = os.environ.get("OPEN_NOTEBOOK_PASSWORD", "")
+NOTEBOOK_ASK_TIMEOUT_S = 300   # sock_read, NOT a total: a cold embedding tenant measured 113 s
+NOTEBOOK_CALL_TIMEOUT_S = 20
+NOTEBOOK_CACHE_TTL_S = 60      # notebook list; it changes rarely and has no name filter endpoint
+NOTEBOOK_MODELS_TTL_S = 600    # default model ids
+NOTEBOOK_PENDING_TTL_S = 900   # how long a parked "which notebook did you mean?" stays open
+NOTEBOOK_PENDING_MAX_TURNS = 3  # then the parked question is dropped rather than looping
+# Words that abandon a parked question. Matched against the whole normalized message, and checked
+# before candidate names so "never mind" during a clarification is never read as a notebook.
+NOTEBOOK_CANCEL = {"cancel", "never mind", "nevermind", "stop", "forget it", "no", "nope",
+                   "nothing", "no thanks", "no thank you", "skip it"}
+
 # ---------- flight fare requests -----------------------------------------------------------------
 # A flight ask is not a price ask, and until now it was not routed like one either — it was not
 # routed at all. Measured against this file on 2026-08-07, seven of eight realistic phrasings
@@ -536,6 +575,12 @@ class Pipe:
         # the user can SEE is the state of record — which is also why it is a visible table and not
         # an HTML comment (see _marks: OpenWebUI escapes those wherever they appear).
         self._flight_draft = {}  # chat_id -> {"t", "turns", "slots"}
+        # Notebook mode. The pending entry is a question waiting on "which notebook did you
+        # mean?"; in-memory with the same lifetime and eviction policy as the stores above, which
+        # costs continuity across a pipe reload and never correctness — losing it means the user
+        # restates the notebook. The cache holds the notebook list and the default model ids.
+        self._notebook_pending = {}  # chat_id -> {"t", "q", "cands", "turns", "nb"}
+        self._nb_cache = {}          # {"notebooks"|"models"|"probe": (ts, value)}
 
     # ONE entry. It chats, sees images, writes code on the big coder tenant, renders images and
     # video, searches the web, reads your documents and remembers things — choosing the model per
@@ -5466,6 +5511,365 @@ class Pipe:
             return None
         return "both" if (in_ids and stamped) else ("stamp" if stamped else "filter_ids")
 
+    # ---------- the Notebook control ----------
+    @staticmethod
+    def _notebook_mode(metadata):
+        """Which signal says the Notebook control is on, or None. Mirrors _task_mode above.
+
+        Two independent signals, read as an OR, for the same reason: the enabled-filter list is
+        the client's claim, the stamp is the filter's own record that it ran and therefore that
+        the other features were actually stood down. A direct API caller can produce the first
+        without the second, and that divergence belongs in a metrics row rather than invisible.
+        """
+        md = metadata or {}
+        in_ids = NOTEBOOK_MODE_ID in (md.get("filter_ids") or [])
+        stamped = bool(md.get("notebook_mode"))
+        if not (in_ids or stamped):
+            return None
+        return "both" if (in_ids and stamped) else ("stamp" if stamped else "filter_ids")
+
+    async def _nb_cached(self, key, ttl, fn):
+        """Memoize one Open Notebook read for `ttl` seconds. Never raises — returns the stale
+        value on failure, or None if there is nothing to fall back on."""
+        now = time.time()
+        hit = self._nb_cache.get(key)
+        if hit and (now - hit[0]) < ttl:
+            return hit[1]
+        try:
+            val = await asyncio.to_thread(fn)
+        except Exception:
+            return hit[1] if hit else None
+        self._nb_cache[key] = (now, val)
+        return val
+
+    def _nb_notebooks(self):
+        return self._nb_cached(
+            "notebooks", NOTEBOOK_CACHE_TTL_S,
+            lambda: nbr.list_notebooks(OPEN_NOTEBOOK_URL, OPEN_NOTEBOOK_PASSWORD or None,
+                                       timeout=NOTEBOOK_CALL_TIMEOUT_S))
+
+    def _nb_models(self):
+        return self._nb_cached(
+            "models", NOTEBOOK_MODELS_TTL_S,
+            lambda: nbr.default_models(OPEN_NOTEBOOK_URL, OPEN_NOTEBOOK_PASSWORD or None,
+                                       timeout=NOTEBOOK_CALL_TIMEOUT_S))
+
+    def _nb_scope_ok(self):
+        """True / False / None. None means "could not tell", and callers must treat that as
+        False: answering from the whole knowledge base while the UI says "Islamic guidance" is
+        the one failure this feature must never have."""
+        return self._nb_cached(
+            "probe", NOTEBOOK_MODELS_TTL_S,
+            lambda: nbr.probe_scope_support(OPEN_NOTEBOOK_URL, OPEN_NOTEBOOK_PASSWORD or None,
+                                            timeout=NOTEBOOK_CALL_TIMEOUT_S))
+
+    @staticmethod
+    async def _once(text):
+        """A one-shot async iterable, which is what pipe() returns from every branch."""
+        yield text
+
+    @staticmethod
+    def _sidecar_current(mod):
+        """Reload the resolver if the copy on the data volume changed under us.
+
+        OpenWebUI caches every imported module in sys.modules for the life of the process. The pipe
+        itself is re-exec'd when its DB row changes, but a SIDECAR is not: copying a new
+        notebook_resolver.py into /app/backend/data leaves the old module object in memory, the pipe
+        keeps calling it, and the symptom is an AttributeError naming a function that is plainly
+        present in the file on disk. Observed exactly that on 2026-09-18 — `module
+        'notebook_resolver' has no attribute 'is_catalog_request'` — after a deploy the tooling had
+        just described as requiring no restart.
+
+        One stat() per notebook turn, and the reload only happens when the bytes actually changed.
+        Deliberately keyed on the CONTAINER path rather than the module's own __file__: under the
+        test harness the module is imported from the repo, and reloading it there would silently
+        discard the stubs the suite just installed.
+        """
+        try:
+            if mod is None:
+                return None
+            path = "/app/backend/data/notebook_resolver.py"
+            mtime = os.path.getmtime(path)
+            if getattr(mod, "_aa_mtime", None) != mtime:
+                import importlib
+                mod = importlib.reload(mod)
+                mod._aa_mtime = mtime
+            return mod
+        except Exception:
+            return mod
+
+    async def _notebook_mode_turn(self, cid, text, src, emitter):
+        """The whole turn, given that the user turned Notebook on.
+
+        Returns an async iterable to hand back from pipe(), or None to fall through. The ONLY
+        path that returns None is "there is no text to act on", mirroring Task at the same spot.
+        Every other outcome — including every failure — returns a message, because falling through
+        to normal chat while the interface says Notebook would answer from a model that has no
+        notebook behind it at all.
+        """
+        global nbr
+        nbr = self._sidecar_current(nbr)
+        if nbr is None:
+            return self._once(
+                "Notebook mode needs its resolver on the data volume. "
+                "Run `python3 scripts/deploy_pipe.py --all` and try again.")
+        if not OPEN_NOTEBOOK_URL:
+            return self._once("Notebook mode has no Open Notebook URL configured.")
+
+        flat = nbr.norm(text)
+        pend = self._notebook_pending.get(cid)
+        if pend and (time.time() - pend["t"]) > NOTEBOOK_PENDING_TTL_S:
+            self._notebook_pending.pop(cid, None)
+            pend = None
+
+        # --- a question is already parked behind "which notebook did you mean?" ---------------
+        if pend:
+            if flat in NOTEBOOK_CANCEL:
+                self._notebook_pending.pop(cid, None)
+                self._route_metric("notebook", 0, "cancelled", text)
+                return self._once("Okay — nothing asked.")
+            if pend.get("q"):
+                idx = nbr.pick_candidate(text, pend["cands"])
+                if idx is not None:
+                    cand = pend["cands"][idx]
+                    self._notebook_pending.pop(cid, None)
+                    self._route_metric("notebook", 0, "confirmed", text)
+                    return await self._nb_answer(cand, pend["q"], cid, emitter)
+                # Nothing resolved: re-ask, and never silently drop the parked question.
+                pend["turns"] = pend.get("turns", 0) + 1
+                pend["t"] = time.time()
+                if pend["turns"] > NOTEBOOK_PENDING_MAX_TURNS:
+                    self._notebook_pending.pop(cid, None)
+                    return self._once(
+                        "I'll drop that question — I still can't tell which notebook you meant. "
+                        "Start again and name it in your message.")
+                return self._once(
+                    nbr.render_confirm(nbr.Resolution("confirm", pend["cands"], pend["q"], text))
+                    + f"\n\n(Still holding: “{pend['q']}”)")
+            # No question was parked — this message IS the question.
+            nb = pend.get("nb")
+            self._notebook_pending.pop(cid, None)
+            if nb and (text or "").strip():
+                self._route_metric("notebook", 0, "question_after_pick", text)
+                return await self._nb_answer(nb, text, cid, emitter)
+
+        # --- the ordinary path: work out which notebook, then answer --------------------------
+        rows = await self._nb_notebooks()
+        if rows is None:
+            return self._once(
+                f"Open Notebook isn't reachable at {OPEN_NOTEBOOK_URL} — nothing was asked. "
+                "(Notebook mode answers only from Open Notebook.)")
+        if not rows:
+            return self._once("There are no notebooks in Open Notebook yet. Create one and add a "
+                              "source, then ask me again.")
+
+        res = nbr.resolve(text, rows)
+        top = res.rows[0] if res.rows else None
+        self._route_metric("notebook", 0, f"resolve:{res.kind}", text)
+
+        # "What is in here, and how do I ask about it?" — answered from the collection itself,
+        # never from a model. Checked BEFORE the answer path so "what books are in islamic
+        # guidance" describes that notebook instead of asking it a question.
+        if nbr.is_catalog_request(text):
+            scoped = ({"id": top.id, "name": top.name, "source_count": top.source_count}
+                      if (res.kind == "answer" and top) else None)
+            self._route_metric("notebook", 0, "catalog:scoped" if scoped else "catalog", text)
+            return self._once(await self._nb_catalog(scoped, emitter))
+
+        if res.kind == "answer" and top:
+            # Pass the stripped question EVEN WHEN IT IS EMPTY. Falling back to the raw text here
+            # would ask the notebook "check islamic guidance", which is an instruction to us, not
+            # a question for it — _nb_answer parks the notebook and asks what to ask instead.
+            return await self._nb_answer(top, res.question, cid, emitter)
+
+        if res.kind == "confirm" and top:
+            # Park the question so the next message can settle the notebook and still answer the
+            # thing that was actually asked.
+            self._notebook_pending[cid] = {
+                "t": time.time(), "q": res.question, "turns": 0, "nb": None,
+                "cands": [{"id": r.id, "name": r.name, "source_count": r.source_count}
+                          for r in res.rows],
+            }
+            return self._once(nbr.render_confirm(res))
+
+        # Nothing named: offer the closest, and park so a bare follow-up still works.
+        self._notebook_pending[cid] = {
+            "t": time.time(), "q": res.question, "turns": 0, "nb": None,
+            "cands": [{"id": r.id, "name": r.name, "source_count": r.source_count}
+                      for r in res.rows[:5]],
+        }
+        return self._once(nbr.render_suggest(res, rows))
+
+    async def _nb_catalog(self, scoped=None, emitter=None):
+        """Describe what Open Notebook holds, deterministically.
+
+        Reads the notebook list and each notebook's source titles; nothing here goes near a model.
+        "What books are there, and how do I ask about them?" is a question about the collection,
+        and the collection is right there in the API — asking a language model to summarise it
+        would introduce exactly the drift this mode exists to avoid.
+        """
+        rows = await self._nb_notebooks()
+        if rows is None:
+            return (f"Open Notebook isn't reachable at {OPEN_NOTEBOOK_URL} — nothing to list.")
+        if not rows:
+            return nbr.render_catalog([], {})
+        auth = OPEN_NOTEBOOK_PASSWORD or None
+        # Only notebooks that claim sources are queried, so an all-empty collection costs nothing.
+        want = [r for r in rows if (r.get("source_count") or 0)]
+        titles = await self._nb_cached(
+            "catalog_titles", NOTEBOOK_CACHE_TTL_S,
+            lambda: {str(r.get("id")): nbr.list_source_titles(
+                OPEN_NOTEBOOK_URL, auth, str(r.get("id")), timeout=NOTEBOOK_CALL_TIMEOUT_S)
+                for r in want}) or {}
+        # Offer the collection's own notebooks as the next questions. OpenWebUI renders these as
+        # the follow-up chips under the reply — the same 'chat:message:follow_ups' event its own
+        # generator uses, but derived from real notebook names instead of a model's guess, so every
+        # chip is a phrasing this mode actually resolves.
+        #
+        # Caveat worth knowing: OpenWebUI's own generator ALSO persists them onto the chat row
+        # (Chats.upsert_message_to_chat_by_id_and_message_id) so they survive a reload. Emitting
+        # the event from a pipe cannot do that, so these chips live for the current view.
+        if emitter:
+            sugs = nbr.catalog_suggestions(rows if not scoped else [scoped], titles)
+            if sugs:
+                try:
+                    await emitter({"type": "chat:message:follow_ups",
+                                   "data": {"follow_ups": sugs}})
+                except Exception:
+                    pass
+        return nbr.render_catalog(rows, titles, scoped=scoped)
+
+    async def _nb_answer(self, nb, question, cid, emitter):
+        """Answer `question` from the notebook `nb` (a row or a parked candidate dict)."""
+        name = nb.get("name") if isinstance(nb, dict) else getattr(nb, "name", "")
+        nb_id = nb.get("id") if isinstance(nb, dict) else getattr(nb, "id", "")
+        count = nb.get("source_count") if isinstance(nb, dict) else getattr(nb, "source_count", 0)
+
+        # Deterministic guard, before any request. Measured: asking a notebook with no sources
+        # does not error — it returns a confident answer citing whatever else is in the database.
+        # Refusing here is the difference between "no sources yet" and a fabrication.
+        if not count:
+            return self._once(
+                f"**{name}** has no sources in it yet, so there's nothing to answer from. "
+                "Add a source in Open Notebook and ask again.")
+
+        # Never assert a scope the server cannot enforce. The released Open Notebook image drops
+        # `notebook_id` silently (ADR-008), and an unscoped ask would answer from the entire
+        # knowledge base while this branch claims a notebook.
+        if await self._nb_scope_ok() is not True:
+            return self._once(
+                "Open Notebook is running a version that ignores a notebook scope, so I can't "
+                "answer from just **%s** — and answering from everything while claiming to use "
+                "one notebook would be worse than not answering. Rebuild Open Notebook from "
+                "`main` (see docs/NOTEBOOK_MODE.md)." % name)
+
+        models = await self._nb_models()
+        if not models:
+            return self._once(
+                "Open Notebook has no chat model configured, so it can't answer. "
+                "Set one under Open Notebook → Models.")
+
+        if not (question or "").strip():
+            # User named a notebook but asked nothing. Park it and ask what they want.
+            self._notebook_pending[cid] = {
+                "t": time.time(), "q": "", "turns": 0, "nb": {"id": nb_id, "name": name,
+                                                              "source_count": count},
+                "cands": [{"id": nb_id, "name": name, "source_count": count}],
+            }
+            return self._once(f"Got it — **{name}**. What would you like me to ask it?")
+
+        return self._nb_stream(name, nb_id, question, models, emitter)
+
+    async def _nb_stream(self, name, nb_id, question, models, emitter):
+        """Consume Open Notebook's ask stream and yield the answer.
+
+        Status goes to the grey strip, never into the answer. The `strategy` frame carries the
+        model's full reasoning and search terms, and each `answer` frame is an intermediate answer
+        for one search — yielding either would show the user pages of scaffolding before the
+        reply they asked for.
+        """
+        await self._status(emitter, f"Searching **{name}**…", done=False)
+        payload = nbr.build_ask_payload(question, nb_id, models)
+        headers = nbr.ask_headers(OPEN_NOTEBOOK_PASSWORD or None)
+        timeout = aiohttp.ClientTimeout(total=None, sock_connect=15,
+                                        sock_read=NOTEBOOK_ASK_TIMEOUT_S)
+        final, seen, err = "", 0, ""
+        try:
+            async with aiohttp.ClientSession(timeout=timeout) as s:
+                async with s.post(nbr.ask_stream_url(OPEN_NOTEBOOK_URL), json=payload,
+                                  headers=headers) as r:
+                    if r.status != 200:
+                        body = await r.text()
+                        detail = body[:300]
+                        try:
+                            detail = json.loads(body).get("detail") or detail
+                        except Exception:
+                            pass
+                        if r.status == 401:
+                            detail = ("Open Notebook rejected the request (401). Set "
+                                      "OPEN_NOTEBOOK_PASSWORD for the assistant to match.")
+                        yield f"Open Notebook couldn't answer that (HTTP {r.status}): {detail}"
+                        await self._status(emitter, "Failed", done=True)
+                        return
+                    async for raw in r.content:
+                        frame = nbr.parse_sse_line(raw)
+                        if not frame:
+                            continue
+                        kind = frame.get("type")
+                        if kind == "strategy":
+                            await self._status(emitter, f"Planning searches in **{name}**…")
+                        elif kind == "answer":
+                            seen += 1
+                            await self._status(emitter, f"Reading **{name}**… ({seen})")
+                        elif kind == "final_answer":
+                            final = frame.get("content") or frame.get("final_answer") or final
+                        elif kind == "complete":
+                            final = frame.get("final_answer") or final
+                        elif kind == "error":
+                            err = frame.get("message") or "Open Notebook reported an error."
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:
+            if final:
+                yield self._nb_with_sources(final) + (
+                    "\n\n⚠️ The answer was cut off — Open Notebook's stream ended early.")
+                await self._status(emitter, "Done", done=True)
+                return
+            yield (f"Open Notebook isn't reachable at {OPEN_NOTEBOOK_URL} — nothing was asked. "
+                   f"[{type(e).__name__}]")
+            await self._status(emitter, "Failed", done=True)
+            return
+
+        if err and not final:
+            yield f"Open Notebook couldn't answer that: {err}"
+            await self._status(emitter, "Failed", done=True)
+            return
+        if not final:
+            yield (f"I searched **{name}** but it returned nothing I can quote. "
+                   "The notebook may still be embedding its sources.")
+            await self._status(emitter, "Done", done=True)
+            return
+
+        yield self._nb_with_sources(final)
+        await self._status(emitter, "Done", done=True)
+
+    def _nb_with_sources(self, answer):
+        """Renumber the model's inline markers and append a resolved Sources footer.
+
+        The markers are written by the model and validated by nobody, so unresolvable ones are
+        dropped rather than rendered as dead references. Resolution needs a network call, so this
+        is best-effort: an answer with a missing footer beats an answer that never arrives.
+        """
+        try:
+            text, targets = nbr.renumber(answer)
+            if not targets:
+                return text
+            resolved = nbr.resolve_citations(OPEN_NOTEBOOK_URL, OPEN_NOTEBOOK_PASSWORD or None,
+                                             targets, timeout=NOTEBOOK_CALL_TIMEOUT_S)
+            return text + nbr.format_sources(resolved)
+        except Exception:
+            return answer
+
     # ---------- the Code control ----------
     @staticmethod
     def _code_mode(metadata):
@@ -6892,6 +7296,25 @@ class Pipe:
         tm_src = self._task_mode(__metadata__)
         if BG_TASKS and tm_src and (text or "").strip():
             done = await self._task_mode_turn(cid, text, msgs, __user__, tm_src, ref=ref)
+            if done is not None:
+                return done
+        # The Notebook control (filters/notebook_mode.py). Same placement rule as Task above, and
+        # it goes AFTER Task so that Task's behaviour is bit-identical to what it was before this
+        # existed: if both are somehow on, Task wins. The frontend makes them exclusive anyway
+        # (they are one button set); this is the server-side tie-break for a direct API caller.
+        #
+        # Above every media branch on purpose — a control the user switched on claims the whole
+        # turn, so "draw a cat" with Notebook on is answered from the notebook rather than
+        # rendered. Below the __task__ guard, which must keep winning: OpenWebUI's own title and
+        # tag prompts are not the user asking anything, and on this path each one would cost a
+        # full retrieval round trip.
+        #
+        # Returns None only when there is no text; every failure returns a message, because
+        # falling through to normal chat while the interface says "Notebook" would answer from a
+        # model with no notebook behind it at all.
+        nb_src = self._notebook_mode(__metadata__)
+        if nb_src and (text or "").strip():
+            done = await self._notebook_mode_turn(cid, text, nb_src, emitter)
             if done is not None:
                 return done
         # What media does this conversation currently revolve around? History first, then the

@@ -51,6 +51,7 @@ SOURCES = {
     "flux_image":     "pipes/live/flux_image.py",
     "adaptive_memory": "filters/adaptive_memory.py",
     "task_mode": "filters/task_mode.py",
+    "notebook_mode": "filters/notebook_mode.py",
 }
 
 # The hop BEFORE the one above, which nothing checked until now. `pipes/live/` is gitignored,
@@ -66,6 +67,8 @@ SOURCES = {
 EXTRA_TWINS = {
     "pipes/shared/identity_edit.py": "/volume1/docker/openwebui/config/identity_edit.py",
     "pipes/shared/media_session.py": "/volume1/docker/openwebui/config/media_session.py",
+    "pipes/shared/notebook_resolver.py":
+        "/volume1/docker/openwebui/config/notebook_resolver.py",
 }
 
 LIVE_PREFIX = "pipes/live/"
