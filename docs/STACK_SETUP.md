@@ -8,8 +8,8 @@ image/video generators. Install them from *Workspace → Functions*, or with `sc
 **Nothing on this page needs a forked OpenWebUI.** Every pipe and filter below is a database row
 loaded by the stock backend, which is what makes them portable to any instance. Worth stating
 plainly because **this host does run a fork** — the image is `ai-stack/open-webui:task-mode`, and
-`compose/openwebui/fork/` rebuilds the *frontend* so the chat input carries three mutually-exclusive
-mode buttons (Internet / Code / Task) and the sidebar gets a Background-tasks shortcut. The two facts
+`compose/openwebui/fork/` rebuilds the *frontend* so the chat input carries four mutually-exclusive
+mode buttons (Internet / Code / Task / Notebook) and the sidebar gets a Background-tasks shortcut. The two facts
 are unrelated: the fork changes the browser, the pipes run on the Python backend, and setting
 `compose/openwebui/run.sh` back to the digest-pinned upstream image leaves everything here working.
 (The fork does now carry **one** backend file, `main.py`, but for a header the browser acts on —
@@ -64,7 +64,7 @@ shared code is therefore copied onto OpenWebUI's data mount and reached with a g
 
   > **This bullet read "OpenWebUI (official image)" until 2026-08-08.** The two endpoints were right;
   > the image was not. Followed literally it means running stock, which comes up with no
-  > Internet / Code / Task buttons in the chat input and no Background-tasks shortcut in the sidebar,
+  > Internet / Code / Task / Notebook buttons in the chat input and no Background-tasks shortcut in the sidebar,
   > and nothing fails to say so — see [The frontend fork](#the-frontend-fork). Building the fork also
   > adds prerequisites this list never carried: Docker with network access, because the build clones
   > open-webui at `OWUI_REV` and runs `npm ci && npm run build` inside `node:22-alpine`.
@@ -135,11 +135,11 @@ Operator-critical, and until 2026-08-08 written down nowhere but code comments.
 | Pinned to | Open WebUI **v0.11.3** (`OWUI_REV=2a960a59…`), base digest `sha256:f27666b8…` (`v0.11.3-cuda`). Bumped from 0.10.2 on 2026-09-17. |
 | Build | `docker build -t ai-stack/open-webui:task-mode compose/openwebui/fork/`, then `compose/openwebui/run.sh` (which already points at that tag) |
 | What is rebuilt | The frontend, **plus exactly one backend file**. `compose/openwebui/fork/Dockerfile` clones open-webui at `OWUI_REV`, `git apply --verbose`s `task-mode.patch` and `shell-cache.patch`, runs `npm ci && npm run build` in `node:22-alpine`, then COPYs `/src/build` **and `backend/open_webui/main.py`** onto a base pinned **by digest** rather than by the `cuda` tag. The rest of the backend, the CUDA layers and every dependency stay byte-identical upstream. |
-| What it adds | Three mutually-exclusive mode buttons in the chat input (Internet / Code / Task), a sidebar Background-tasks shortcut that resolves the delivery channel by name (`background-tasks`), and `Cache-Control: no-cache` on the SPA shell (the splash-screen hang — see below). |
-| The two patches | `task-mode.patch` (**five** upstream files: `MessageInput`, `Placeholder`, `Chat`, `Sidebar`, `auth/+page`) is applied before the build and the result replaces `/app/build`. `shell-cache.patch` (one file, `backend/open_webui/main.py`) is layered over the base image's copy. They are separate artifacts on purpose — different concerns, applied at different points, and a conflict in one should name the artifact to re-derive. See `gen/05_shell_cache.py`. |
+| What it adds | Four mutually-exclusive mode buttons in the chat input (Internet / Code / Task / Notebook), a sidebar Background-tasks shortcut that resolves the delivery channel by name (`background-tasks`), and `Cache-Control: no-cache` on the SPA shell (the splash-screen hang — see below). |
+| The two patches | `task-mode.patch` (**six** upstream files: `MessageInput`, `Suggestions`, `Placeholder`, `Chat`, `Sidebar`, `auth/+page`) is applied before the build and the result replaces `/app/build`. `shell-cache.patch` (one file, `backend/open_webui/main.py`) is layered over the base image's copy. They are separate artifacts on purpose — different concerns, applied at different points, and a conflict in one should name the artifact to re-derive. See `gen/05_shell_cache.py`. |
 | Rollback to stock | Put the digest from that Dockerfile's `FROM` line into `run.sh` instead. Every pipe and filter keeps working. **Read this before you do it:** the fork adds nothing the backend *depends* on, but it now supplies two UI affordances **and the shell's `no-cache` header**. Rolling back to the stock digest silently re-introduces the splash-screen hang — the app stuck at the logo until site data is cleared. `tests/test_branding.py` will report it as a failure rather than leaving you to rediscover it. |
 
-After an upstream bump, in this order (`compose/openwebui/fork/Dockerfile` is the source for all five):
+After an upstream bump, in this order (`compose/openwebui/fork/Dockerfile` is the source for all six):
 
 1. Move `OWUI_REV` and the base digest **together** — they must describe the same build, or the
    frontend and the backend disagree. Since `shell-cache.patch`, this is **enforced**: the build
@@ -154,7 +154,7 @@ After an upstream bump, in this order (`compose/openwebui/fork/Dockerfile` is th
    [../compose/openwebui/fork/gen/README.md](../compose/openwebui/fork/gen/README.md).
 4. Re-run `branding/apply.sh` — the static assets live inside the image, as always.
 5. `python3 tests/test_deployed.py` and `python3 tests/test_branding.py`, then confirm **by hand**
-   that the three buttons still switch each other off. `test_branding.py` is what catches a
+   that the four buttons still switch each other off. `test_branding.py` is what catches a
    `main.py` whose anchors moved in a way `git apply` happened to accept.
 
 **What the 0.11.3 bump actually cost (2026-09-17), as a calibration for the next one.** 0.10.2 →
@@ -190,7 +190,7 @@ you build.
 **Nothing tests the running image.** `tests/test_deployed.py` compares Function rows and the two
 sidecar copies against the repo; it makes no assertion about the image the container was created
 from. So an upstream `docker pull`, or a `docker run` that names the stock image, silently reverts the
-three mode buttons and the Background-tasks shortcut while every suite stays green — the operator's
+four mode buttons and the Background-tasks shortcut while every suite stays green — the operator's
 first symptom is a chat input with an Integrations dropdown where the mode buttons used to be. Step 4
 above is the only check that exists.
 

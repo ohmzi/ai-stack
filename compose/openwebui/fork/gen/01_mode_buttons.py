@@ -33,16 +33,18 @@ sub(
 		codeInterpreterEnabled = false;
 	}
 
-	// --- ai-stack: Internet / Code / Task as one exclusive control ------------------------
+	// --- ai-stack: Internet / Code / Task / Notebook as one exclusive control ---------------
 	// Upstream treats these as independent switches living in the Integrations dropdown. Here
-	// they are three always-visible buttons and exactly one can be active, because they are
-	// three answers to the same question: what should this turn do? Task is a toggle filter
-	// (filters/task_mode.py) rather than a built-in feature, so it lives in selectedFilterIds
-	// while the other two are booleans — setMode is what hides that difference.
+	// they are always-visible buttons and exactly one can be active, because they are answers to
+	// the same question: what should this turn do? Task and Notebook are toggle filters
+	// (filters/task_mode.py, filters/notebook_mode.py) rather than built-in features, so they live
+	// in selectedFilterIds while the other two are booleans — setMode is what hides that difference.
 	//
-	// The server enforces the same exclusivity independently (the filter's inlet stands the
-	// other modes down). That is deliberate: this layer is a convenience, not the guarantee.
+	// The server enforces the same exclusivity independently (each filter's inlet stands the other
+	// modes down). That is deliberate: this layer is a convenience, not the guarantee.
 	const TASK_FILTER_ID = 'task_mode';
+	const NOTEBOOK_FILTER_ID = 'notebook_mode';
+	const MODE_FILTER_IDS = [TASK_FILTER_ID, NOTEBOOK_FILTER_ID];
 
 	let showTaskButton = false;
 	$: showTaskButton = (toggleFilters ?? []).some((f) => f.id === TASK_FILTER_ID);
@@ -50,23 +52,38 @@ sub(
 	let taskEnabled = false;
 	$: taskEnabled = (selectedFilterIds ?? []).includes(TASK_FILTER_ID);
 
+	let showNotebookButton = false;
+	$: showNotebookButton = (toggleFilters ?? []).some((f) => f.id === NOTEBOOK_FILTER_ID);
+
+	let notebookEnabled = false;
+	$: notebookEnabled = (selectedFilterIds ?? []).includes(NOTEBOOK_FILTER_ID);
+
 	let activeMode = null;
 	$: activeMode = taskEnabled
 		? 'task'
-		: codeInterpreterEnabled
-			? 'code'
-			: webSearchEnabled
-				? 'web'
-				: null;
+		: notebookEnabled
+			? 'notebook'
+			: codeInterpreterEnabled
+				? 'code'
+				: webSearchEnabled
+					? 'web'
+					: null;
+
+	// Extracted so a fourth mode does not need a fourth copy of the array juggling. For the
+	// existing Task mode this produces byte-identical arrays to the inline expression it replaces:
+	// [...filter(x => x !== TASK), TASK] when on, filter(x => x !== TASK) when off.
+	const setToggle = (id, on) => {
+		selectedFilterIds = on
+			? [...(selectedFilterIds ?? []).filter((x) => x !== id), id]
+			: (selectedFilterIds ?? []).filter((x) => x !== id);
+	};
 
 	const setMode = (mode) => {
 		const off = activeMode === mode; // clicking the active one clears it
 		webSearchEnabled = !off && mode === 'web';
 		codeInterpreterEnabled = !off && mode === 'code';
-		selectedFilterIds =
-			!off && mode === 'task'
-				? [...(selectedFilterIds ?? []).filter((id) => id !== TASK_FILTER_ID), TASK_FILTER_ID]
-				: (selectedFilterIds ?? []).filter((id) => id !== TASK_FILTER_ID);
+		setToggle(TASK_FILTER_ID, !off && mode === 'task');
+		setToggle(NOTEBOOK_FILTER_ID, !off && mode === 'notebook');
 		onWebSearchToggle(webSearchEnabled);
 	};
 
@@ -105,7 +122,7 @@ sub(
 										{/if}
 
 										{#if showCodeInterpreterButton}
-											<Tooltip content={$i18n.t('Code Interpreter')} placement="top">
+											<Tooltip content={$i18n.t('Code')} placement="top">
 												<button
 													type="button"
 													aria-pressed={codeInterpreterEnabled}
@@ -125,7 +142,7 @@ sub(
 											{@const taskFilter = (toggleFilters ?? []).find(
 												(f) => f.id === TASK_FILTER_ID
 											)}
-											<Tooltip content={taskFilter?.description} placement="top">
+											<Tooltip content={$i18n.t('Task via Agents')} placement="top">
 												<button
 													type="button"
 													aria-pressed={taskEnabled}
@@ -149,7 +166,39 @@ sub(
 											</Tooltip>
 										{/if}
 
-										{#if showImageGenerationButton || showToolsButton || showSkillsButton || (toggleFilters && toggleFilters.filter((f) => f.id !== TASK_FILTER_ID).length > 0)}
+										{#if showNotebookButton}
+											{@const notebookFilter = (toggleFilters ?? []).find(
+												(f) => f.id === NOTEBOOK_FILTER_ID
+											)}
+											<Tooltip content={notebookFilter?.name ?? $i18n.t('Notebook')} placement="top">
+												<button
+													type="button"
+													aria-pressed={notebookEnabled}
+													aria-label={notebookEnabled
+														? $i18n.t('Disable Notebook')
+														: $i18n.t('Enable Notebook')}
+													on:click|preventDefault={() => setMode('notebook')}
+													class="{MODE_BASE} {notebookEnabled ? MODE_ON : MODE_OFF}"
+												>
+													{#if notebookFilter?.icon}
+														<img
+															src={notebookFilter.icon}
+															alt={notebookFilter?.name ?? 'Notebook'}
+															class="size-3.5 {notebookFilter.icon.includes('data:image/svg')
+																? 'dark:invert-[80%]'
+																: ''}"
+														/>
+													{:else}
+														<Sparkles className="size-4" strokeWidth="1.75" />
+													{/if}
+													<span class="hidden sm:block"
+														>{notebookFilter?.name ?? $i18n.t('Notebook')}</span
+													>
+												</button>
+											</Tooltip>
+										{/if}
+
+										{#if showImageGenerationButton || showToolsButton || showSkillsButton || (toggleFilters && toggleFilters.filter((f) => !MODE_FILTER_IDS.includes(f.id)).length > 0)}
 											<IntegrationsMenu""",
     "mode buttons",
 )
@@ -164,7 +213,7 @@ sub(
 												{showCodeInterpreterButton}""",
     """												selectedModels={selectedModelIds}
 												toggleFilters={(toggleFilters ?? []).filter(
-													(f) => f.id !== TASK_FILTER_ID
+													(f) => !MODE_FILTER_IDS.includes(f.id)
 												)}
 												showWebSearchButton={false}
 												{showImageGenerationButton}
@@ -179,7 +228,7 @@ sub(
 												{#if filter}""",
     """											{#each selectedFilterIds as filterId (filterId)}
 												{@const filter = toggleFilters.find((f) => f.id === filterId)}
-												{#if filter && !(showTaskButton && filterId === TASK_FILTER_ID)}""",
+												{#if filter && !((filterId === TASK_FILTER_ID && showTaskButton) || (filterId === NOTEBOOK_FILTER_ID && showNotebookButton))}""",
     "task chip",
 )
 

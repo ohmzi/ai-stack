@@ -23,7 +23,7 @@
 #                          loader.js rewrites /api/config suffix-free instead.
 #
 # The image is a LOCAL FORK, not upstream: compose/openwebui/fork/ rebuilds the frontend for the
-# three mutually-exclusive mode buttons (Internet / Code / Task), and patches ONE backend file,
+# four mutually-exclusive mode buttons (Internet / Code / Task / Notebook), and patches ONE backend file,
 # main.py, so the SPA shell is served with Cache-Control: no-cache (the splash-screen hang — see
 # fork/gen/05_shell_cache.py). The rest of the Python backend and the CUDA layers come straight from
 # a digest-pinned upstream image and are untouched.

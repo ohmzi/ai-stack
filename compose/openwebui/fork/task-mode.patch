@@ -10,20 +10,22 @@
  
  	export let createMessagePair: Function;
  	export let stopResponse: Function;
-@@ -825,6 +828,51 @@
+@@ -825,6 +828,71 @@
  		codeInterpreterEnabled = false;
  	}
  
-+	// --- ai-stack: Internet / Code / Task as one exclusive control ------------------------
++	// --- ai-stack: Internet / Code / Task / Notebook as one exclusive control ---------------
 +	// Upstream treats these as independent switches living in the Integrations dropdown. Here
-+	// they are three always-visible buttons and exactly one can be active, because they are
-+	// three answers to the same question: what should this turn do? Task is a toggle filter
-+	// (filters/task_mode.py) rather than a built-in feature, so it lives in selectedFilterIds
-+	// while the other two are booleans — setMode is what hides that difference.
++	// they are always-visible buttons and exactly one can be active, because they are answers to
++	// the same question: what should this turn do? Task and Notebook are toggle filters
++	// (filters/task_mode.py, filters/notebook_mode.py) rather than built-in features, so they live
++	// in selectedFilterIds while the other two are booleans — setMode is what hides that difference.
 +	//
-+	// The server enforces the same exclusivity independently (the filter's inlet stands the
-+	// other modes down). That is deliberate: this layer is a convenience, not the guarantee.
++	// The server enforces the same exclusivity independently (each filter's inlet stands the other
++	// modes down). That is deliberate: this layer is a convenience, not the guarantee.
 +	const TASK_FILTER_ID = 'task_mode';
++	const NOTEBOOK_FILTER_ID = 'notebook_mode';
++	const MODE_FILTER_IDS = [TASK_FILTER_ID, NOTEBOOK_FILTER_ID];
 +
 +	let showTaskButton = false;
 +	$: showTaskButton = (toggleFilters ?? []).some((f) => f.id === TASK_FILTER_ID);
@@ -31,25 +33,43 @@
 +	let taskEnabled = false;
 +	$: taskEnabled = (selectedFilterIds ?? []).includes(TASK_FILTER_ID);
 +
++	let showNotebookButton = false;
++	$: showNotebookButton = (toggleFilters ?? []).some((f) => f.id === NOTEBOOK_FILTER_ID);
++
++	let notebookEnabled = false;
++	$: notebookEnabled = (selectedFilterIds ?? []).includes(NOTEBOOK_FILTER_ID);
++
 +	let activeMode = null;
 +	$: activeMode = taskEnabled
 +		? 'task'
-+		: codeInterpreterEnabled
-+			? 'code'
-+			: webSearchEnabled
-+				? 'web'
-+				: null;
++		: notebookEnabled
++			? 'notebook'
++			: codeInterpreterEnabled
++				? 'code'
++				: webSearchEnabled
++					? 'web'
++					: null;
++
++	// Extracted so a fourth mode does not need a fourth copy of the array juggling. For the
++	// existing Task mode this produces byte-identical arrays to the inline expression it replaces:
++	// [...filter(x => x !== TASK), TASK] when on, filter(x => x !== TASK) when off.
++	const setToggle = (id, on) => {
++		selectedFilterIds = on
++			? [...(selectedFilterIds ?? []).filter((x) => x !== id), id]
++			: (selectedFilterIds ?? []).filter((x) => x !== id);
++	};
 +
 +	const setMode = (mode) => {
 +		const off = activeMode === mode; // clicking the active one clears it
 +		webSearchEnabled = !off && mode === 'web';
 +		codeInterpreterEnabled = !off && mode === 'code';
-+		selectedFilterIds =
-+			!off && mode === 'task'
-+				? [...(selectedFilterIds ?? []).filter((id) => id !== TASK_FILTER_ID), TASK_FILTER_ID]
-+				: (selectedFilterIds ?? []).filter((id) => id !== TASK_FILTER_ID);
++		setToggle(TASK_FILTER_ID, !off && mode === 'task');
++		setToggle(NOTEBOOK_FILTER_ID, !off && mode === 'notebook');
 +		onWebSearchToggle(webSearchEnabled);
-+		onModeChange();
++		// The mode just resolved, NOT `activeMode` — the reactive statement that recomputes that
++		// has not run yet here, so reading it would report the PREVIOUS mode. Clicking the active
++		// button clears the mode, hence null.
++		onModeChange(off ? null : mode);
 +	};
 +
 +	const MODE_ON =
@@ -62,7 +82,7 @@
  	// Clear selected terminal when model doesn't support terminal
  	$: if ($selectedTerminalId && selectedModelIds.length > 0 && terminalCapableModels.length === 0) {
  		selectedTerminalId.set(null);
-@@ -2257,13 +2305,78 @@
+@@ -2257,13 +2325,110 @@
  									{/if}
  
  									<div class="flex flex-1 items-center min-w-0 overflow-x-auto scrollbar-none">
@@ -86,7 +106,7 @@
 +										{/if}
 +
 +										{#if showCodeInterpreterButton}
-+											<Tooltip content={$i18n.t('Code Interpreter')} placement="top">
++											<Tooltip content={$i18n.t('Code')} placement="top">
 +												<button
 +													type="button"
 +													aria-pressed={codeInterpreterEnabled}
@@ -106,7 +126,7 @@
 +											{@const taskFilter = (toggleFilters ?? []).find(
 +												(f) => f.id === TASK_FILTER_ID
 +											)}
-+											<Tooltip content={taskFilter?.description} placement="top">
++											<Tooltip content={$i18n.t('Task via Agents')} placement="top">
 +												<button
 +													type="button"
 +													aria-pressed={taskEnabled}
@@ -130,13 +150,45 @@
 +											</Tooltip>
 +										{/if}
 +
-+										{#if showImageGenerationButton || showToolsButton || showSkillsButton || (toggleFilters && toggleFilters.filter((f) => f.id !== TASK_FILTER_ID).length > 0)}
++										{#if showNotebookButton}
++											{@const notebookFilter = (toggleFilters ?? []).find(
++												(f) => f.id === NOTEBOOK_FILTER_ID
++											)}
++											<Tooltip content={notebookFilter?.name ?? $i18n.t('Notebook')} placement="top">
++												<button
++													type="button"
++													aria-pressed={notebookEnabled}
++													aria-label={notebookEnabled
++														? $i18n.t('Disable Notebook')
++														: $i18n.t('Enable Notebook')}
++													on:click|preventDefault={() => setMode('notebook')}
++													class="{MODE_BASE} {notebookEnabled ? MODE_ON : MODE_OFF}"
++												>
++													{#if notebookFilter?.icon}
++														<img
++															src={notebookFilter.icon}
++															alt={notebookFilter?.name ?? 'Notebook'}
++															class="size-3.5 {notebookFilter.icon.includes('data:image/svg')
++																? 'dark:invert-[80%]'
++																: ''}"
++														/>
++													{:else}
++														<Sparkles className="size-4" strokeWidth="1.75" />
++													{/if}
++													<span class="hidden sm:block"
++														>{notebookFilter?.name ?? $i18n.t('Notebook')}</span
++													>
++												</button>
++											</Tooltip>
++										{/if}
++
++										{#if showImageGenerationButton || showToolsButton || showSkillsButton || (toggleFilters && toggleFilters.filter((f) => !MODE_FILTER_IDS.includes(f.id)).length > 0)}
  											<IntegrationsMenu
  												selectedModels={selectedModelIds}
 -												{toggleFilters}
 -												{showWebSearchButton}
 +												toggleFilters={(toggleFilters ?? []).filter(
-+													(f) => f.id !== TASK_FILTER_ID
++													(f) => !MODE_FILTER_IDS.includes(f.id)
 +												)}
 +												showWebSearchButton={false}
  												{showImageGenerationButton}
@@ -145,16 +197,16 @@
  												bind:selectedToolIds
  												bind:selectedSkillIds
  												bind:selectedFilterIds
-@@ -2370,7 +2483,7 @@
+@@ -2370,7 +2535,7 @@
  
  											{#each selectedFilterIds as filterId (filterId)}
  												{@const filter = toggleFilters.find((f) => f.id === filterId)}
 -												{#if filter}
-+												{#if filter && !(showTaskButton && filterId === TASK_FILTER_ID)}
++												{#if filter && !((filterId === TASK_FILTER_ID && showTaskButton) || (filterId === NOTEBOOK_FILTER_ID && showNotebookButton))}
  													<Tooltip content={filter?.name} placement="top">
  														<button
  															on:click|preventDefault={() => {
-@@ -2428,7 +2541,7 @@
+@@ -2428,7 +2593,7 @@
  												{/if}
  											{/each}
  
@@ -163,7 +215,7 @@
  												<Tooltip content={$i18n.t('Web Search')} placement="top">
  													<button
  														on:click|preventDefault={() => (webSearchEnabled = !webSearchEnabled)}
-@@ -2464,7 +2577,7 @@
+@@ -2464,7 +2629,7 @@
  												</Tooltip>
  											{/if}
  
@@ -172,26 +224,190 @@
  												<Tooltip content={$i18n.t('Code Interpreter')} placement="top">
  													<button
  														aria-label={codeInterpreterEnabled
+--- a/src/lib/components/chat/Suggestions.svelte
++++ b/src/lib/components/chat/Suggestions.svelte
+@@ -84,9 +84,9 @@
+ 	{/if}
+ </div>
+ 
+-<div class="h-36 w-full">
++<div class="h-60 w-full">
+ 	{#if filteredPrompts.length > 0}
+-		<div role="list" class="max-h-36 overflow-auto scrollbar-none items-start {className}">
++		<div role="list" class="max-h-60 overflow-auto scrollbar-none items-start {className}">
+ 			{#each filteredPrompts as prompt, idx (prompt.id || `${prompt.content}-${idx}`)}
+ 				<!-- svelte-ignore a11y-no-interactive-element-to-noninteractive-role -->
+ 				<button
 --- a/src/lib/components/chat/Placeholder.svelte
 +++ b/src/lib/components/chat/Placeholder.svelte
-@@ -63,6 +63,9 @@
+@@ -63,6 +63,142 @@
  	export let onSelect = (e) => {};
  	export let onChange = (e) => {};
  	export let onWebSearchToggle: Function = () => {};
 +	// ai-stack: forwarded straight through to MessageInput so a mode chosen on the landing page
 +	// is remembered exactly like one chosen in the chat composer.
 +	export let onModeChange: Function = () => {};
++
++	// --- ai-stack: the landing-page suggestions follow the mode button ----------------------
++	// The four buttons are answers to "what should this turn do?", and the fastest way to learn
++	// that is for the examples under the composer to change the moment one is pressed. Each mode
++	// gets a pool several times larger than the number shown, and the window advances one step
++	// per PAGE LOAD, so a returning user meets a different corner of what the mode can do
++	// instead of the same four prompts forever.
++	let landingMode = null;
++	const SUGGESTION_WINDOW = 5;
++	// Each entry is { title: [bold line, grey line], content: what clicking inserts }.
++	// That shape is NOT optional: Suggestions.svelte renders `prompt.title[0]` / `prompt.title[1]`
++	// and otherwise falls back to `prompt.content` plus the literal word "Prompt". A plain STRING
++	// therefore renders as chips reading "Prompt" — which is exactly what shipped on 2026-09-18 and
++	// what a browser check caught. `content` ends in a space where the prompt is a template the
++	// user is meant to finish.
++	//
++	// Pools are bigger than the window on purpose: the window advances one step per page load, so
++	// N prompts give N distinct windows before anything repeats.
++
++	// --- no mode: what the assistant does on its own --------------------------------------
++	// This is the one screen where nothing has been declared, so it doubles as the pitch. The
++	// first three rotate and are the ordinary things people reach for a chat model for; the two
++	// FIXED entries below them exist to teach the thing that is hardest to discover — that this
++	// assistant routes code and background work WITHOUT a button, straight from the wording.
++	const NO_MODE_ROTATING = [
++		{ title: ['Summarise this', 'paste an email, article or notes'], content: 'Summarise this in three bullet points: ' },
++		{ title: ['Draft a reply', 'polite, firm or friendly'], content: 'Draft a polite reply to this message: ' },
++		{ title: ['Explain it simply', 'a topic, as if I am new to it'], content: 'Explain how ' },
++		{ title: ['Brainstorm ideas', 'for a project, gift or name'], content: 'Give me 10 ideas for ' },
++		{ title: ['Plan something', 'a trip, a week, a project'], content: 'Plan a 3-day trip to ' },
++		{ title: ['Translate this', 'into any language'], content: 'Translate this into ' },
++		{ title: ['Change the tone', 'more confident, warmer, shorter'], content: 'Rewrite this to sound more confident: ' },
++		{ title: ['Compare my options', 'and say what you would pick'], content: 'Compare these options and tell me which you would pick: ' },
++		{ title: ['Draw me a picture', 'describe it and it renders'], content: 'Draw a picture of ' },
++		{ title: ['Quiz me', 'one question at a time'], content: 'Quiz me on the basics of ' }
++	];
++	const NO_MODE_FIXED = [
++		{ title: ['Write a script', 'no button needed — code routes itself'], content: 'Write a Python script to ' },
++		{ title: ['Set up a monitor', 'no button needed — it schedules itself'], content: 'Monitor the price of ' }
++	];
++	const NO_MODE_WINDOW = 3; // + the two fixed entries = the five shown
++
++	const MODE_SUGGESTIONS = {
++		// Internet: SearXNG-backed search, results injected as context before the model answers.
++		web: [
++			{ title: ['Latest news', 'on any topic you name'], content: "What's the latest news on " },
++			{ title: ['Find research', 'papers and articles on a subject'], content: 'Find recent research about ' },
++			{ title: ['Official docs', 'for a library, tool or API'], content: 'Find the official docs for ' },
++			{ title: ['Compare prices', 'before buying something'], content: 'Compare current prices for ' },
++			{ title: ['What the web says', 'summarised across sources'], content: 'Summarise what the web says about ' },
++			{ title: ['What changed', 'on a topic, this year'], content: 'What has changed about ' },
++			{ title: ['Release notes', 'for a version or product'], content: 'Look up the release notes for ' },
++			{ title: ['Current discussion', 'what people are saying now'], content: 'What are people saying about ' },
++			{ title: ['Check a claim', 'against what sources say'], content: 'Is it true that ' },
++			{ title: ['Best of', 'top-rated options in a category'], content: 'What are the best ' }
++		],
++		// Code: routes to the coder model and turns the code interpreter on for the turn.
++		code: [
++			{ title: ['Refactor this code', 'for readability'], content: "Refactor this code so it's easier to read" },
++			{ title: ['Fix the bug', 'in the function I paste'], content: 'Fix the bug in this function' },
++			{ title: ['Optimise for speed', 'and explain the trade-offs'], content: 'Optimise this for speed' },
++			{ title: ['Explain this code', 'line by line'], content: 'Explain what this code does, line by line' },
++			{ title: ['Add tests', 'for this function'], content: 'Add tests for this function' },
++			{ title: ['Debug this regex', 'it is not matching what I expect'], content: 'What is wrong with this regular expression?' },
++			{ title: ['Write a script', 'that does a task end to end'], content: 'Write a script that ' },
++			{ title: ['Port this code', 'to another language'], content: 'Rewrite this in ' },
++			{ title: ['Review this diff', 'for mistakes before I commit'], content: 'Review this diff for mistakes: ' },
++			{ title: ['Explain this error', 'what it means and how to fix it'], content: 'Explain this error message and how to fix it: ' }
++		],
++		// Task: the whole turn goes to the background-task agent, which creates standing jobs.
++		task: [
++			{ title: ['Watch a price', 'and tell me when it moves'], content: 'Monitor the price of ' },
++			{ title: ['Threshold alert', 'tell me when it crosses a value'], content: 'Tell me when ' },
++			{ title: ['Daily check', 'every morning at 8'], content: 'Check ' },
++			{ title: ['Watch and text me', 'whenever something changes'], content: 'Watch ' },
++			{ title: ['Weekly reminder', 'every Monday'], content: 'Remind me every Monday to ' },
++			{ title: ['Watch a flight', 'and alert me on the fare'], content: 'Find me a cheap flight to ' },
++			{ title: ['Show my jobs', 'every monitor currently running'], content: 'Show me my running jobs' },
++			{ title: ['Cancel a job', 'stop a monitor that is running'], content: 'Cancel the job ' },
++			{ title: ['New listing alert', 'whenever something is posted'], content: 'Tell me when a new ' },
++			{ title: ['Recurring summary', 'a report on a schedule'], content: 'Send me a summary of ' }
++		],
++		// Notebook: answered from Open Notebook, scoped to the notebook named in the message.
++		// The complete sentences are phrasings the resolver accepts, so clicking one produces a
++		// real answer; the two templates end in a space because they need a notebook name.
++		notebook: [
++			{ title: ["What's in here?", 'every notebook and its books'], content: 'What kind of books are there?' },
++			{ title: ['How do I ask?', 'the phrasings this mode understands'], content: 'What can I ask?' },
++			{ title: ['Which notebook?', 'let it suggest the right one'], content: 'Which notebook should I use?' },
++			{ title: ['List the notebooks', 'names and source counts'], content: 'List the notebooks' },
++			{ title: ['Browse the collection', 'everything available right now'], content: "What's in the notebooks?" },
++			{ title: ['Ask about one book', 'name the notebook in your message'], content: 'How do I ask about a specific book?' },
++			{ title: ['Show the library', 'all books across notebooks'], content: 'Show me what books you have' },
++			{ title: ['Everything it can see', 'the whole Open Notebook'], content: 'What is in open notebook' },
++			{ title: ['Books in one notebook', 'type the notebook name after this'], content: 'List the books in ' },
++			{ title: ['What one covers', 'name the notebook after this'], content: 'What kind of books are in ' }
++		]
++	};
++
++	// One counter per mode, advanced once per mount. Deliberately NOT computed in a reactive
++	// statement: Placeholder re-renders constantly, and rotating there would shuffle the chips
++	// out from under the pointer. The memo below makes re-evaluation idempotent, which is what
++	// lets the caller read the same window twice without advancing it.
++	const _suggestionStep = (mode, size) => {
++		try {
++			const key = 'ai-stack-suggestions-' + mode;
++			const n = parseInt(localStorage.getItem(key) ?? '0', 10) || 0;
++			localStorage.setItem(key, String((n + 1) % size));
++			return n % size;
++		} catch (e) {
++			return 0; // private mode, blocked storage — the pool still works from the top
++		}
++	};
++	const _suggestionStart = {};
++	const _window = (pool, count, key) => {
++		if (pool.length <= count) return pool;
++		if (_suggestionStart[key] === undefined) _suggestionStart[key] = _suggestionStep(key, pool.length);
++		const start = _suggestionStart[key];
++		return Array.from({ length: count }, (_, i) => pool[(start + i) % pool.length]);
++	};
++	const rotatedSuggestions = (mode) => {
++		if (!mode) {
++			// No button pressed: the ordinary prompts plus the two that teach auto-routing.
++			return [..._window(NO_MODE_ROTATING, NO_MODE_WINDOW, 'none'), ...NO_MODE_FIXED];
++		}
++		return _window(MODE_SUGGESTIONS[mode] ?? [], SUGGESTION_WINDOW, mode);
++	};
++	let suggestionList = [];
++	$: suggestionList = rotatedSuggestions(landingMode);
++	const handleModeChange = (mode) => {
++		landingMode = mode;
++		onModeChange(mode);
++	};
  	export let messageQueue: { id: string; prompt: string; files: any[] }[] = [];
  	export let onQueueSendNow: (id: string) => void = () => {};
  	export let onQueueEdit: (id: string) => void = () => {};
-@@ -261,6 +264,7 @@
+@@ -261,6 +397,7 @@
  						{onQueueEdit}
  						{onQueueDelete}
  						{askUser}
-+						{onModeChange}
++						onModeChange={handleModeChange}
  						{onWebSearchToggle}
  						on:chatVariables
  						on:submit={(e) => {
+@@ -280,10 +417,12 @@
+ 		<div class="mx-auto max-w-2xl mt-2" in:fade={{ duration: 200, delay: 200 }}>
+ 			<div class="mx-5">
+ 				<Suggestions
+-					suggestionPrompts={atSelectedModel?.info?.meta?.suggestion_prompts ??
+-						models[selectedModelIdx]?.info?.meta?.suggestion_prompts ??
+-						$config?.default_prompt_suggestions ??
+-						[]}
++					suggestionPrompts={suggestionList.length
++						? suggestionList
++						: (atSelectedModel?.info?.meta?.suggestion_prompts ??
++							models[selectedModelIdx]?.info?.meta?.suggestion_prompts ??
++							$config?.default_prompt_suggestions ??
++							[])}
+ 					inputValue={prompt}
+ 					{onSelect}
+ 				/>
 --- a/src/lib/components/chat/Chat.svelte
 +++ b/src/lib/components/chat/Chat.svelte
 @@ -845,7 +845,9 @@

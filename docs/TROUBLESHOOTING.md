@@ -313,7 +313,7 @@ later skin changes propagate on their own.
 After an upstream bump of the frontend fork, `apply.sh` is step 3 of four
 (`compose/openwebui/fork/Dockerfile:28-34`): move `OWUI_REV` and the base digest together, rebuild —
 a failing `git apply` is the signal to re-derive the patch, not to force past it — re-run
-`branding/apply.sh`, then `python3 tests/test_deployed.py` and confirm the three mode buttons still
+`branding/apply.sh`, then `python3 tests/test_deployed.py` and confirm the four mode buttons still
 switch each other off.
 
 The recreate/image-pull rule is already stated in the three places you are most likely to reach

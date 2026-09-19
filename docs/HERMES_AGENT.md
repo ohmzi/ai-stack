@@ -35,7 +35,7 @@ bounded, GPU-safe scheduled job, executed by a local agent and reported back int
 
 In OpenWebUI, just ask: *"monitor the price of X … check every 6 hours for 2 weeks"* /
 *"list my background tasks"* / *"cancel the price monitor"* — or press the **Task** button, one of the
-three mutually-exclusive mode buttons the frontend fork adds to the chat input, which routes the turn
+mode buttons the frontend fork adds to the chat input (Internet / Code / Task / Notebook), which routes the turn
 here without any wording being interpreted. (`/task` as a prefix still works.) From a terminal:
 `hermes cron list`, `hermes cron remove <id>`, `journalctl --user -u hermes-gateway -f`.
 

@@ -121,7 +121,7 @@ that decided it before, so listing stays on the deterministic path and never loa
 
 The frontend is a local fork (`compose/openwebui/fork/`): only the SvelteKit bundle is rebuilt,
 grafted onto a digest-pinned upstream image, adding three always-visible mutually-exclusive mode
-buttons (Internet / Code / Task). Exclusivity is enforced *again* server-side in the filter's
+buttons (Internet / Code / Task / Notebook). Exclusivity is enforced *again* server-side in the filter's
 inlet, because the browser is advisory and a direct-API caller bypasses it entirely.
 
 Scheduling still requires positive evidence, but any one signal suffices; without it the turn is

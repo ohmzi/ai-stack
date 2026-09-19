@@ -1,4 +1,4 @@
-# OpenWebUI with the Internet / Code / Task mode buttons.
+# OpenWebUI with the Internet / Code / Task / Notebook mode buttons.
 #
 # WHY A FORK AT ALL
 # -----------------
@@ -18,7 +18,7 @@
 # ----------------
 # The frontend, plus EXACTLY ONE backend file. The patches are:
 #
-#   task-mode.patch    (gen/01-04)  five Svelte sources — the Internet/Code/Task mode buttons.
+#   task-mode.patch    (gen/01-04)  six Svelte sources — the Internet/Code/Task/Notebook mode buttons.
 #                                   Applied before `npm run build`; the result REPLACES /app/build.
 #   shell-cache.patch  (gen/05)     backend/open_webui/main.py — one class, SPAStaticFiles, which
 #                                   serves the SPA shell with `Cache-Control: no-cache` so a
@@ -44,7 +44,7 @@
 #   3. Rebuild. `git apply` fails loudly on conflict; that failure is the signal to re-derive the
 #      patch, not something to force past.
 #   4. Re-run branding/apply.sh (the static assets live inside the image, as always).
-#   5. python3 tests/test_deployed.py and python3 tests/test_branding.py, then confirm the three
+#   5. python3 tests/test_deployed.py and python3 tests/test_branding.py, then confirm the four
 #      buttons still switch each other off by hand. test_branding.py is what catches SPAStaticFiles
 #      anchors that moved in a way `git apply` happened to accept.
 
@@ -79,6 +79,15 @@ RUN git apply --verbose /tmp/task-mode.patch
 RUN cp backend/open_webui/main.py /tmp/owui-main.py.orig \
     && git apply --verbose /tmp/shell-cache.patch
 ENV APP_BUILD_HASH=${BUILD_HASH}
+# Node sizes its old-space heap from a fixed default (~4 GB on 64-bit) and does NOT raise it for a
+# large host, so the Vite/Svelte build for this tree can die with
+# "FATAL ERROR: Ineffective mark-compacts near heap limit — JavaScript heap out of memory" on a
+# machine with 90 GB free. That is a ceiling on the build tool, not memory pressure, and it failed
+# intermittently (it built on 2026-09-17 and failed on 2026-09-18 with identical sources).
+# 8 GB is well within this host's budget and comfortably above what the build needs.
+# Override without editing this file: docker build --build-arg NODE_OPTIONS=--max-old-space-size=4096
+ARG NODE_OPTIONS=--max-old-space-size=8192
+ENV NODE_OPTIONS=${NODE_OPTIONS}
 RUN npm ci && npm run build
 
 # The manifest INDEX digest of ghcr.io/open-webui/open-webui:v0.11.3-cuda. Read it back with:

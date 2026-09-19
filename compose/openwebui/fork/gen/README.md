@@ -53,9 +53,15 @@ docker exec open-webui cat /app/build/_app/immutable/chunks/<chunk>.js.map > mi.
 
 > **Extended 2026-09-17 (the 0.11.3 rebase).** A **fifth** file is now vendored:
 > `Placeholder.svelte` (`src/lib/components/chat/Placeholder.svelte`), patched by `02` — which
-> despite its name now makes edits in **three** files, not one. `grep '^--- ' ../task-mode.patch`
-> should list **five** files after `04` has run. (Still five after `05` was added on 2026-09-17 —
+> despite its name now makes edits in **four** files, not one. `grep '^--- ' ../task-mode.patch`
+> should list **six** files after `04` has run. (Still six after `05` was added on 2026-09-17 —
 > that one emits `shell-cache.patch`, a separate artifact. See "`05` is the odd one out" below.)
+>
+> **Extended 2026-09-18.** A sixth file joined: `Suggestions.svelte`
+> (`src/lib/components/chat/Suggestions.svelte`), also patched by `02`. Its list is a fixed 144px
+> box with `overflow-auto scrollbar-none`, so five 48px chips meant two were scrolled out of sight
+> behind a hidden scrollbar — 5 in the DOM, 3 visible. The patch raises both classes to `h-60` /
+> `max-h-60`. If the pool size changes, revisit those two numbers together.
 >
 > Why it was needed: 0.11.3 factored the no-messages landing page out of `Chat.svelte` into
 > `Placeholder`, which renders its own `MessageInput` and declares its props explicitly (`export
@@ -82,7 +88,48 @@ python3 04_guest_link.py ../task-mode.patch --append
 python3 05_shell_cache.py ../shell-cache.patch    # a SECOND artifact — see below
 ```
 
-`01` adds the three exclusive mode buttons. `02` adds the `onModeChange` callback and the
+`02` also makes the landing page's suggestion chips follow the mode button, and rotates them: each mode
+owns a pool of eight prompts and the four shown advance one step per page load, so a
+returning user meets a different corner of what the mode can do rather than the same four forever.
+Storage is per-mode `localStorage`; a blocked store just starts from the top of the pool.
+
+### The pools, and why the no-mode one looks the way it does
+
+Ten prompts per mode, five shown, one step of rotation per page load — so ten distinct windows
+before anything repeats. The mode pools are grounded in what each button does *behind* the UI:
+
+| Mode | What it actually does | Prompts teach |
+|---|---|---|
+| Internet | SearXNG search; results injected as context before the model answers | news, research, docs, prices, verifying a claim |
+| Code | Routes to `qwen38-coder:q4` on its own tenant **and** turns the code interpreter on | refactor, debug, optimise, tests, explain an error |
+| Task | The whole turn goes to the hermes agent, which creates standing jobs | price watch, threshold alert, daily check, flight watch, list/cancel jobs |
+| Notebook | Answered from Open Notebook, scoped to the notebook named in the message | every "what's in here" phrase, plus two templates needing a notebook name |
+
+**No mode is different, and deliberate.** It is the one screen where nothing has been declared, so
+it doubles as the pitch: three rotating prompts of the ordinary kind (summarise, draft, explain,
+brainstorm, plan, translate, compare, draw, quiz) **plus two FIXED entries** —
+
+```
+Write a script        no button needed — code routes itself
+Set up a monitor      no button needed — it schedules itself
+```
+
+Those two exist to teach the least discoverable thing about this assistant: `pipe()` routes code
+(`_is_code_request`) and background work (`_is_bg_task_request`) from the wording ALONE, with no
+button pressed. A user who never presses a mode should still find out that it can write code and
+schedule a monitor. The fixed pair guarantees that lesson appears on **every** visit, which a
+rotating entry could not.
+
+
+Each entry must be a `{title: [bold line, grey line], content: …}` OBJECT. `Suggestions.svelte`
+renders `prompt.title[0]`/`[1]` and otherwise falls back to `prompt.content` plus the literal
+word "Prompt" — so a pool written as plain strings renders as four chips reading *Prompt*. That
+shipped on 2026-09-18 and no bundle grep could see it: the strings were all present in the built
+JS, only a browser showed how they rendered. `02` now asserts the shape at generation time.
+
+`01` adds the four exclusive mode buttons (Internet / Code / Task / Notebook — the
+last two being toggle filters, so it emits both as data-driven blocks off each filter's
+own frontmatter; a fifth mode is a copy of one block plus its filter id). `02` adds the `onModeChange` callback and the
 chat-scoped mode memory, emitting the combined patch for those two files. `03` appends the
 sidebar shortcut to the background-tasks channel. `04` appends the sign-in page's three changes:
 the guest link, the brand wordmark span (`branding/ohmz.css` colours the "AI" amber off the back of
@@ -98,10 +145,10 @@ artifacts:
   `/app/build`. `05` edits a Python file that is never built and is LAYERED over the base image's
   own copy. One patch file would imply a sequencing that does not exist.
 - **A count that other docs depend on.** `task-mode.patch` is documented here and in
-  `docs/STACK_SETUP.md` as touching exactly **five** files, and operators are told to check that
-  with `grep '^--- ' ../task-mode.patch`. Folding `main.py` in would make it six and quietly break
-  four statements that are used as a verification step. **`main.py` is intentionally not in it** —
-  do not "fix" that.
+  `docs/STACK_SETUP.md` as touching exactly **six** files, and operators are told to check that
+  with `grep '^--- ' ../task-mode.patch`. Folding `main.py` in would make it seven and quietly
+  break four statements that are used as a verification step. **`main.py` is intentionally not in
+  it** — do not "fix" that.
 
 It also means a conflict in a 4669-line `Chat.svelte` cannot block a one-hunk change to `main.py`,
 and a failed `git apply` names the artifact to re-derive.

@@ -7,8 +7,8 @@ a repeatable eval suite instead of vibes.
 
 **The pipes and filters need no fork** — they install from *Workspace → Functions* as database rows
 and run on the stock Python backend, which is what keeps them portable. The **frontend** is a
-different story: this host runs a local fork, `ai-stack/open-webui:task-mode`, that adds three
-mutually-exclusive mode buttons (Internet / Code / Task) to the chat input and a Background-tasks
+different story: this host runs a local fork, `ai-stack/open-webui:task-mode`, that adds four
+mutually-exclusive mode buttons (Internet / Code / Task / Notebook) to the chat input and a Background-tasks
 shortcut to the sidebar. The rest of the backend and the CUDA layers come straight from a
 digest-pinned upstream image and are untouched, so the fork adds nothing the backend depends on.
 Pointing `compose/openwebui/run.sh` back at that digest does **not** cost only those two UI
@@ -58,8 +58,10 @@ Highlights:
 
 - **Intent routing** with question/small-talk guards — a question *about* an
   image isn't turned into an edit — and default-deny on media intent.
-- **Modes you set, not modes it guesses.** Internet / Code / Task are three exclusive buttons in
-  the chat input rather than inferences from your wording. Reading intent from phrasing kept failing
+- **Modes you set, not modes it guesses.** Internet / Code / Task / Notebook are four exclusive
+  buttons in the chat input rather than inferences from your wording. The examples under the composer
+  follow whichever one you press, and rotate through a pool on each visit, so the modes teach
+  what they can do instead of being four unexplained icons. Reading intent from phrasing kept failing
   in both directions at once, and each fix made the other direction worse.
 - **Conversation continuity** — "make this picture realistic" keeps editing
   *that* picture. A persistent per-chat reference store survives deploys and
@@ -81,7 +83,8 @@ Highlights:
 | Function | What it does |
 |---|---|
 | `adaptive_memory` | Vendored Adaptive Memory v4.4.1 (`1818TusculumSt/owui-adaptive-memory`) — extracts, dedupes and embeds per-user memories, then prepends them to the last user message. Attached to `Assistant` specifically rather than globally. Provenance and the license caveat: [docs/CAPABILITY_UPGRADE_PLAN.md](docs/CAPABILITY_UPGRADE_PLAN.md). |
-| `task_mode` | The **Task** control in the chat input — one of the three mutually-exclusive mode buttons the frontend fork adds (Internet / Code / Task). While it is on, the turn goes to the hermes background-task agent instead of being guessed at from the user's wording, and Internet / Code are stood down server-side for that turn. Off by default. The *filter* is stateless — read per turn, never remembered server-side — but the fork's `Chat.svelte` does remember the choice **per chat**, and deliberately only when the user made it, so an incidental reset cannot silently re-arm a mode. `toggle` must be set on the *instance*, not the module: OpenWebUI reads it off the instantiated Filter, and a module-level-only `toggle` loads fine, passes every static check, and produces no control in the UI. |
+| `task_mode` | The **Task** control in the chat input — one of the mutually-exclusive mode buttons the frontend fork adds (Internet / Code / Task / Notebook). While it is on, the turn goes to the hermes background-task agent instead of being guessed at from the user's wording, and Internet / Code are stood down server-side for that turn. Off by default. The *filter* is stateless — read per turn, never remembered server-side — but the fork's `Chat.svelte` does remember the choice **per chat**, and deliberately only when the user made it, so an incidental reset cannot silently re-arm a mode. `toggle` must be set on the *instance*, not the module: OpenWebUI reads it off the instantiated Filter, and a module-level-only `toggle` loads fine, passes every static check, and produces no control in the UI. |
+| `notebook_mode` | The **Notebook** control in the chat input — the fourth of the mutually-exclusive mode buttons. While it is on, the turn is answered from one notebook in Open Notebook, chosen by matching the notebook's name against the user's own words ("check islamic guidance to answer this question"). Matching is deterministic string scoring, never a model's guess, because answering from the wrong notebook while the interface says otherwise is the one failure this feature must not have. Asking *about the collection* ("what kind of books are there", "how do I ask a question") is answered from the notebook list and its sources — also deterministically, so it names your real notebooks and real books and shows a phrasing that works. When the name is ambiguous it offers the closest matches and holds the question until the user picks; when the notebook has no sources, or Open Notebook is not reachable, or the running Open Notebook is a version that ignores a notebook scope, it refuses and says why rather than falling through to normal chat. Off by default. Setup, the scoring table and the version requirement: [docs/NOTEBOOK_MODE.md](docs/NOTEBOOK_MODE.md). |
 
 ### The picker is curated on purpose
 
@@ -356,9 +359,9 @@ python3 tests/test_manage_path.py                  # one suite
 for t in tests/test_*.py; do python3 "$t"; done    # all of them
 ```
 
-**2443 checks across 36 offline suites that print a count**, measured 2026-08-10 against the tracked
-sources, plus `test_manifold.py` and `test_router.py`, which pass without printing a count — 38 of
-40 suites in total. All 38 are green, `test_deployed.py` included: it goes red exactly when the
+**2594 checks across 38 offline suites that print a count**, measured 2026-08-10 against the tracked
+sources, plus `test_manifold.py` and `test_router.py`, which pass without printing a count — 40 of
+42 suites in total. All 40 are green, `test_deployed.py` included: it goes red exactly when the
 pipe was edited after the last deploy, which is the check's job, not a standing exception — see
 **Deploying**.
 
@@ -370,7 +373,7 @@ resolver checks (`dig`), and `test_retrieval_quality.py` (a running OpenWebUI) �
 live dependency but happened to be green this run, which is a property of what was reachable on
 this box that day, not a guarantee. [QA_TEST_PLAN.md](docs/QA_TEST_PLAN.md) has the full list.
 
-**Nineteen of the forty suites take a pipe path and default to the gitignored `pipes/live/`
+**Twenty of the forty-two suites take a pipe path and default to the gitignored `pipes/live/`
 copy.** When that copy is stale they test the *deployed* code, not what you just wrote, and say
 nothing about which one they read. Give them the tracked source explicitly:
 
@@ -383,12 +386,12 @@ Both directions of the trap have now been observed on the same day. A suite for 
 the tracked source does not), and before that the same staleness let suites **pass** against code
 696 lines behind the repo. A green run and a red run can both be reporting on the wrong file.
 
-`tests/` is 40 suites covering routing and the manage path, media intent and the confirm gate, GPU
+`tests/` is 42 suites covering routing and the manage path, media intent and the confirm gate, GPU
 diagnosis and lock admission, alert setup/templating/transports/delivery, the cancel-link token and
 service, the subscription-confirmation path on both creation routes, price and stock/availability
 watching, no-URL price discovery, the background-monitor search layer, flight intent and the two
-flight scripts, job-shape enforcement, the Task filter, task ownership, branding, and the deploy
-chain. Beyond unit tests:
+flight scripts, job-shape enforcement, the Task filter, the Notebook filter and its resolver, task ownership,
+branding, and the deploy chain. Beyond unit tests:
 
 - `tests/eval/` — a repeatable evaluation suite with objective graders and a
   checked-in baseline. The judge honours `cases.json`; self-grading was removed.
