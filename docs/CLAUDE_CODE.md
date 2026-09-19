@@ -117,6 +117,34 @@ Everything below lives in `harness/deepseek/` and is symlinked into place by
 machine reports what is missing (no `jq`, no Ollama tag, no API token) rather than
 failing later at request time.
 
+## The skills, rules and hooks layer
+
+`harness/deepseek/` decides *which backend* answers. `harness/claude/` decides *what
+the session is told before it starts* — the installed skills, the path-scoped rules,
+and the one hook that guards destructive git. It is a separate harness with the same
+contract (repo is the source of truth, pieces symlinked out of it):
+
+```bash
+cd ai-stack/harness/claude && ./install.sh
+```
+
+Four projects are wired in: `mattpocock/skills` (the backbone — 25 skills covering
+TDD, diagnosis, planning and review), `blader/humanizer`, `ayghri/i-have-adhd`
+(installed but off), and `cloudflare/security-audit-skill`, which backs the
+`/pr-ready` pre-PR pipeline. The whole set costs **~1,312 tokens always-on**, which is
+the number that matters: on Path B the advertised window is 98304 and the baseline
+request is already ~25K, so a skill set is spending from roughly 73K, not 98K.
+
+Two `google/artemis` and `affaan-m/ECC` were evaluated and **not** installed, for
+reasons recorded in [harness/claude/README.md](../harness/claude/README.md) §6–7.
+The short version of each: ECC's `rules/common/` carries no `paths` frontmatter, so
+its 10 files would load into every session in every repo at ~4,600 tokens; and
+Artemis's five MCP tools would do the same, because **MCP tool search is disabled
+whenever `ANTHROPIC_BASE_URL` is a non-first-party host** — the usual "more MCP
+servers barely costs anything" assumption does not hold on this box.
+
+That last point is the one to remember before adding any MCP server here.
+
 ## Standing up a new machine
 
 ```bash
