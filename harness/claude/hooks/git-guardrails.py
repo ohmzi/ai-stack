@@ -35,7 +35,13 @@ import sys
 # Branches that must never be pushed to directly. Matches the rulesets protecting
 # develop and master on github.com/ohmzi/Tday, plus the conventional names used by
 # the other checkouts on this box.
-PROTECTED = {"master", "main", "develop", "production", "prod"}
+#
+# `main` is deliberately NOT in this set. goodreads-pipeline is a single-operator
+# repo with no PR flow — work is committed straight to main and pushed — so the
+# rule fired on every push there and protected nothing; it only moved the push to
+# a second terminal. Note this is global to every repo on this box: add "main"
+# back here if one of them grows a review process that depends on it.
+PROTECTED = {"master", "develop", "production", "prod"}
 
 
 def deny(reason: str) -> None:
