@@ -92,8 +92,9 @@ def main():
             pass
 
         def fake_start(self, stop_event, *, adapters=None, loop=None, interval=60,
-                       can_dispatch=None, profile_homes=None):
+                       can_dispatch=None, profile_homes=None, **kwargs):
             captured["gate"] = can_dispatch
+            captured["kwargs"] = kwargs
         orig = InProcessCronScheduler.start
         InProcessCronScheduler.start = fake_start
         try:
@@ -102,6 +103,19 @@ def main():
             check("composed gate passes when both allow", gate() is True)
             vetoed["v"] = True
             check("gateway drain veto wins even with GPU idle", gate() is False)
+
+            # v2026.9.21 gives InProcessCronScheduler.start three more keyword parameters, and
+            # gateway/run.py always passes them. A subclass that names a fixed list raises TypeError on
+            # every spawn; the supervised ticker then respawns in a loop and NO JOB EVER FIRES, while
+            # the API keeps serving and every pipe-side check keeps passing. Asserted here because the
+            # failure is otherwise invisible.
+            captured.clear()
+            p.start(_Stop(), can_dispatch=lambda: True, profile_gate=lambda: True,
+                    profile_adapters={"default": object()}, default_profile="coding")
+            check("profile_* keywords are forwarded to super().start()",
+                  captured.get("kwargs", {}).get("default_profile") == "coding"
+                  and "profile_gate" in captured.get("kwargs", {}),
+                  repr(captured.get("kwargs")))
         finally:
             InProcessCronScheduler.start = orig
 

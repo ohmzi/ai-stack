@@ -45,6 +45,10 @@ opposite one.
 Installed at ~/.hermes/plugins/gpuguard/ (the user-plugin dir, which survives `hermes update`).
 Selected via `cron.provider: gpuguard` in config.yaml. Every probe fails OPEN — a dead ComfyUI or
 a dead Ollama is not holding the GPU, and failing closed would strand every job.
+
+The `**kwargs` on `start()` is load-bearing: v0.21.4 added `profile_gate`, `profile_adapters` and
+`default_profile` to the parent's signature and the gateway always passes them. Naming them here
+would work today and break on the next upstream addition.
 """
 from __future__ import annotations
 
@@ -229,7 +233,7 @@ class GpuGuardCronScheduler(InProcessCronScheduler):
         return allow
 
     def start(self, stop_event, *, adapters=None, loop=None, interval=60,
-              can_dispatch=None, profile_homes=None):
+              can_dispatch=None, profile_homes=None, **kwargs):
         if can_dispatch is None:
             gate = self._gpu_available
         else:
@@ -239,5 +243,8 @@ class GpuGuardCronScheduler(InProcessCronScheduler):
             "gpuguard cron scheduler active (probes: %s, %s; max_defer=%ds hard=%ds)",
             COMFY_QUEUE_URL, OLLAMA_PS_URL, MAX_DEFER_S, HARD_DEFER_S,
         )
+        # **kwargs, not a named list: v2026.9.21 added profile_gate/profile_adapters/
+        # default_profile here, and naming them would repeat this break the next time upstream adds
+        # one. At v0.19.0 the gateway passes none of them, so this forwards nothing and is inert.
         super().start(stop_event, adapters=adapters, loop=loop, interval=interval,
-                      can_dispatch=gate, profile_homes=profile_homes)
+                      can_dispatch=gate, profile_homes=profile_homes, **kwargs)
