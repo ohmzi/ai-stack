@@ -1,0 +1,7 @@
+name: coding_task
+version: 1.0.0
+description: "One bounded capability: hand a coding task to the local deepseek CLI."
+author: ohmz
+kind: standalone
+provides_tools:
+  - coding_task
