@@ -243,10 +243,14 @@ Expected: a new `.md` file appears under `~/.hermes/cron/output/<job>/`, the del
 - [ ] **Step 7: Confirm the contracts the pipe reads**
 
 ```bash
-HERMES_KEY=$(cat ~/.hermes/... )   # read the existing API_SERVER_KEY from ~/.hermes/.env, do not print it
+HERMES_KEY=$(command grep -oP '(?<=^API_SERVER_KEY=).*' ~/.hermes/.env)
+test -n "$HERMES_KEY" || echo "no API_SERVER_KEY in ~/.hermes/.env — stop and find it"
 curl -s -H "Authorization: Bearer $HERMES_KEY" http://127.0.0.1:8642/v1/toolsets | head -c 400
 curl -s -H "Authorization: Bearer $HERMES_KEY" "http://127.0.0.1:8642/api/jobs?include_disabled=true" | head -c 300
 ```
+
+Never print the key itself — it authorises the whole Task path.
+
 
 Expected: both answer with a JSON body (not 401/404/500). `platform_toolsets.api_server` must still contain `cronjob`, and `.cron` must still contain `terminal`.
 
@@ -322,12 +326,20 @@ chmod 600 ~/.hermes/profiles/coding/.env
 test $(wc -c < ~/.hermes/profiles/coding/.env) -gt 16 && echo "key written (not printed)"
 ```
 
-The same key is what the pipe authenticates with, so it is written to the OpenWebUI data volume — the one path the container and the host both read:
+The same key is what the pipe authenticates with, so it is written where the container reads it
+(`/app/backend/data` ↔ the host's `/volume1/docker/openwebui/config`). **Write it through the
+container, not from the host**: `config/` is `root:root` and `touch` there fails with
+`Permission denied` — the existing `hermes_api_key` is `root:ohmz` for exactly this reason, and
+`scripts/deploy_pipe.py` writes its sidecars the same way.
 
 ```bash
-printf '%s\n' "$KEY" > /volume1/docker/openwebui/config/hermes_coding_api_key
-chmod 644 /volume1/docker/openwebui/config/hermes_coding_api_key
+printf '%s\n' "$KEY" | docker exec -i open-webui sh -c "cat > /app/backend/data/hermes_coding_api_key"
+docker exec open-webui chmod 640 /app/backend/data/hermes_coding_api_key
+docker exec open-webui ls -la /app/backend/data/hermes_coding_api_key
 ```
+
+Expected: the file exists, `root:1000`, mode `640` — matching `hermes_api_key` alongside it.
+
 
 - [ ] **Step 4: Symlink both plugins into the profile's own plugins dir**
 
@@ -1056,7 +1068,13 @@ def check(label, ok, detail=""):
 
 
 def run(coro):
-    return asyncio.get_event_loop().run_until_complete(coro)
+    # A fresh loop, not asyncio.get_event_loop(): the latter is deprecated for this use from 3.12
+    # and errors on a bare main thread in newer interpreters.
+    loop = asyncio.new_event_loop()
+    try:
+        return loop.run_until_complete(coro)
+    finally:
+        loop.close()
 
 
 def main():
