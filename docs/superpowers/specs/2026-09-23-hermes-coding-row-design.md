@@ -96,11 +96,16 @@ Implementation rules, each of which is a test:
   Default output cap 32 KiB per stream, so a runaway build log cannot fill the agent's context.
   Returns exit code, captured stdout/stderr and duration. A non-zero exit, a missing binary and a
   timeout are three distinct reported outcomes, never a silent empty string.
-- **The allowlist root is a decision, not a default to bury.** `CODING_TASK_ROOTS` is proposed as
-  `~/ai-stack` plus the working trees the user actually codes in, and it wants confirming before
-  implementation — it is the boundary the whole §5.2 containment argument rests on, so it should be
-  written down deliberately rather than inherited from a guess. When `repo` is null the tool runs in
-  the first root.
+- **The allowlist root is `/home/ohmz`**, decided deliberately on 2026-09-23 rather than left as a
+  default. `CODING_TASK_ROOTS = ["/home/ohmz"]`; when `repo` is null the tool runs in the first
+  root. The trade was named before the choice was made and accepted: at this width the tool can
+  reach `~/.hermes`, `~/.claude`, `~/.ssh` and `secrets.env`, not just source trees.
+- **A denylist still applies inside the root.** `CODING_TASK_DENY` refuses the subtrees where a
+  write is catastrophic and never the point of a coding task: `~/.ssh`, `~/.gnupg`,
+  `~/.claude`, `~/.hermes`, `~/.config/deepseek`, and anything matching a `secret`-shaped name.
+  This follows the precedent hermes itself sets — its hardline blocklist applies "regardless" of
+  approval mode — and it costs nothing a legitimate coding task needs. It is a recommendation,
+  not a red line: it can be dropped in one line if it ever gets in the way.
 
 ### 4.3 Pipe `pipes/hermes_coding.py`
 
@@ -133,14 +138,20 @@ Either alone is defeatable; both together are not, for the two paths that exist.
 
 ### 5.2 The residual risk, stated plainly
 
-`coding_task` is effectively **arbitrary code execution within its pinned directory**. `deepseek -p`
-runs Claude Code under `permissions.defaultMode: "auto"` (§2 row 3), so it writes files and runs
-commands without asking. What contains it is the pinned root, the fixed argv, the timeout and the
-output cap — **not** an inability to write.
+`coding_task` is effectively **arbitrary code execution as the user, across the home directory**.
+`deepseek -p` runs Claude Code under `permissions.defaultMode: "auto"` (§2 row 3), so it writes
+files and runs commands without asking.
 
-This is the accepted cost of the bounded-tool choice, and it is exactly why the row is admin-only
-and why the tool is absent from the shared surface the Task path uses. It should not be described
-anywhere as sandboxing, because it is not.
+The root was widened to `/home/ohmz` on request, so be precise about what is left. The fixed argv
+still means no shell is ever involved and no argument is interpolated — that is real and it is
+tested. The denylist in §4.2 removes the catastrophic targets. But within `~` the tool can
+otherwise write anywhere, **including `~/.bashrc` and `~/.config`**, so it is not confined to
+source trees and must not be described as confined to them. The timeout and output cap bound cost,
+not reach.
+
+This is the accepted cost of the bounded-tool choice, and it is exactly why the row is admin-only,
+why the tool is absent from the shared surface the Task path uses, and why `terminal` stays off
+everywhere. It should not be described anywhere as sandboxing, because it is not.
 
 ### 5.3 What is *not* weakened
 
