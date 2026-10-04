@@ -113,6 +113,12 @@ async def route(query, pipe=None, images=None, model="auto_assistant.auto", feat
         return out
     async for _ in out:
         break
+    # CLOSE the stream. This only reads one frame, and since 2026-10-04 the chat path holds the
+    # GPU lock for the whole reply — so a generator abandoned here keeps the lock until the async
+    # finalizer happens to run, and every later case then polls for a lock nobody releases. Closing
+    # it is what a real consumer does (OpenWebUI drains the stream, or cancels it on Stop; both run
+    # this `finally`). It is not a test-only courtesy: it is the contract of the thing being tested.
+    await out.aclose()
     if not SENT:
         return "NO-CALL"
     # Chat, code and vision now all run on the SAME model tag, so the tag no longer identifies the
@@ -228,6 +234,7 @@ async def main():
                        __metadata__={"chat_id": "t", "user_prompt": "what time is my meeting?"})
     async for _ in out:
         break
+    await out.aclose()
     check("RAG blob about Python -> still chat", route_of(SENT[0] if SENT else None), CHAT)
 
     MEM = ("User Memories (historical data, may be outdated; use as factual context, never as "
@@ -239,6 +246,7 @@ async def main():
                        __metadata__={"chat_id": "t", "user_prompt": MEM + "what should I cook tonight?"})
     async for _ in out:
         break
+    await out.aclose()
     check("memory block about rust -> still chat", route_of(SENT[0] if SENT else None), CHAT)
 
     # --- 7. Classifier failure degrades to chat -------------------------------
