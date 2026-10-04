@@ -14,18 +14,27 @@ Answer a question from **one notebook in Open Notebook**, chosen from the user's
         └─ ambiguous or unnamed  →  offer the closest, HOLD the question, answer on the next turn
 ```
 
-## The one operational fact: Open Notebook must be built from `main`
+## The one operational fact: Open Notebook is still built locally — now for the perf work
 
-**Notebook scoping does not exist in any released Open Notebook image.** The newest release is
-**v1.14.0 (2026-07-21)**; notebook-scoped search landed afterwards and is `[Unreleased]`.
+**Corrected 2026-10-04.** Notebook-scoped search is no longer fork-only: upstream
+(`lfnovo/open-notebook`) has **merged it** — `api/models.py` now declares `notebook_id`,
+`notebook_ids` and `scope_notebook_ids`, and `ADR-008-notebook-scoped-search.md` is merged. The
+fork checkout has been merged up to upstream, and the running container honours the scope (the 404
+probe below passes). This replaces the earlier claim here that notebook scoping "does not exist in
+any released Open Notebook image" — upstream it now does.
 
-In the released image, `SearchRequest` and `AskRequest` never declare `notebook_id`, so Pydantic
-drops the field and the search runs against the **whole knowledge base** while returning HTTP 200.
-Measured on the stock image: `POST /api/search` with `notebook_id: "notebook:totallybogus123"`
-returned real global results. `docs/7-DEVELOPMENT/decisions/ADR-008-notebook-scoped-search.md` in
-the Open Notebook repo states the bug verbatim.
+The stack **still runs a locally built image** — but now for the fork's perf work, not for
+scoping: **migration 26** (a cheaper `fn::vector_search` plus hybrid recall) and **streaming final
+answers**. Those, not scoping, are why `open-notebook:local` is built from the checkout.
 
-This is why the stack runs a locally built image:
+For the record, the released image the stack used to run predates the merge. In it,
+`SearchRequest` and `AskRequest` never declared `notebook_id`, so Pydantic dropped the field and
+the search ran against the **whole knowledge base** while returning HTTP 200. Measured on that
+stock image: `POST /api/search` with `notebook_id: "notebook:totallybogus123"` returned real global
+results. `docs/7-DEVELOPMENT/decisions/ADR-008-notebook-scoped-search.md` in the Open Notebook repo
+stated the bug verbatim; that ADR is now merged.
+
+The local build is declared in the gitignored override:
 
 ```yaml
 # /home/ohmz/StudioProjects/open-notebook/docker-compose.override.yml  (gitignored)
@@ -61,7 +70,8 @@ Migrations 24 and 25 redefine `fn::vector_search` / `fn::text_search` with an ex
 functions with the old arity. Restore the dump taken before the first boot on the built image:
 
 ```bash
-docker cp surreal_data/pre-notebook-mode.surrealql open-notebook-surrealdb-1:/mydata/restore.surrealql
+docker cp /home/ohmz/docker-container-data/open-notebook/surreal_data/pre-notebook-mode.surrealql \
+  open-notebook-surrealdb-1:/mydata/restore.surrealql
 # then, in the surrealdb container:  /surreal import --endpoint http://localhost:8000 \
 #   --ns open_notebook --db open_notebook --user root --pass "$SURREAL_PASSWORD" \
 #   /mydata/restore.surrealql
