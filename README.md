@@ -73,8 +73,21 @@ Highlights:
   result — against the user's original wording, so a rewrite that drifted off the
   subject fails instead of passing. (Photoreal does not verify — it trades that
   for seed control and per-job metrics.)
-- **VRAM choreography** — a generation lock, real VRAM-release polling,
-  idle-gated ComfyUI unloads, and recovery from a wedged allocator on OOM.
+- **One queue for all GPU work (2026-10-04)** — plain chat now takes the same generation lock as
+  the media pipelines, so a turn arriving mid-render **waits its turn** ("Waiting for the GPU…
+  1m 20s") instead of contending. Contending was not free: an 18 GB chat tenant and a 12–25 GB
+  render tenant cannot co-reside on one 24 GB card, so "slow but proceeding" actually meant Ollama
+  evicting whichever was resident — a render restarting cold, or a reply arriving only after a ~23 s
+  cold reload, which is the timeout people see. Queueing keeps every model swap inside the lock, so
+  a swap can never land mid-render, and the waiter never times out.
+- **A thermal gate before every load** — after acquiring the lock and before loading a model, the
+  card is checked with `nvidia-smi`: above **85 °C** the task waits (holding the lock, so the queue
+  resumes in order) until it falls below **75 °C**. The gap is hysteresis, so a card sitting at the
+  limit cannot flap. It **fails open** — an unreadable temperature is never a reason to refuse a
+  turn. Thresholds are `AA_GPU_TEMP_PAUSE_C` / `AA_GPU_TEMP_RESUME_C`; the card reports Target 83,
+  Slowdown 95, Shutdown 98, and idles at 61–63. `tests/test_thermal_gate.py` pins the behaviour.
+- **VRAM choreography** — real VRAM-release polling, idle-gated ComfyUI unloads, and recovery from
+  a wedged allocator on OOM.
 - **Native status line** — a live elapsed ticker collapsing to
   `Generated in 1m 05s · RedCraft · 1024×1024 · 8 steps`.
 - **Generation stats under a reply** — hover the `ⓘ`. On a chat turn that is tokens/s, prompt
