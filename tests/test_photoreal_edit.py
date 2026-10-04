@@ -95,7 +95,7 @@ def main():
             check(f"'{name}' pins cfg to 1.0 because it uses the LoRA", t["cfg"] == 1.0, str(t))
     check("'best' keeps a cfg that lets the negative bite", shared.EDIT_TIERS["best"]["cfg"] > 1.0)
     check("the LoRA file is named once, not per call site",
-          open(shared.__file__).read().count('"Qwen-Image-Edit-2509-Lightning') == 1)
+          open(shared.__file__).read().count('"FireRed-Image-Edit-1.1-Lightning') == 1)
 
     print("--- the Qwen graph is what carries identity ---")
     wf = shared.build_qwen_edit_wf("add a hat", "ref.png", 1, 4.0, 20)

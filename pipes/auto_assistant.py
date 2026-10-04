@@ -213,9 +213,14 @@ IMG_DENOISE = 0.30  # gentle Krea 2 img2img edit strength (lower = closer to the
 EDIT_TIERS = {
     "best":     {"lightning": False, "steps": 20, "cfg": 4.0},
     "balanced": {"lightning": True,  "steps": 8,  "cfg": 1.0},
-    "fast":     {"lightning": True,  "steps": 4,  "cfg": 1.0},
+    # FireRed ships only an 8-STEP Lightning LoRA (no 4-step), so `fast` currently equals
+    # `balanced`. Kept as a distinct name so EDIT_QUALITY="fast" keeps working and stays fast
+    # rather than falling through to `best` (the slowest tier).
+    "fast":     {"lightning": True,  "steps": 8,  "cfg": 1.0},
 }
-EDIT_LORA = "Qwen-Image-Edit-2509-Lightning-4steps-V1.0-bf16.safetensors"
+# FireRed-Image-Edit 1.1 replaced Qwen-Image-Edit 2509 on 2026-10-04; the 2509 files remain
+# on disk for rollback. Mirrors pipes/shared/identity_edit.py.
+EDIT_LORA = "FireRed-Image-Edit-1.1-Lightning-8steps-v1.1.safetensors"
 IMG_ENHANCE = True  # expand short prompts into richer ones via the local LLM (text-to-image only)
 IMG_VERIFY = True   # vision-check the result against the request; one corrected retry on mismatch
 # One JSON line per finished media job. The QA loop above can turn a 16 s render into a 3-minute one
@@ -4293,8 +4298,8 @@ class Pipe:
         # INERT negative prompt, because the tier runs cfg 1.0. Callers that depend on the negative
         # must pass lightning=False.
         wf = {
-          "u":    {"class_type": "UnetLoaderGGUF", "inputs": {"unet_name": "Qwen-Image-Edit-2509-Q4_K_M.gguf"}},
-          "msaf": {"class_type": "ModelSamplingAuraFlow", "inputs": {"model": ["u", 0], "shift": 3.0}},
+          "u":    {"class_type": "UnetLoaderGGUF", "inputs": {"unet_name": "FireRed-Image-Edit-1.1-transformer-q4_k_m.gguf"}},
+          "msaf": {"class_type": "ModelSamplingAuraFlow", "inputs": {"model": ["u", 0], "shift": 3.1}},
           "cfgn": {"class_type": "CFGNorm", "inputs": {"model": ["msaf", 0], "strength": 1.0}},
           "clip": {"class_type": "CLIPLoader", "inputs": {"clip_name": "qwen_2.5_vl_7b_fp8_scaled.safetensors", "type": "qwen_image", "device": "default"}},
           "v":    {"class_type": "VAELoader", "inputs": {"vae_name": "qwen_image_vae.safetensors"}},
@@ -4385,7 +4390,7 @@ class Pipe:
         # Free ComfyUI's VRAM up front so the dolphin/gemma prompt-rewrite helpers below don't load
         # into a card ComfyUI still occupies (~13.7 GB) and run partly on CPU.
         self._comfy_free()
-        # Attached image → instruction edit with Qwen-Image-Edit 2509.
+        # Attached image → instruction edit with FireRed-Image-Edit 1.1.
         if ref_b64:
             instruction = prompt or "improve the overall quality, keep everything else the same"
             negative = ""

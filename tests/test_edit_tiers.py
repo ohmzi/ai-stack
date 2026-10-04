@@ -76,7 +76,7 @@ def main():
             check(f"'{name}' pins cfg to 1.0 because it uses the LoRA", t["cfg"] == 1.0, str(t))
     check("'best' keeps a cfg that lets the negative bite", mod.EDIT_TIERS["best"]["cfg"] > 1.0)
     check("'best' does not load the speed LoRA", mod.EDIT_TIERS["best"]["lightning"] is False)
-    check("the LoRA file is named once, not per call site", src.count('"Qwen-Image-Edit-2509-Lightning') == 1)
+    check("the LoRA file is named once, not per call site", src.count('"FireRed-Image-Edit-1.1-Lightning') == 1)
 
     print("--- the pipe finally has Valves, and the tier knob is one of them ---")
     check("Pipe declares a Valves model", hasattr(mod.Pipe, "Valves"))
@@ -123,7 +123,8 @@ def main():
     p3.valves.EDIT_QUALITY = "fast"
     got = build(p3, "add a red hat")
     check("an ordinary edit DOES take the tier", got.get("lightning") is True, str(got))
-    check("...with the tier's step count", got.get("steps") == 4, str(got))
+    check("...with the tier's step count",
+          got.get("steps") == mod.EDIT_TIERS["fast"]["steps"], str(got))
 
     p4 = mod.Pipe()
     p4.valves.EDIT_QUALITY = "best"

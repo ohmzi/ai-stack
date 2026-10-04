@@ -62,7 +62,7 @@ METRICS_PATH = os.environ.get("MEDIA_METRICS", "/app/backend/data/media_metrics.
 # a structural edit needs the high end. One scalar cannot be low where the face is and high
 # where the jacket is.
 #
-# Qwen-Image-Edit 2509 puts the reference in the CONDITIONING instead of the noise budget,
+# FireRed-Image-Edit 1.1 puts the reference in the CONDITIONING instead of the noise budget,
 # so it holds ~100% of the source's grain (measured, auto_assistant.py:180-190). It is also
 # a censored model, which is why the SDXL path is kept rather than deleted: set
 # EDIT_ENGINE="sdxl" for anything Qwen refuses, and accept that identity will drift.
@@ -73,7 +73,7 @@ class Pipe:
     class Valves(BaseModel):
         EDIT_ENGINE: str = Field(
             default="qwen",
-            description="Engine for reference-image edits. 'qwen' = Qwen-Image-Edit 2509, keeps "
+            description="Engine for reference-image edits. 'qwen' = FireRed-Image-Edit 1.1, keeps "
                         "the subject the same person (~36 s). 'sdxl' = the old Lustify img2img "
                         "path — uncensored, but the face WILL drift (~13 s).")
         EDIT_QUALITY: str = Field(

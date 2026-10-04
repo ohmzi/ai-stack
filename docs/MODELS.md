@@ -213,7 +213,9 @@ Not Ollama tenants, but they compete for the same 24 GB, so they belong in the s
 |---|---|---|
 | Text-to-image | `krea2/redcraft23INT8INT4FP8_30Krea2.safetensors` | **RedCraft** (Krea 2 base, INT8/INT4/FP8-scaled), 12.2 GB. Creator's spec: `ER_SDE`/Euler, simple, **cfg 1.0, 8–12 steps** — the pipes run 8. No trigger words. Swapped in 2026-08-02. |
 | Text-to-image (previous) | `krea2/krea2_turbo_fp8_scaled.safetensors` | Krea 2 Turbo. **Kept on disk** for rollback: change `self.unet` in `image_krea.py` and the `unet_name` in `auto_assistant._build_t2i_wf`. |
-| Instruction editing | `Qwen-Image-Edit-2509-Q4_K_M.gguf` | + `Qwen-Image-Edit-2509-Lightning-4steps` LoRA for the fast tiers. Shared CLIP/VAE with the t2i path. |
+| Instruction editing | `FireRed-Image-Edit-1.1-transformer-q4_k_m.gguf` | Replaced `Qwen-Image-Edit-2509-Q4_K_M.gguf` on **2026-10-04**. ~99.96 % the same weights, so CLIP (`qwen_2.5_vl_7b_fp8_scaled`) and VAE (`qwen_image_vae`) are unchanged; the graph differs only in the unet, the LoRA and the AuraFlow **shift 3.0 → 3.1** (FireRed's own workflow). |
+| Instruction editing (LoRA) | `FireRed-Image-Edit-1.1-Lightning-8steps-v1.1.safetensors` | **8-step**, not 4 — FireRed ships no 4-step LoRA, so the `fast` tier now equals `balanced` (both 8 steps / cfg 1.0). Only `best` (20 steps / cfg 4.0) runs without it, and is the only tier where the negative prompt bites. |
+| Instruction editing (previous) | `Qwen-Image-Edit-2509-Q4_K_M.gguf` + `…-Lightning-4steps-V1.0-bf16` | **Kept on disk** for rollback: revert `EDIT_UNET`/`EDIT_LORA` in `pipes/shared/identity_edit.py`, `pipes/auto_assistant.py` and `pipes/image_krea.py`, restore shift 3.0, then `deploy_pipe.py --all` and `docker restart open-webui` (sidecar). |
 | Uncensored t2i | `lustifySDXL.safetensors` | Photoreal only. |
 
 Raising steps toward 10–12 is the sanctioned quality lever for RedCraft; **cfg stays 1.0**,

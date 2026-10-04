@@ -18,7 +18,7 @@ scalar is being asked to be low where the face is and high where the jacket is:
     0.40-0.50 half-applied and inconsistent                       "their sibling"
     >= 0.55   the edit lands                                      a stranger in their pose
 
-Qwen-Image-Edit 2509 does not have this problem, because the reference goes into the
+FireRed-Image-Edit 1.1 does not have this problem, because the reference goes into the
 CONDITIONING (TextEncodeQwenImageEditPlus takes image1 on BOTH the positive and negative
 encoders) instead of into the noise budget. Measured on this box 2026-08-01, fixed seed,
 10 renders (auto_assistant.py:180-190 and UPGRADE_ROADMAP.md 1.3):
@@ -67,12 +67,18 @@ __version__ = "1.0.0"
 EDIT_TIERS = {
     "best":     {"lightning": False, "steps": 20, "cfg": 4.0},
     "balanced": {"lightning": True,  "steps": 8,  "cfg": 1.0},
-    "fast":     {"lightning": True,  "steps": 4,  "cfg": 1.0},
+    # FireRed ships only an 8-STEP Lightning LoRA (no 4-step), so `fast` currently equals
+    # `balanced`. Kept as a distinct name so a valve set to "fast" keeps working and stays
+    # fast, rather than silently falling through to `best` (the slowest tier).
+    "fast":     {"lightning": True,  "steps": 8,  "cfg": 1.0},
 }
-EDIT_LORA = "Qwen-Image-Edit-2509-Lightning-4steps-V1.0-bf16.safetensors"
+EDIT_LORA = "FireRed-Image-Edit-1.1-Lightning-8steps-v1.1.safetensors"
 
-# Qwen-Image-Edit 2509 asset names, as they sit in /volume1/docker/comfyui/models.
-EDIT_UNET = "Qwen-Image-Edit-2509-Q4_K_M.gguf"
+# FireRed-Image-Edit 1.1 asset names, as they sit in /volume1/docker/comfyui/models.
+# FireRed REPLACED Qwen-Image-Edit 2509 on 2026-10-04 (docs/MODELS.md). It is ~99.96% the
+# same weights, so CLIP and VAE are unchanged and the graph differs only in the unet, the
+# LoRA and the AuraFlow shift; the 2509 files stay on disk for rollback.
+EDIT_UNET = "FireRed-Image-Edit-1.1-transformer-q4_k_m.gguf"
 EDIT_CLIP = "qwen_2.5_vl_7b_fp8_scaled.safetensors"
 EDIT_VAE = "qwen_image_vae.safetensors"
 
@@ -116,7 +122,7 @@ def parse_seed(text):
 
 def build_qwen_edit_wf(instruction, ref_name, seed, cfg, steps, negative="", lightning=False,
                        filename_prefix="owui_edit"):
-    """Qwen-Image-Edit 2509: follow a text INSTRUCTION on the attached image.
+    """FireRed-Image-Edit 1.1: follow a text INSTRUCTION on the attached image.
 
     A true instruction editor -- it changes what was asked and keeps the rest. img2img
     cannot do this at any denoise, because it has nowhere to put "the rest".
@@ -134,7 +140,7 @@ def build_qwen_edit_wf(instruction, ref_name, seed, cfg, steps, negative="", lig
     """
     wf = {
         "u":    {"class_type": "UnetLoaderGGUF", "inputs": {"unet_name": EDIT_UNET}},
-        "msaf": {"class_type": "ModelSamplingAuraFlow", "inputs": {"model": ["u", 0], "shift": 3.0}},
+        "msaf": {"class_type": "ModelSamplingAuraFlow", "inputs": {"model": ["u", 0], "shift": 3.1}},
         "cfgn": {"class_type": "CFGNorm", "inputs": {"model": ["msaf", 0], "strength": 1.0}},
         "clip": {"class_type": "CLIPLoader",
                  "inputs": {"clip_name": EDIT_CLIP, "type": "qwen_image", "device": "default"}},

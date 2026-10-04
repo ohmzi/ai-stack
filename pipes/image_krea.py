@@ -83,10 +83,11 @@ class Pipe:
         self.unet = "krea2/redcraft23INT8INT4FP8_30Krea2.safetensors"
         self.clip = "qwen3vl_4b_fp8_scaled.safetensors"
         self.vae = "qwen_image_vae.safetensors"
-        # Qwen-Image-Edit 2509 (instruction editing when a reference image is attached).
+        # FireRed-Image-Edit 1.1 (instruction editing when a reference image is attached).
+        # Replaced Qwen-Image-Edit 2509 on 2026-10-04; the 2509 files stay on disk for rollback.
         # GGUF Q4_K_M so it fits the 24GB card with headroom (fp8 OOM'd on LoRA patching).
-        self.edit_unet = "Qwen-Image-Edit-2509-Q4_K_M.gguf"
-        self.edit_lora = "Qwen-Image-Edit-2509-Lightning-4steps-V1.0-bf16.safetensors"  # 4-step speedup
+        self.edit_unet = "FireRed-Image-Edit-1.1-transformer-q4_k_m.gguf"
+        self.edit_lora = "FireRed-Image-Edit-1.1-Lightning-8steps-v1.1.safetensors"  # 8-step speedup
         self.edit_clip = "qwen_2.5_vl_7b_fp8_scaled.safetensors"
         self.edit_vae = "qwen_image_vae.safetensors"  # shared with Krea 2
 
@@ -483,7 +484,7 @@ class Pipe:
 
     def _build_edit_wf(self, instruction: str, ref_name: str, seed: int, quality: str,
                        negative: str = "", boost: bool = False):
-        """Qwen-Image-Edit 2509: follow a text INSTRUCTION on the attached image, changing only what's
+        """FireRed-Image-Edit 1.1: follow a text INSTRUCTION on the attached image, changing only what's
         asked and keeping the rest identical. A true instruction editor (img2img cannot do this).
         negative: traits that must NOT appear (only effective when cfg > 1, i.e. 'best').
         boost: raise cfg/steps when the user says the last edit under-delivered."""
@@ -492,7 +493,7 @@ class Pipe:
             q["cfg"], q["steps"] = 6.0, q["steps"] + 4
         wf = {
             "u":    {"class_type": "UnetLoaderGGUF", "inputs": {"unet_name": self.edit_unet}},
-            "msaf": {"class_type": "ModelSamplingAuraFlow", "inputs": {"model": ["u", 0], "shift": 3.0}},
+            "msaf": {"class_type": "ModelSamplingAuraFlow", "inputs": {"model": ["u", 0], "shift": 3.1}},
             "cfgn": {"class_type": "CFGNorm", "inputs": {"model": ["msaf", 0], "strength": 1.0}},
             "clip": {"class_type": "CLIPLoader", "inputs": {"clip_name": self.edit_clip, "type": "qwen_image", "device": "default"}},
             "v":    {"class_type": "VAELoader", "inputs": {"vae_name": self.edit_vae}},
