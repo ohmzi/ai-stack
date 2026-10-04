@@ -360,8 +360,10 @@ def main():
     # reaches. Re-derive this set from the image's searx/settings.yml at every digest bump.
     check("the engines: block only flips engines that are in the roster",
           set(flip) <= set(keep), (flip, keep))
+    # yep/swisscows/yahoo joined 2026-10-04; each ships switched off in the 2026.9.29 image, so each
+    # needs a flip and belongs in this set (and in the roster, per the check above).
     check("...and it does not list engines that need no flip",
-          set(flip) == {"bing", "mojeek", "google"}, flip)
+          set(flip) == {"bing", "mojeek", "google", "yep", "swisscows", "yahoo"}, flip)
     check("google is on the hermes roster — the whole point of the second instance",
           "google" in keep)
     # 2026.9.29 ships mojeek `inactive` (its proof-of-work CAPTCHA costs CPU), so without this line

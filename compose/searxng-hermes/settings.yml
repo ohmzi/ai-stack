@@ -24,6 +24,9 @@
 #     the same host, so a monitor CAN still burn those two for chat. "Almost disjoint" is the
 #     accurate claim; "never" was not. startpage and qwant were named as hermes-only and are not in
 #     this file's roster at all.
+#     UPDATED 2026-10-04: the roster gained yep, swisscows and yahoo (see keep_only below). All
+#     three are hermes-only, so the shared set is STILL exactly {bing, mojeek} — the rule held
+#     while widening the fan-out. A test asserts that set directly.
 #
 # Measured constraints this file respects (docs/CAPABILITY_UPGRADE_PLAN.md:427-458):
 #   ~50-60 queries per engine per 10 min CAPTCHA'd google/duckduckgo/startpage/brave together.
@@ -74,6 +77,24 @@ use_default_settings:
       - bing          # measured "the most tolerant of server-to-server use from this IP"
                       # (the chat roster's comment until 2026-09-29) and the one engine that
                       # survived the audit's 50-query burst. Second floor engine.
+      # ADDED 2026-10-04, when google and brave were BOTH blocked upstream from this IP at once
+      # (google "access denied", brave "too many requests"), leaving the fan-out on its two floor
+      # engines. Five queries apiece against a throwaway instance, same method as the rest of this
+      # file. None of the three is on the chat roster, so the "share only bing and mojeek" rule
+      # holds and a test enforces it.
+      - yep           # Ahrefs' own crawl (api.yep.com), NOT a Bing/Google reseller — it fails
+                      # independently of every engine above, which is the property the roster was
+                      # missing. 5/5, 20 results every query, relevant and locale-correct: .ca
+                      # retailers for a product query, cheapflights/emirates/kayak for a fare query.
+                      # Widest result budget on the roster; the natural lead when google is down.
+      - swisscows     # 5/5 (7..16 results), its own API endpoint, so a separate limit bucket even
+                      # where its index overlaps another's. Locale-correct.
+      - yahoo         # 5/5 (7 results, stable, for fare and product queries alike). Bing-backed,
+                      # so it is insurance and a distinct bucket rather than an independent index.
+      # Rejected in the same 2026-10-04 sweep, kept here so they are not re-tried: seznam (0/5,
+      #   "Suspended: timeout"), dogpile / searchmysite / luxxle / fireball (0/5, "access denied"),
+      #   wiby (2/5, a small-web index with nothing for retail), marginalia (refuses to load
+      #   keyless — "Missing engine config attribute: marginalia.api_key").
       # NOT kept, and the first two are a MEASURED reversal of this file's first version:
       #   startpage — CAPTCHA on the very first query this instance ever issued, and on every one
       #     since: "get_sc_code: got redirected to .../sp/captcha (suspended_time=3600)". An hour
@@ -164,4 +185,14 @@ engines:
   - name: bing
     disabled: false
   - name: google
+    disabled: false
+  # Read from the 2026.9.29 image's own searx/settings.yml (the rule above): yep and yahoo ship
+  # `disabled: true`, swisscows ships both `disabled: true` and `inactive: true`. Without these the
+  # three 2026-10-04 additions are dropped SILENTLY from keep_only and the roster quietly shrinks.
+  - name: yep
+    disabled: false
+  - name: swisscows
+    disabled: false
+    inactive: false
+  - name: yahoo
     disabled: false

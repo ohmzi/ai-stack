@@ -72,7 +72,11 @@ MERGE_CAP = 40
 # startpage and qwant were dropped after measurement: both CAPTCHA from this IP on the first query
 # and every one after. brave stays despite intermittent 180 s suspensions — it produced the only
 # relevant rows in the first live tests, where bing returned payday-loan sites for a flight query.
-ENGINE_ORDER = ("google", "brave", "mojeek", "bing")
+# yep, swisscows and yahoo were added 2026-10-04, after google and brave were both blocked upstream
+# at once and the fan-out fell back to its two floor engines; each measured 5/5, all three are
+# hermes-only, and yep (Ahrefs' own crawl) fails independently of the rest. The new names go last:
+# they are a wider net, not a promotion over the measured lead engines.
+ENGINE_ORDER = ("google", "brave", "mojeek", "bing", "yep", "swisscows", "yahoo")
 
 # The scoreboard lives in the monitor-state directory so it inherits price_watch's atomic write and
 # its tests' tempdir isolation. The leading underscore keeps it out of the --state namespace the
