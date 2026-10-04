@@ -160,14 +160,21 @@ export ANTHROPIC_DEFAULT_OPUS_MODEL="$CLOUD_MODEL"
 # auto-mode classifier, subagents. Left pointing at the local tags in a cloud
 # session they silently put all of it on the 3090 (measured 2026-09-24: 2.3k calls
 # at a ~29k-token prefill each, GPU pinned at 99%, 383W, while the session model was
-# cloud). So they follow the main model's provider. A cloud session then never
-# touches the local backend at all; a local session keeps the live `/model sonnet`
-# switch, with `opus` as the way back out to the cloud.
+# cloud).
+#
+# SYMMETRIC TABLE (2026-10-04): the coding switch is the same word in either
+# session, because a cloud session could not reach the local model at all before:
+#   /model sonnet -> the local coder        /model opus -> the cloud
+# `sonnet` is ALWAYS $LOCAL_MODEL and `opus` is ALWAYS $CLOUD_MODEL; only `haiku`
+# follows the launch provider, and it is the slot the background chores ride in.
+# That is what keeps a cloud session's titles, classifier and subagents off the GPU
+# while still letting the user bring a turn local on purpose. See
+# docs/superpowers/specs/2026-10-04-ohmzai-coding-engine-design.md §4.2.
 if [[ "$PROVIDER" == "$CLOUD_PROVIDER" ]]; then
-  export ANTHROPIC_DEFAULT_SONNET_MODEL="$CLOUD_MODEL"
+  export ANTHROPIC_DEFAULT_SONNET_MODEL="$LOCAL_MODEL"
   export ANTHROPIC_DEFAULT_HAIKU_MODEL="$CLOUD_MODEL"
 else
-  export ANTHROPIC_DEFAULT_SONNET_MODEL="$MODEL"
+  export ANTHROPIC_DEFAULT_SONNET_MODEL="$LOCAL_MODEL"
   export ANTHROPIC_DEFAULT_HAIKU_MODEL="$FAST_MODEL"
 fi
 
