@@ -76,6 +76,14 @@ def main():
           'export ANTHROPIC_DEFAULT_HAIKU_MODEL="$CLOUD_MODEL"' in launcher)
     check("opus is always the cloud",
           'export ANTHROPIC_DEFAULT_OPUS_MODEL="$CLOUD_MODEL"' in launcher)
+    # The launcher is bash and the policy is python, so "written once" is enforced
+    # here rather than by an import: the two must name the same models.
+    check("the launcher's local default is the policy's",
+          f'LOCAL_MODEL="${{DEEPSEEK_LOCAL_MODEL:-{cp.LOCAL_MODEL}}}"' in launcher, cp.LOCAL_MODEL)
+    check("the launcher's cloud default is the policy's",
+          f'CLOUD_MODEL="${{DEEPSEEK_CLOUD_MODEL:-{cp.CLOUD_MODEL}}}"' in launcher, cp.CLOUD_MODEL)
+    check("both launcher defaults are declared (the check above can fail loudly)",
+          "DEEPSEEK_LOCAL_MODEL" in launcher and "DEEPSEEK_CLOUD_MODEL" in launcher)
 
     fails = results.count(False)
     print(f"\n{len(results)} checks — {'ALL PASS' if not fails else str(fails) + ' FAILURE(S)'}")
