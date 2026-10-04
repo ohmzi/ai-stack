@@ -3,7 +3,7 @@ title: Uncensored
 author: local
 version: 0.6.0
 required_open_webui_version: 0.5.0
-description: Photorealistic uncensored images (Lustify SDXL) via local ComfyUI. Reference-image edits run through Qwen-Image-Edit so the subject stays the same person; follow-ups ("make this picture animated", "remove the hat") keep editing the previous picture instead of generating a stranger, and background-task calls never render. Non-blocking (async); auto-frees GPU VRAM.
+description: Photorealistic uncensored images (Lustify V10, Krea 2) via local ComfyUI. Reference-image edits run through Qwen-Image-Edit so the subject stays the same person; follow-ups ("make this picture animated", "remove the hat") keep editing the previous picture instead of generating a stranger, and background-task calls never render. Non-blocking (async); auto-frees GPU VRAM.
 """
 import asyncio, base64, os, random, re, sys, time
 import requests
@@ -91,7 +91,15 @@ class Pipe:
         self.valves = self.Valves()
         self.comfy = "http://localhost:8188"
         self.ollama = "http://localhost:11434"
-        self.model = "lustifySDXL.safetensors"
+        # Lustify V10 (Krea 2), the direct lineage successor to lustifySDXL — same author, moved
+        # from SDXL to Krea 2 for training quality. Swapped 2026-10-04; `lustifySDXL.safetensors`
+        # stays on disk for rollback (docs/MODELS.md). It is a Krea 2 DiT, so it loads through the
+        # SAME stack the t2i lane uses (UNETLoader + CLIPLoader type=krea2 + the Qwen-Image VAE)
+        # rather than CheckpointLoaderSimple, and it runs at Krea 2's own sampler settings
+        # (er_sde/simple, cfg 1.0, 8 steps) instead of SDXL's dpmpp_2m/karras at cfg 5.
+        self.model = "krea2/lustifyV10Krea2_turbo_fp8.safetensors"
+        self.clip = "qwen3vl_4b_fp8_scaled.safetensors"
+        self.vae = "qwen_image_vae.safetensors"
         # Prompt enhancement MUST use an uncensored model — gemma4/gemma3 refuse this content and
         # would break the pipe's deliberate isolation from the shared config.
         #
@@ -258,26 +266,42 @@ class Pipe:
         except Exception:
             return instruction, ""
 
-    def _build_sdxl_wf(self, prompt, negative, seed, ref_name=None):
-        """Lustify SDXL. txt2img, or img2img when ref_name is set. Output node is "9"."""
+    def _build_t2i_wf(self, prompt, negative, seed, ref_name=None):
+        """Lustify V10 (Krea 2). txt2img, or img2img when ref_name is set. Output node is "9".
+
+        THE NEGATIVE IS INERT, and that is a property of the model, not an oversight. Krea 2 is a
+        cfg-1.0 model, where guidance is mathematically unable to act on a negative branch, so it
+        is built as `ConditioningZeroOut` exactly as the t2i lane builds it — the `negative`
+        parameter is accepted and ignored rather than silently dropped, so callers keep one
+        signature. (Measured on the SDXL predecessor: same seed with negative="" and a real
+        negative produced byte-identical output at cfg 1.0, and differed at cfg 4.0.) Quality is
+        steered by the POSITIVE prompt here. `steps` may be raised toward 10-12; cfg stays 1.0.
+        """
         wf = {
-          "4": {"class_type": "CheckpointLoaderSimple", "inputs": {"ckpt_name": self.model}},
-          "6": {"class_type": "CLIPTextEncode", "inputs": {"text": prompt, "clip": ["4", 1]}},
-          "7": {"class_type": "CLIPTextEncode", "inputs": {"text": negative, "clip": ["4", 1]}},
-          "3": {"class_type": "KSampler", "inputs": {"seed": seed, "steps": 30, "cfg": 5.0,
-                    "sampler_name": "dpmpp_2m", "scheduler": "karras", "denoise": 1.0,
-                    "model": ["4", 0], "positive": ["6", 0], "negative": ["7", 0], "latent_image": ["5", 0]}},
-          "8": {"class_type": "VAEDecode", "inputs": {"samples": ["3", 0], "vae": ["4", 2]}},
+          "u": {"class_type": "UNETLoader",
+                "inputs": {"unet_name": self.model, "weight_dtype": "default"}},
+          "c": {"class_type": "CLIPLoader",
+                "inputs": {"clip_name": self.clip, "type": "krea2", "device": "default"}},
+          "v": {"class_type": "VAELoader", "inputs": {"vae_name": self.vae}},
+          "6": {"class_type": "CLIPTextEncode", "inputs": {"text": prompt, "clip": ["c", 0]}},
+          # Kept as a real text encode (not ZeroOut) so the AVOID-traits channel still EXISTS in
+          # the graph and one config change (a cfg above 1.0, e.g. on the Raw variant) revives it.
+          # At cfg 1.0 it has no effect on the result -- see the note above.
+          "7": {"class_type": "CLIPTextEncode", "inputs": {"text": negative, "clip": ["c", 0]}},
+          "3": {"class_type": "KSampler", "inputs": {"seed": seed, "steps": 8, "cfg": 1.0,
+                    "sampler_name": "er_sde", "scheduler": "simple", "denoise": 1.0,
+                    "model": ["u", 0], "positive": ["6", 0], "negative": ["7", 0], "latent_image": ["5", 0]}},
+          "8": {"class_type": "VAEDecode", "inputs": {"samples": ["3", 0], "vae": ["v", 0]}},
           "9": {"class_type": "SaveImage", "inputs": {"filename_prefix": "owui", "images": ["8", 0]}},
         }
         if ref_name:  # image-to-image: encode the reference as the starting latent
             wf["20"] = {"class_type": "LoadImage", "inputs": {"image": ref_name}}
             wf["21"] = {"class_type": "ImageScaleToTotalPixels", "inputs": {"image": ["20", 0], "upscale_method": "lanczos", "megapixels": 1.0, "resolution_steps": 1}}
-            wf["22"] = {"class_type": "VAEEncode", "inputs": {"pixels": ["21", 0], "vae": ["4", 2]}}
+            wf["22"] = {"class_type": "VAEEncode", "inputs": {"pixels": ["21", 0], "vae": ["v", 0]}}
             wf["3"]["inputs"]["latent_image"] = ["22", 0]
             wf["3"]["inputs"]["denoise"] = DENOISE
         else:  # text-to-image
-            wf["5"] = {"class_type": "EmptyLatentImage", "inputs": {"width": 1024, "height": 1024, "batch_size": 1}}
+            wf["5"] = {"class_type": "EmptySD3LatentImage", "inputs": {"width": 1024, "height": 1024, "batch_size": 1}}
         return wf
 
     def _submit_poll(self, wf, out_node):
@@ -401,10 +425,10 @@ class Pipe:
                 out_node = "s"
             else:
                 neg = f"{NEG}, {avoid}" if avoid else NEG
-                wf = self._build_sdxl_wf(instruction, neg, seed, ref_name=ref_name)
+                wf = self._build_t2i_wf(instruction, neg, seed, ref_name=ref_name)
                 out_node = "9"
         else:
-            wf = self._build_sdxl_wf(instruction, NEG, seed)
+            wf = self._build_t2i_wf(instruction, NEG, seed)
             out_node = "9"
 
         data, err = self._submit_poll(wf, out_node)
@@ -458,13 +482,13 @@ class Pipe:
         identity guarantees, and a silent downgrade would look like the model getting worse."""
         seed = f"seed {meta['seed']}"
         if not editing:
-            return f"Lustify SDXL · 1024×1024 · 30 steps · {seed}"
+            return f"Lustify V10 Krea 2 · 1024×1024 · 8 steps · {seed}"
         if meta["engine"] == "qwen":
             return f"Qwen-Image-Edit · {meta.get('tier', 'balanced')} · {seed}"
         warn = " · identity may drift"
         if meta.get("downgrade"):
             warn = " · Qwen unavailable, identity may drift"
-        return f"Lustify SDXL img2img · d{DENOISE} · 30 steps · {seed}{warn}"
+        return f"Lustify V10 Krea 2 img2img · d{DENOISE} · 8 steps · {seed}{warn}"
 
     async def pipe(self, body: dict, __event_emitter__=None, __metadata__=None, __task__=None):
         emitter = __event_emitter__
