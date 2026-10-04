@@ -154,6 +154,7 @@ class _gpu_lock:
     def __enter__(self):
         while not _gpu_lock_acquire(1.0):
             pass
+        _thermal_wait()   # hold the lock, let the card cool, THEN load
         return self
 
     def __exit__(self, *exc):
@@ -173,6 +174,51 @@ def _gpu_lock_release():
         _GEN_LOCK.release()
     except RuntimeError:
         pass
+
+
+# ---- thermal gate -------------------------------------------------------------------------
+# The 3090 reports Target 83 C, Slowdown 95 C, Shutdown 98 C, and idles at 61-63 C. Above PAUSE
+# the next model is not loaded -- the caller holds the GPU lock while the card sheds heat, so the
+# queue resumes IN ORDER instead of racing for a hot card. Below RESUME loading may start again;
+# the gap is hysteresis, so a card sitting exactly at the limit cannot flap between "load" and
+# "cool".
+#
+# Anything unreadable -- no binary, no GPU, unparseable output -- returns None and the gate NO-OPS.
+# A temperature we cannot read must never be the reason a render or a chat turn is refused.
+# nvidia-smi is present in this container through the CDI device, but a local import is used
+# deliberately: this pipe imports its process helpers inside the functions that need them.
+GPU_TEMP_PAUSE_C = float(os.environ.get("AA_GPU_TEMP_PAUSE_C", "85"))
+GPU_TEMP_RESUME_C = float(os.environ.get("AA_GPU_TEMP_RESUME_C", "75"))
+
+
+def _gpu_temp_c():
+    """Current GPU temperature in C, or None when it cannot be read."""
+    try:
+        import subprocess
+        r = subprocess.run(["nvidia-smi", "--query-gpu=temperature.gpu",
+                            "--format=csv,noheader,nounits"],
+                           capture_output=True, text=True, timeout=5)
+        return float((r.stdout or "").strip().splitlines()[0])
+    except Exception:
+        return None
+
+
+def _thermal_wait(on_wait=None, sleep=None):
+    """Block while the card is too hot. Returns the last reading (or None if unreadable).
+
+    Only a reading ABOVE PAUSE starts a wait, and it then waits down to RESUME. A reading that is
+    merely warm (above RESUME but below PAUSE) proceeds -- that is the hysteresis, not a bug.
+    """
+    t = _gpu_temp_c()
+    if t is None or t <= GPU_TEMP_PAUSE_C:
+        return t
+    sleep = sleep or time.sleep
+    while t is not None and t > GPU_TEMP_RESUME_C:
+        if on_wait:
+            on_wait(t)
+        sleep(15)
+        t = _gpu_temp_c()
+    return t
 
 V_QUALITY = "best"  # "best" = Wan 2.2 A14B two-expert Lightning (default) | "fast" = TI2V 5B
 V_W, V_H = 832, 480            # default 480p
@@ -859,6 +905,16 @@ class Pipe:
                     # for as long as a render takes — up to ~20 minutes for six shots.
                     await self._status(emitter, f"Waiting for the GPU… {self._fmt_dur(waited)}")
             if waited:
+                await self._status(emitter, "", done=True)
+            # Thermal gate. The lock is held, so nothing else can start -- which is exactly why
+            # this waits HERE and not before the acquire: a cooling card that let the next task
+            # through would just re-queue behind the one already waiting. The check is one
+            # nvidia-smi call; only a hot reading blocks, on a worker thread, so this coroutine
+            # stays cancellable and a disconnect cannot strand the lock.
+            t = await asyncio.to_thread(_gpu_temp_c)
+            if t is not None and t > GPU_TEMP_PAUSE_C:
+                await self._status(emitter, f"GPU is at {t:.0f}°C — letting it cool before loading…")
+                await asyncio.to_thread(_thermal_wait)
                 await self._status(emitter, "", done=True)
             async for tok in inner:
                 yield tok
@@ -8505,13 +8561,16 @@ class Pipe:
                 omsgs, guard_text=self._CODER_GUARD, keep_system=AUTO_KEEP_SYSTEM,
                 force_model=self.coder_model, stream=stream,
                 suggest=self._suggester(omsgs, emitter, __metadata__)), emitter=emitter)
-        # Plain chat takes no lock and still will not — it contends and works, and blocking it
-        # would trade a slow success for a guaranteed wait of up to a full render. It just stops
-        # looking hung. One note, not a live strip: chat never calls _status again, so a done=False
-        # strip would linger for the whole reply. Nothing at all when there is no client.
-        if emitter and await asyncio.to_thread(self._gpu_contended):
-            await self._status(emitter, "GPU is rendering — this reply may be slow to start.",
-                               done=True)
+        # Plain chat NOW TAKES THE LOCK (2026-10-04, owner's decision). It used to contend without
+        # one, on the argument that blocking chat would trade a slow success for a guaranteed wait
+        # of up to a full render. That traded away a worse thing: an 18 GB chat tenant and a
+        # 12-25 GB render tenant cannot co-reside on one 24 GB card, so "contending" meant Ollama
+        # EVICTING whichever was resident -- the render restarting cold, or the reply arriving only
+        # after a 23 s cold reload the user was never told about, which is the timeout people
+        # actually see. Queueing makes that cost visible and bounded ("Waiting for the GPU… 1m 20s"),
+        # and -- the point -- it keeps every model swap INSIDE the lock, so a swap can never land
+        # in the middle of a render. The waiter does not time out: _locked_stream polls.
         self._route_metric("chat:vision" if attached_img else "chat", 0, "fallthrough", text)
-        return self._achat_stream(omsgs, keep_system=AUTO_KEEP_SYSTEM, stream=stream,
-                                  suggest=self._suggester(omsgs, emitter, __metadata__))
+        return self._locked_stream(self._achat_stream(
+            omsgs, keep_system=AUTO_KEEP_SYSTEM, stream=stream,
+            suggest=self._suggester(omsgs, emitter, __metadata__)), emitter=emitter)
