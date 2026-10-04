@@ -7,6 +7,13 @@ The coding agent needs a shell to reach `deepseek`, and the chat-facing surface 
 FIXED argv, a pinned working directory, an explicit environment, a timeout and an output cap. There
 is no argument a chat message can supply that changes which program runs.
 
+LOCAL ONLY (2026-10-04)
+-----------------------
+`deepseek --local`. A background tool has no interactive channel on which to confirm a cloud turn,
+so the cloud is unreachable from here by construction rather than by policy. The local model is
+whatever the harness's coding policy names (harness/deepseek/coding_policy.py; default
+qwen38-coder:q4-128k). See docs/superpowers/specs/2026-10-04-ohmzai-coding-engine-design.md §4.3.
+
 There is deliberately NO `pre_tool_call` hook. A plugin tool is subject to hermes's approval gate
 only when the plugin's own hook returns `{"action": "approve"}`; without one, this tool is never
 gated. Adding such a hook would make every coding task block for `approvals.timeout` waiting for a
@@ -131,7 +138,7 @@ def _handle_coding_task(args: dict, **kw) -> str:
     if err:
         return f"coding_task: {err}"
 
-    argv = [DEEPSEEK_BIN, "--cloud", "-p", task]
+    argv = [DEEPSEEK_BIN, "--local", "-p", task]
     env = {k: os.environ[k] for k in TOOL_ENV_KEYS if k in os.environ}
     env.setdefault("HOME", CODING_TASK_ROOTS[0])
     timeout = DEFAULT_TIMEOUT_S

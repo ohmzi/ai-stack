@@ -8,7 +8,8 @@ This tool is the one capability the coding profile gets instead: a FIXED argv th
 into something auditable:
 
   * list argv, never shell=True — so no task string can become a command;
-  * the argv is exactly ["deepseek", "--cloud", "-p", task] — no operator-supplied flags;
+  * the argv is exactly ["deepseek", "--local", "-p", task] — no operator-supplied flags, and
+    never --cloud: a background tool has no channel on which to confirm a cloud turn;
   * `repo` must realpath INSIDE an allowlisted root, so ../../ cannot escape;
   * HOME is passed explicitly, because deepseek dies without it (it reads ~/.config/deepseek);
   * timeout, output cap, non-zero exit and a missing binary are four DISTINCT reported outcomes.
@@ -58,9 +59,11 @@ def main():
     try:
         mod._handle_coding_task({"task": "add a docstring to foo.py"})
         check("argv is a list", isinstance(calls["argv"], list), repr(calls["argv"]))
-        check("argv is exactly deepseek --cloud -p <task>",
-              calls["argv"] == ["deepseek", "--cloud", "-p", "add a docstring to foo.py"],
+        check("argv is exactly deepseek --local -p <task>",
+              calls["argv"] == ["deepseek", "--local", "-p", "add a docstring to foo.py"],
               repr(calls["argv"]))
+        check("no cloud flag reaches a background tool",
+              "--cloud" not in calls["argv"], repr(calls["argv"]))
         check("no shell", calls["kwargs"].get("shell") in (None, False), repr(calls["kwargs"].get("shell")))
 
         # A task string containing shell metacharacters is DATA, not a command. This is the check
