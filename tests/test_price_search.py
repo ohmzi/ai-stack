@@ -134,12 +134,12 @@ class SearchStub:
 
 
 def main():
-    ps = load("/home/ohmz/ai-stack/scripts/price_search.py", "ps")
-    hd = load("/home/ohmz/ai-stack/scripts/hermes_delivery.py", "hd")
+    ps = load("/home/ohmz/StudioProjects/ai-stack/scripts/price_search.py", "ps")
+    hd = load("/home/ohmz/StudioProjects/ai-stack/scripts/hermes_delivery.py", "hd")
     # Loaded to assert the kind this file EMITS is a kind the renderer understands. Emitting a kind
     # with no renderer is silent: describe() falls back to "Update / met the condition you set", so
     # the alert still sends and still says nothing. That happened with fare_unreadable.
-    at = load("/home/ohmz/ai-stack/scripts/alert_templates.py", "at_ps")
+    at = load("/home/ohmz/StudioProjects/ai-stack/scripts/alert_templates.py", "at_ps")
     ps.pw.STATE_DIR = tempfile.mkdtemp()
 
     clock = [1000.0]
@@ -172,13 +172,13 @@ def main():
         return json.load(open(f"{ps.pw.STATE_DIR}/{name}.search.json"))
 
     print("--- the fixture matches the real CLI, flag for flag ---")
-    src = open("/home/ohmz/ai-stack/scripts/price_search.py").read()
+    src = open("/home/ohmz/StudioProjects/ai-stack/scripts/price_search.py").read()
     flags = {m.replace("-", "_") for m in re.findall(r'add_argument\("--([a-z-]+)"', src)}
     fixture = set(Args().__dict__) | {"selftest"}
     check("every CLI flag exists on the test fixture", not (flags - fixture),
           f"missing: {sorted(flags - fixture)}")
     check("the check found the flags at all", len(flags) >= 10, sorted(flags))
-    pw_src = open("/home/ohmz/ai-stack/scripts/price_watch.py").read()
+    pw_src = open("/home/ohmz/StudioProjects/ai-stack/scripts/price_watch.py").read()
     pw_flags = {m.replace("-", "_") for m in re.findall(r'add_argument\("--([a-z-]+)"', pw_src)}
     check("every price_watch flag except url/selector/selftest is forwarded",
           not (pw_flags - {"url", "selector", "selftest"} - flags),

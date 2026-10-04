@@ -111,6 +111,28 @@ def load_contacts():
     return {}
 
 
+def _keep_private(tmp, dest):
+    """Carry dest's mode and group over to the file about to replace it (0640 and the directory's
+    group for a new file).
+
+    The shared contacts.json holds every user's phone number and is kept 0640 with group ohmz. A
+    plain write-then-replace took this process's umask and group instead, undoing that on the first
+    save. The pipe's _save_phone does the same from inside the container, where it runs as root.
+    Best effort: chown to a group this user is not in fails (a rolled-back root:root file), and a
+    failure must not lose the save; the copied mode still keeps such a file readable.
+    """
+    try:
+        try:
+            st = os.stat(dest)
+            mode, gid = st.st_mode & 0o777, st.st_gid
+        except FileNotFoundError:
+            mode, gid = 0o640, os.stat(os.path.dirname(dest) or ".").st_gid
+        os.chmod(tmp, mode)
+        os.chown(tmp, -1, gid)
+    except OSError:
+        pass
+
+
 def save_contact(handle, phone=None, email=None):
     """Add or update one handle. Returns (ok, note).
 
@@ -135,6 +157,7 @@ def save_contact(handle, phone=None, email=None):
         tmp = CONTACTS + ".tmp"
         with open(tmp, "w") as f:
             json.dump(contacts, f, indent=2)
+        _keep_private(tmp, CONTACTS)
         os.replace(tmp, CONTACTS)
     except Exception as e:
         return False, f"could not write {CONTACTS}: {e}"
@@ -623,6 +646,77 @@ def send_alert(handle, message, subject=None, job=None, job_id=None, when=None, 
                         notes.append(f"email sent to {email} — ⚠️ UNVERIFIABLE: {detail}")
                     else:
                         notes.append(f"email sent to {email}")
+                    ok = True
+                except Exception as e:
+                    notes.append(f"email FAILED: {e}")
+
+    return ok, notes
+
+
+def send_report(handle, sms, subject, plain, html=None, channels=None):
+    """Send a pre-rendered report: its own SMS line, subject, plain body and optional HTML part.
+    Returns (ok, [notes]) with send_alert's semantics — ok if ANY channel delivered.
+
+    send_alert renders one message into every surface and closes the email with the job-alert
+    footer ("a background task you scheduled met its alert condition"). A health alert or a
+    backup report is not a job the user scheduled, and needs different bodies per channel, which
+    is the shape backup-notify-hermes.py already hand-rolls. This is that shape, shared.
+
+    `channels` is what the CALLER wants (health_alert routes DEGRADED to email only); it is
+    intersected with ALERT_CHANNELS, which stays the user's master switch. None means "whatever
+    ALERT_CHANNELS enables". If the intersection is empty, the report goes by whatever IS
+    enabled, with a note: with ALERT_CHANNELS=sms, a DEGRADED report (email only) used to send
+    nothing, stay owed, and fail again every run while the user heard nothing. The SMS still goes
+    through sms_body, so a caller cannot put a link or a second segment on the handset by
+    mistake, and the body logged is the body that was sent.
+
+    The subject is collapsed to one line: EmailMessage raises on a CR or LF in a header, and a
+    health alert's subject carries a probe's detail. Under partial success the SMS leg would still
+    count the alert as delivered, and the email would be lost with no retry.
+    """
+    conf = load_conf()
+    if not conf:
+        return False, ["no transport configured (~/.hermes/alert_transports.env missing)"]
+    subject = " ".join(str(subject or "").split())
+    enabled = [c.strip() for c in conf.get("ALERT_CHANNELS", "sms,email").split(",") if c.strip()]
+    wanted = enabled if channels is None else [c for c in enabled if c in channels]
+    email, phone = resolve(handle, conf)
+    ok, notes = False, []
+    if channels is not None and not wanted and enabled:
+        wanted = [c for c in ("sms", "email") if c in enabled]
+        notes.append(f"{'+'.join(channels) or 'nothing'} not enabled in ALERT_CHANNELS; sending by "
+                     f"{'+'.join(wanted)} instead")
+    for c in ("sms", "email"):
+        if c in enabled and c not in wanted:
+            notes.append(f"{c} not requested for this report")
+
+    if "sms" in wanted:
+        if not phone:
+            notes.append(f"sms skipped: no phone for {handle!r} in alert_contacts.json")
+        else:
+            try:
+                body = sms_body(sms)
+                ref = send_sms(phone, body, conf)
+                notes.append(f"sms sent to {phone} ({ref}) body={body!r}")
+                ok = True
+            except Exception as e:
+                notes.append(f"sms FAILED: {e}")
+
+    if "email" in wanted:
+        if not email:
+            notes.append(f"email skipped: no address for {handle!r}")
+        else:
+            status, detail = mail_domain_status(email)
+            if status == "dead":
+                notes.append(f"email NOT SENT to {email}: {detail}")
+            else:
+                try:
+                    send_email(email, subject, plain, conf, html=html)
+                    what = f"{len(plain)} chars plain, " + (f"{len(html)} html" if html else "no html")
+                    if status == "implicit":
+                        notes.append(f"email sent to {email} ({what}) — ⚠️ UNVERIFIABLE: {detail}")
+                    else:
+                        notes.append(f"email sent to {email} ({what})")
                     ok = True
                 except Exception as e:
                     notes.append(f"email FAILED: {e}")

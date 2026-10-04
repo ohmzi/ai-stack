@@ -50,9 +50,9 @@ for anything this design builds on.
 
 The naive build — add `terminal` to `platform_toolsets.api_server` so the agent can shell out to
 `deepseek` — was rejected because that key was assumed **shared**: enabling it would hand a shell on
-the host to every Task-mode user, admin or not, reversing the decision recorded at
-`pipes/auto_assistant.py:25-26`: *"no terminal, no browser, no code execution on the chat-facing
-surface. Chat-reachable text must not be able to shell out."*
+the host to every Task-mode user, admin or not, reversing the decision recorded in
+`docs/HERMES_AGENT.md` § Config decisions that are deliberate: *"no terminal, no browser, no code
+execution on the chat-facing surface. Chat-reachable text must not be able to shell out."*
 
 **That premise is now wrong, and the design is stronger for it.** Row 15 establishes that
 `platform_toolsets.api_server` is read from the *profile's own* config for that profile's requests.
@@ -426,7 +426,8 @@ Still genuinely open, and each is a build-time observation rather than something
 
 - **Enable `terminal` on the shared `platform_toolsets.api_server`.** Fastest, and the chain is then
   proven end to end — but it hands a shell to every Task-mode user and reverses the documented
-  decision at `pipes/auto_assistant.py:25-26`. Rejected on the explicit "only admins" requirement.
+  decision in `docs/HERMES_AGENT.md` § Config decisions that are deliberate. Rejected on the
+  explicit "only admins" requirement.
 - **Route coding work only through the existing cron path**, which already has `terminal`.
   Zero new surface and reuses tested machinery, but it is not a conversation: fire-and-forget, with
   results landing in a channel. The scheduling half of this design keeps the *capability*; the row

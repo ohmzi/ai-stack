@@ -55,18 +55,22 @@ why the harness installs no MCP server at all.
 | default | its description, capped at 1,536 chars |
 | `paths:` on a rule file | nothing until Claude reads a matching file |
 
-The adopted set measures **~1,312 tokens always-on**, which is 1.8% of a 98304
-window. `claude plugin details <name>` prints the figure; `/skill-doctor` reports
-per-skill cost and 7-day usage.
+The adopted set measures **~2,895 tokens always-on**, which is 2.9% of a 98304
+window. `claude plugin details <name>` prints most of that figure; `/skill-doctor`
+reports per-skill cost and 7-day usage. One caveat worth knowing before trusting it:
+`claude plugin details` **does not count context a `SessionStart` hook injects**, and
+labels such hooks "no model context cost" — superpowers' hook is ~851 tokens it omits
+from its total (§3). Budget for hook output by hand.
 
 ## 3. What is installed, and what was rejected
 
 | Project | Verdict | What is wired | Always-on |
 |---|---|---|---|
 | [mattpocock/skills](https://github.com/mattpocock/skills) | adopt | plugin, official marketplace | ~1,102 tok |
+| [obra/superpowers](https://github.com/obra/superpowers) | adopt | plugin, official marketplace | ~1,410 tok |
 | [blader/humanizer](https://github.com/blader/humanizer) | adopt | plugin, own marketplace | ~116 tok |
 | [ayghri/i-have-adhd](https://github.com/ayghri/i-have-adhd) | adopt, opt-in | plugin, own marketplace | ~94 tok |
-| [cloudflare/security-audit-skill](https://github.com/cloudflare/security-audit-skill) | adopt | vendored checkout, symlinked as a skill | ~1 description |
+| [cloudflare/security-audit-skill](https://github.com/cloudflare/security-audit-skill) | adopt | vendored checkout, symlinked as a skill, plus a `rules/` pairing policy | ~1 description + ~175 tok |
 | [google/artemis](https://github.com/google/artemis) | **defer** | not installed — see §7 | — |
 | [affaan-m/ECC](https://github.com/affaan-m/ECC) | **reject** | nothing installed — see §6 | — |
 
@@ -96,6 +100,60 @@ are exclusive. Installing both leaves every skill twice. This harness uses the p
 route only. The plugin is pinned by sha in the official marketplace, so releases
 arrive when that pin moves, not when upstream tags.
 
+### obra/superpowers — the process layer
+
+15 model-invoked skills and one `SessionStart` hook, installed from the official
+marketplace. It is the only entry here that changes *how* a session runs rather than
+adding capability to it: the hook injects the whole `superpowers:using-superpowers`
+skill into every session it fires on (`startup|clear|compact`), and that skill makes
+skill invocation mandatory before any response. It is the same mechanism as
+`i-have-adhd` below, deliberately left switched on.
+
+**It costs more than `claude plugin details` says.** That command reports
+**~559 tok always-on** and annotates the hook `(harness-only — no model context
+cost)`. The annotation is wrong for this section's arithmetic: the hook's
+`hookSpecificOutput.additionalContext` is 3,405 characters, **~851 tok**, injected on
+every startup, `/clear` and `/compact`. Measured 2026-09-22 by running
+`hooks/session-start` with `CLAUDE_PLUGIN_ROOT` set and reading the JSON it emits.
+
+| Component | Measurement | ~Tokens |
+|---|---|---|
+| 15 skill descriptions, all far under the 1,536-char cap | 2,302 chars | ~559 |
+| `SessionStart` hook — full `using-superpowers` injected | 3,405 chars | ~851 |
+| **Always-on total** | | **~1,410** |
+
+The set goes from ~1,312 to **~2,720 tokens**, 2.8% of the 98,304 window. Skill bodies
+(168,882 bytes across the 15 files; the largest is `subagent-driven-development` at
+32,577 bytes) load only on invocation and are not in this figure. For scale, this is
+under a third of ECC's rejected `rules/common/` tax.
+
+**It clears the bars §6/§7 set.** It installs namespaced (`superpowers:`), so unlike
+ECC's flat `~/.claude/skills/<name>/**` it cannot shadow a built-in; it is pinned by
+sha in the official marketplace, the same supply-chain property mattpocock has; and it
+declares no MCP servers, so §2's "MCP tool search is off" constraint never bites. Its
+hook is pure local bash — no network calls in `hooks/` or `scripts/`. The README's
+telemetry note covers only a logo pixel on brainstorming's optional visual companion,
+carrying the version string and nothing else, disableable with
+`SUPERPOWERS_DISABLE_TELEMETRY`.
+
+**It overlaps mattpocock/skills, and outranks it.** `test-driven-development`,
+`systematic-debugging` and `requesting-code-review`/`receiving-code-review` cover
+ground mattpocock's `tdd`, `diagnosing-bugs` and `code-review` already hold. Because
+the hook fires every session and asserts priority, superpowers is the process layer
+and mattpocock is the specialist — which is the intended split, so nothing in
+mattpocock is disabled to remove the redundancy. `code-review` is still the one that
+reads T'Day's `docs/CODING_STANDARDS.md`.
+
+**The subagent question, settled.** Superpowers' core loop is
+`subagent-driven-development` — its largest skill, and the README describes agents
+working through engineering tasks. Nothing in this harness pins a subagent model, so
+the concern was that Task dispatches inherit the `haiku` slot, which on Path B is
+`gemma3:1b` (§2) — a 1B model documented for "session titles, taglines, small
+background calls". **Verified 2026-09-22: they do not.** A `deepseek --local` session
+was made to dispatch a subagent, and every request in the window routed to
+`qwen38-coder:q4-128k` in `~/.cache/deepseek-router.log`; `gemma3:1b` appears zero
+times. The skill is safe to use on this route.
+
 ### cloudflare/security-audit-skill
 
 No `.claude-plugin/` manifest upstream, so it cannot be installed as a plugin. The
@@ -117,6 +175,30 @@ node ~/.claude/skills/security-audit/validate-coverage-ledger.cjs <output-dir>/c
 
 Both print `PASS: <n> ...` and exit 0, or print `ERROR:`/`FAIL:` lines and exit 1.
 Verified on Node 20.20.2 against `[]` (pass) and malformed input (exit 1).
+
+#### The pairing policy
+
+Claude Code also ships its own `security-review`, which reviews the pending changes on
+the current branch. The two are not alternatives — `security-review` is diff-scoped,
+`security-audit` is codebase-scoped — so `rules/security-audit-policy.md` tells the
+agent to run **both** on an explicit audit or pen-test request, with `security-audit`
+forced into full audit mode rather than its default guidance mode.
+
+This is the only rule in `~/.claude/rules/`, and it is installed precisely because
+rules without `paths:` frontmatter are **unconditional** — 703 bytes, ~175 tokens into
+every session in every repo, whether or not a security audit is ever run. That is the
+tax §6 rejected ECC for, chosen deliberately here because the trigger is a request type
+rather than a file path, so there is nothing to scope `paths:` to. The rule's carve-out
+does the real work: a focused security question or single-finding triage stays in
+guidance mode and does **not** fan out, which is what keeps the cost from being paid
+back in runaway audits.
+
+The alternative considered was a user-invoked `/audit-security` command, which would
+cost nothing always-on. It was rejected because it only fires when typed, and the
+request was for this to apply *whenever* an audit is asked for.
+
+Verified 2026-09-22 that rules do load on this setup: with the file in place, a fresh
+`deepseek -p` session quoted the phrase "all six phases, writing" back verbatim.
 
 ### blader/humanizer and ayghri/i-have-adhd
 
@@ -283,5 +365,5 @@ and the settings entry. It leaves the vendored checkout in
 | `PreToolUse:Bash hook error: [$HOME/...]` in the transcript | the hook blocked the command — this is the intended message, not a bug | read the reason; it names the pattern |
 | The hook never fires | hooks are disabled (`disableAllHooks`), or the session predates the settings merge | check `disableAllHooks` in settings; restart |
 | A rule you symlinked from this repo does not load | rules symlinked into `~/.claude/rules/` **do** load — verified — but a symlink inside a *project's* `.claude/rules/` pointing outside the working directory is treated as an external import and needs approval | keep user rules in `~/.claude/rules/` |
-| Context feels tight on `deepseek --local` | that route advertises 98304, and ~25K is baseline | `/skill-doctor` for per-skill cost; the adopted set is ~1,312 tokens |
+| Context feels tight on `deepseek --local` | that route advertises 98304, and ~25K is baseline | `/skill-doctor` for per-skill cost; the adopted set is ~2,895 tokens |
 | Local turns fail with a context-size 400 after a plugin install | more always-on context than the window allows | see `../deepseek/README.md` §4 before adding more skills |

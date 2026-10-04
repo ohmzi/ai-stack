@@ -271,12 +271,15 @@ EVAL_SEED = 20260728
 
 # --- background tasks via hermes-agent (2026-07-29) ----------------------------------------------
 # "Monitor this price for 2 weeks" is not a chat turn — it is a standing job. Those are delegated
-# to a local NousResearch hermes-agent gateway (v0.19.0, pinned; ~/.hermes) whose API server is an
+# to a local NousResearch hermes-agent gateway (v0.21.4, tag v2026.9.21 = d337b736, pinned by tag
+# checkout; ~/.hermes) whose API server is an
 # agent RUNTIME on localhost: it creates/manages its own cron jobs (60 s ticker, GPU-guarded by the
-# ~/.hermes/plugins/gpuguard provider so a due job never fires while ComfyUI is rendering), runs
+# ~/.hermes/plugins/gpuguard provider so a due job never fires while ComfyUI is rendering), and runs
 # each job in an isolated session against hermes-genesis:agent (the same weights as the chat model,
-# second tag with num_ctx 65536 — hermes hard-requires a 64 K window), and posts results to the
-# OpenWebUI "background-tasks" channel via its webhook. The pipe stays the single front end: this
+# second tag with num_ctx 65536 — hermes hard-requires a 64 K window). Delivery is not hermes's:
+# scripts/hermes_delivery.py, a host systemd timer, reads each run's saved output and posts its LOG
+# line to the OpenWebUI "background-tasks" channel and its ALERT lines to the user's alert
+# transports. The pipe stays the single front end: this
 # is delegation over HTTP, not a second model entry in the picker.
 BG_TASKS = True
 HERMES_URL = "http://127.0.0.1:8642/v1"
@@ -2279,9 +2282,19 @@ class Pipe:
         if dest_name:
             args += ["--dest-name", dest_name]
         args += ["--monitor", name, "--schedule", sched]
-        return ("Run this terminal command and print its output verbatim as your entire response. "
+        # timeout=300 is named in the prompt because the job's model picks the terminal call's
+        # timeout itself, and it passed timeout=60 in about 77% of measured calls; TERMINAL_TIMEOUT
+        # in ~/.hermes/.env only applies when the argument is omitted. The script's own budget
+        # before it gives up is 240 s: initialize and notifications/initialized at 30 s each, then
+        # check_prices at CHECK_TIMEOUT_S=180 (scripts/flightclaw_watch.py). At 300 the script's
+        # "could not reach flightclaw" LOG line wins that race instead of a bare kill. 300 also
+        # stays under the terminal tool's 600 s foreground cap, past which a call turns into a
+        # background process. The vetted commands in _HERMES_BRIEF rules 5d, 5d-ii and 5d-iii
+        # carry the same header.
+        return ("Run this terminal command with the terminal tool's timeout set to 300 "
+                "(timeout=300) and print its output verbatim as your entire response. "
                 "Add nothing.\n"
-                + "python3 /home/ohmz/ai-stack/scripts/flightclaw_watch.py "
+                + "python3 /home/ohmz/StudioProjects/ai-stack/scripts/flightclaw_watch.py "
                 + " ".join(shlex.quote(a) for a in args))
 
     async def _fc_make_watch(self, s, cid, handle="user"):
@@ -2339,7 +2352,15 @@ class Pipe:
         jid = job.get("id", "?")
         if cid:
             self._flight_draft.pop(cid, None)
-        self._stamp_owner([jid], handle, src="flight")
+        # Prune job_owners.json here too. _hermes_stream's stamps pass live ids and prune; this
+        # path passed none, so it only ever added records, and 26 stale ones had built up by
+        # 2026-09-29. Live ids only from a list that actually loaded: an empty list from a failed
+        # fetch would read as "no job exists" and drop every record past the 72 h gate. The new
+        # id is added so it can never count as dead (its t=now keeps it past the gate as well).
+        # Fetched before _stamp_owner, which has to stay await-free.
+        jobs, jerr = await asyncio.to_thread(self._jobs_list)
+        live = ({j.get("id") for j in jobs} | {jid}) if jerr is None else None
+        self._stamp_owner([jid], handle, src="flight", live_ids=live)
         self._route_metric("flight.watch_created", 0, "flight_watch", "", deterministic=True)
         if jid != "?":
             # Everything a confirmation needs is already a local variable here — no prompt to
@@ -2645,10 +2666,34 @@ class Pipe:
             tmp = ALERT_CONTACTS_FILE + ".tmp"
             with open(tmp, "w") as f:
                 json.dump(contacts, f, indent=2)
+            self._keep_private(tmp, ALERT_CONTACTS_FILE)
             os.replace(tmp, ALERT_CONTACTS_FILE)
             return True
         except Exception:
             return False
+
+    @staticmethod
+    def _keep_private(tmp, dest):
+        """Carry dest's mode and group over to the file about to replace it (0640 and the
+        directory's group for a new file).
+
+        contacts.json holds every user's phone number and is kept 0640 root:ohmz, so the host-side
+        transports (ohmz) can read it and nobody else can. This pipe runs as root with umask 0022,
+        so a plain write-then-replace made it 0644 root:root on the first number saved from chat:
+        world-readable again the moment config/ is back to 0755. Copying what is THERE, rather
+        than forcing 0640, also keeps a rolled-back 0644 root:root file readable by ohmz; forcing
+        0640 onto root's group would lock the transports out of every number. Best effort: a
+        failure here must not lose the number the user just typed."""
+        try:
+            try:
+                st = os.stat(dest)
+                mode, gid = st.st_mode & 0o777, st.st_gid
+            except FileNotFoundError:
+                mode, gid = 0o640, os.stat(os.path.dirname(dest) or ".").st_gid
+            os.chmod(tmp, mode)
+            os.chown(tmp, -1, gid)
+        except Exception:
+            pass
 
     # ---------- job ownership ----------
     @staticmethod
@@ -2906,25 +2951,126 @@ class Pipe:
         """
         return ""
 
-    def _mark_bg(self, cid):
-        """Record that this chat's last reply was a background-task reply.
+    @staticmethod
+    def _n_assist(messages):
+        return sum(1 for m in messages or [] if m.get("role") == "assistant")
+
+    def _mark_bg(self, cid, messages=None):
+        """Record that the reply this turn writes is a background-task reply.
+
+        The record names the reply by its SLOT, not by "the next turn": `n` is the assistant-message
+        count the history will have once this reply lands (the count in `messages` plus one). The
+        follow-up window is open exactly while the history's last assistant message is that reply
+        (_bg_slot), so an edited or regenerated message after it still counts, and a chat reply
+        after it closes it, with no pop needed for either. Without `messages` the slot is unknown
+        and only the time limit applies (the pre-slot behaviour; kept for direct callers).
 
         Replaces `_BG_MARK in prev`, which needed the marker to survive in the message text.
         Reading still falls back to the marker so conversations from before this change keep
         working — history written then really does contain it.
         """
         if cid:
+            n = None if messages is None else self._n_assist(messages) + 1
             self._bg_turn.pop(cid, None)
-            self._bg_turn[cid] = time.time()
+            self._bg_turn[cid] = {"t": time.time(), "n": n}
             while len(self._bg_turn) > 60:
                 self._bg_turn.pop(next(iter(self._bg_turn)))
 
+    def _bg_record(self, cid):
+        """This chat's live background-turn record, or None (absent or past PARK_TTL_S)."""
+        rec = self._bg_turn.get(cid) if cid else None
+        if isinstance(rec, (int, float)):
+            rec = {"t": rec, "n": None}
+        if not rec or time.time() - rec.get("t", 0) >= PARK_TTL_S:
+            return None
+        return rec
+
+    def _settle_bg_turn(self, cid, messages):
+        """Drop the record when this turn's reply lands at or before the background reply's slot.
+
+        That happens on an edit or a regenerate at or above the background reply: the branch this
+        turn writes into no longer contains it, so a later "yes" must not be read as answering it.
+        (A background path below re-marks the chat for its own new reply.) pipe() calls this once
+        per turn, below the Task control, which reads the record itself.
+
+        Before the slot record, the marker was simply consumed here, so any reply in between
+        spent it: a discarded branch did too. Editing that in-between message into "yes reenable"
+        then sent the answer to hermes's own question to the tool-less chat model, which is the
+        live failure behind _BG_FOLLOWUP.
+        """
+        rec = self._bg_turn.get(cid) if cid else None
+        if rec is None:
+            return
+        live = self._bg_record(cid)
+        if live is None or (live["n"] is not None and self._n_assist(messages) + 1 <= live["n"]):
+            self._bg_turn.pop(cid, None)
+
+    _URL_RE = re.compile(r"https?://\S+|\bwww\.\S+", re.I)
+
+    @classmethod
+    def _asks_user(cls, text):
+        """True when a reply ends by asking the user something: one of its last two non-empty
+        lines ends in "?". URLs are removed first, since a query string is not a question."""
+        lines = [ln.strip().rstrip("*_)`\"' ") for ln in
+                 cls._URL_RE.sub("", text or "").splitlines() if ln.strip()]
+        return any(ln.endswith("?") for ln in lines[-2:])
+
+    def _bg_slot(self, cid, messages):
+        """Index in `messages` of the background reply this turn may answer, else None.
+
+        Open while the history's last assistant message is that reply (count == n). One
+        intervening exchange is allowed only when it was a clarifying question: the background
+        reply asked the user something, the user then asked a question, and the answer did not
+        itself ask one. That is "Re-enable it, or create a new one?" / "what does re-enable mean?"
+        / "It restarts the old schedule." / "yes reenable", where the last message answers hermes.
+        Anything else in between (an unrelated exchange, or a chat answer ending in its own
+        question, whose "yes please" belongs to the chat model) closes the window.
+        -1 means the window is open but the slot is unknown (a record made without messages).
+        """
+        rec = self._bg_record(cid)
+        if rec is None:
+            return None
+        pos = [i for i, m in enumerate(messages or []) if m.get("role") == "assistant"]
+        n = rec["n"]
+        if n is None:
+            return pos[-1] if pos else -1
+        if len(pos) == n:
+            return pos[n - 1]
+        if len(pos) == n + 1:
+            bg, chat = pos[n - 1], pos[n]
+            asked = next((m.get("content") or "" for m in messages[bg + 1:chat]
+                          if m.get("role") == "user"), "")
+            if (self._asks_user(messages[bg].get("content"))
+                    and (self._BG_QUESTION.match(asked) or asked.rstrip().endswith("?"))
+                    and not self._asks_user(messages[chat].get("content"))):
+                return bg
+        return None
+
     def _was_bg_turn(self, cid, messages):
-        if cid and (time.time() - self._bg_turn.get(cid, 0)) < PARK_TTL_S:
+        """True when this turn can answer a background-task reply (see _bg_slot)."""
+        if self._bg_slot(cid, messages) is not None:
             return True
         prev = next((m.get("content") or "" for m in reversed(messages or [])
                      if m.get("role") == "assistant"), "")
         return self._BG_MARK in prev          # legacy: history written before the stores existed
+
+    def _bg_followup_text(self, text, messages, cid):
+        """The follow-up handed to hermes: what HERMES said last, then the user's reply.
+
+        Quotes the background reply the slot names, never simply the last assistant message: after
+        an intervening chat answer that would be the chat model's words, presented to hermes as
+        "you previously said"."""
+        slot = self._bg_slot(cid, messages)
+        if slot is None:
+            prev = next((m.get("content") or "" for m in reversed(messages or [])
+                         if m.get("role") == "assistant"), "")
+        else:
+            prev = (messages[slot].get("content") or "") if slot >= 0 else ""
+        return (f"Continuing our exchange. You previously said:\n"
+                f"{prev.replace(self._BG_MARK, '')[-1200:]}\n\n"
+                f"The user now replies: {text}\n"
+                f"Act on it against the REAL scheduler state — call "
+                f"cronjob(action='list') first and work from what is actually there.")
 
     @staticmethod
     async def _say(text):
@@ -3324,11 +3470,50 @@ class Pipe:
             return {**out, "status": "one", "job": by_id[parked[0]["id"]], "strategy": "solo"}
         return {**out, "status": "many", "candidates": jobs, "strategy": "bare"}
 
+    # A verb that changes a job's state, anywhere in the message. _MANAGE_VERB only reads the start,
+    # so "no, delete them all" (and "i said remove both") passed it by.
+    _BG_CHANGE = re.compile(
+        r"\b(?:cancel|stop|pause|resume|unpause|remove|delete|kill|disable|suspend|"
+        r"re-?enable|re-?activate|get\s+rid\s+of|unsubscribe|turn\s+(?:off|back\s+on))\b", re.I)
+    _ANSWER_LEAD = re.compile(r"^\s*(?:no|nope|nah)\b[\s,.!;:-]*", re.I)
+
+    async def _scoped_change(self, cid, text, messages, user, handle, rule):
+        """An ordinary user's follow-up that changes a job, answered without hermes; else None.
+
+        After a hermes reply, "no, delete them all" matched _BG_FOLLOWUP and went to hermes
+        unconfirmed, with no ownership check of its own: hermes's cronjob tool sees every job on
+        the host, and the scoped context only tells it not to DESCRIBE other users' jobs. Now a
+        follow-up naming a manage verb goes to _manage_turn, which only sees this user's jobs and
+        confirms before a cancel. One that changes a job without a verb _manage_op can place
+        ("both of them, delete") is refused with a way forward, never handed to hermes.
+        """
+        t = self._ANSWER_LEAD.sub("", text or "", count=1)
+        op = self._manage_op(t)
+        if op is None and not self._BG_CHANGE.search(text or ""):
+            return None
+        if op is not None:
+            parked = self._parked_jobs(cid, messages, handle=handle)
+            done = await self._manage_turn(cid, t, parked, rule, pending=None, user=user,
+                                           handle=handle)
+            if done is not None:
+                return done
+            self._route_metric("task.manage", 0, rule, text, deterministic=False,
+                               reason="scoped_no_fallback")
+            return ("I can't change your background tasks right now — task management is "
+                    "switched off on this assistant. An admin can list and change jobs for you "
+                    "in the meantime.")
+        self._route_metric("task.manage", 0, rule, text, deterministic=False,
+                           reason="scoped_change_unplaced")
+        return ("To change a task, start with what to do and name the task — e.g. *cancel the "
+                "RTX 5090 watch* or *pause my price watch* — so I can check it is yours and "
+                "confirm first. Say *list my tasks* to see them.")
+
     def _is_bg_followup(self, text, messages, cid=None):
         """True when this short message continues the previous hermes exchange in THIS chat."""
         if not text or len(text) > 120:
             return False
-        return self._was_bg_turn(cid, messages) and bool(self._BG_FOLLOWUP.match(text.strip()))
+        return (self._was_bg_turn(cid, messages)
+                and bool(self._BG_FOLLOWUP.match(text.strip())))
 
     def _is_bg_task_request(self, t):
         raw = (t or "").strip().lower()
@@ -4716,6 +4901,12 @@ class Pipe:
     # iii = price_watch --mode stock, iv = the next one (a fare extractor is the expected claimant).
     # This whole brief is ONE string literal deployed as one webui.db row, so two branches editing
     # it will conflict; allocate the number here first. tests/test_deployed.py is the backstop.
+    # Every command shape the brief prescribes (rules 3, 4, 5a and the vetted-script templates)
+    # must pass hermes's cron guard, tools.approval.check_all_command_guards with
+    # HERMES_CRON_SESSION=1. With nobody present to approve, that guard denies outright; measured on
+    # v0.21.4 it blocks python3 -c, heredocs, bash -c, curl | python3, curl to a plain-http remote
+    # host and `>` into ~/.hermes, and cron has no execute_code tool. tests/test_brief_guard.py runs
+    # each shape through the real guard.
     _HERMES_BRIEF = (
         "You are the background-task manager for a local OpenWebUI assistant. The user's request "
         "was routed to you because it asks for a standing job (monitoring, scheduled checks, "
@@ -4725,24 +4916,37 @@ class Pipe:
         "condition or repeat count). If no duration was given, default to 7 days and say so.\n"
         "2. Pick a sensible interval if the user gave none (price checks: every 6 hours).\n"
         "3. The job's prompt must be self-contained. When rule 5d, 5d-ii or 5d-iii applies, its vetted "
-        "command IS the entire prompt; otherwise: exact URLs or curl commands to fetch (the "
-        "local SearXNG at http://127.0.0.1:8888/search?q=...&format=json is available for "
-        "searching), what to extract, and what counts as noteworthy. When fetching a retail page, "
-        "use plain urllib WITHOUT a fake browser User-Agent — measured on this host, Amazon "
-        "returns the full page to a plain request and serves a robot wall to a spoofed Chrome UA. "
-        "Extract prices defensively (search all currency-like matches, never assume one regex "
-        "matches) and if extraction fails, say so in the LOG line rather than crashing. "
-        "Prefer https:// URLs — the "
-        "security scanner blocks plain http:// in terminal commands; for an http-only page the "
-        "job must fetch with the execute_code tool (Python urllib) instead of curl.\n"
+        "command IS the entire prompt; otherwise: the exact curl command to run, what to extract, "
+        "and what counts as noteworthy. A job fetches a page in exactly one of two ways: curl to "
+        "an https:// URL, in the rule 5a shape, or one of the vetted scripts in rules 5d, 5d-ii "
+        "and 5d-iii. For searching, the background-jobs SearXNG answers curl at "
+        "http://127.0.0.1:8889/search?q=...&format=json, and the job's web_search tool queries "
+        "the same instance. Nobody is present to approve a scheduled run's commands, so its "
+        "security guard BLOCKS these outright: inline code (python3 -c, python -c, bash -c, "
+        "sh -c), heredocs (<<), a download piped into an interpreter (curl ... | python3), and "
+        "curl to a plain http:// remote host (loopback, like the SearXNG above, is allowed). The "
+        "run has no code-execution tool either. So a plain-http page no vetted script covers "
+        "cannot be watched: say so and create nothing. The same guard blocks a page address it "
+        "cannot verify, in EVERY job, the vetted scripts included: a link shortener (bit.ly, "
+        "tinyurl.com, t.co, is.gd, v.gd, goo.gl, ow.ly), a domain with an xn-- label or non-ASCII "
+        "letters, a raw IP address, a .zip or .mov domain, or a host ending in a dot. For one of "
+        "those, ask the user for the full page address and create nothing. "
+        "Fetch WITHOUT a fake browser User-Agent (never "
+        "pass curl -A) — measured on this host, Amazon serves a robot wall to a spoofed Chrome "
+        "UA. Extract defensively (search all currency-like matches, never assume one pattern "
+        "matches) and if extraction fails, say so in the LOG line rather than crashing.\n"
         "4. State between runs lives in files under ~/.hermes/monitor-state/ — the job reads the "
-        "previous value, compares, and writes the new one.\n"
+        "previous value, compares, and writes the new one. Read it with the read_file tool and "
+        "write it with the write_file tool: the guard blocks a shell redirect (> or >>) into "
+        "~/.hermes as a dotfile overwrite.\n"
         "5. Set every job's delivery to EXACTLY 'local' — one word, no usernames, no platforms "
         "appended (deliver='local,<name>' makes every run end in a delivery error). The job does NOT run any delivery commands itself — no curl, no webhooks, no helper functions (they do not exist). Delivery is handled by infrastructure that reads the run's output.\n"
         "5a. CONTEXT DISCIPLINE — never let fetched page content into your response or reasoning. "
        "A retail page is 1-2 MB, far beyond the context window; loading one produces garbage. "
-       "Fetch AND extract inside a SINGLE execute_code call that prints ONLY the extracted value "
-       "(e.g. print(price)). The page text must never appear in your answer.\n"
+       "Fetch AND extract inside a SINGLE terminal command that prints ONLY the extracted value: "
+       "curl piped into grep, sed or head — never into an interpreter. For example:\n"
+       "    curl -sL --max-time 60 '<URL>' | grep -oE '[0-9][0-9,]*\\.[0-9]{2}' | head -n 5\n"
+       "The page text must never appear in your answer.\n"
        "5c. YOUR FINAL RESPONSE MUST CONTAIN NOTHING BUT THE PROTOCOL LINES — the LOG line, and "
        "the ALERT line when the condition holds. No commentary, no summaries, no tables, no "
        "structured-data blocks, no marketing or promotional text, and NEVER a discount code, "
@@ -4757,10 +4961,14 @@ class Pipe:
         "5d. WATCHING A PRICE OR FARE ON A PAGE YOU HAVE THE LINK FOR — do NOT write your own "
         "scraper. For stock or availability, rule 5d-iii applies instead. "
         "This host ships a tested extractor; make the job's prompt exactly:\n"
-        "    Run this terminal command and print its output verbatim as your entire response. Add nothing.\n"
-        "    python3 /home/ohmz/ai-stack/scripts/price_watch.py --url '<URL>' --state '<short_name>' --below <N> --alert-to <username> --kind <kind> --monitor '<job name>' --schedule '<schedule>'\n"
+        "    Run this terminal command with the terminal tool's timeout set to 300 (timeout=300) "
+        "and print its output verbatim as your entire response. Add nothing.\n"
+        "    python3 /home/ohmz/StudioProjects/ai-stack/scripts/price_watch.py --url '<URL>' --state '<short_name>' --below <N> --alert-to <username> --kind <kind> --monitor '<job name>' --schedule '<schedule>'\n"
         "The script fetches, extracts, names the item from the page's own title, compares against "
-        "saved state and prints the alert lines itself, so the run cannot invent a number. Use "
+        "saved state and prints the alert lines itself, so the run cannot invent a number. <URL> "
+        "must be the full page address: a shortened link (bit.ly, tinyurl.com, t.co, goo.gl, "
+        "ow.ly, is.gd, v.gd), an xn-- domain or a raw IP address cannot be scheduled, because the "
+        "run's guard blocks it every time. Ask the user for the full address and create nothing. Use "
         "--above instead of --below for a rise. --kind sets how the message is worded (see the "
         "request context for which to use). --monitor and --schedule only appear in the email, so "
         "pass the job's real name and its human schedule. Add --unit for a non-dollar currency. "
@@ -4777,8 +4985,9 @@ class Pipe:
         "link, do NOT ask for one and do NOT build your own search-and-scrape job. A second "
         "vetted script finds the page itself via the local search engine; make the "
         "job's prompt exactly:\n"
-        "    Run this terminal command and print its output verbatim as your entire response. Add nothing.\n"
-        "    python3 /home/ohmz/ai-stack/scripts/price_search.py --query '<item words>' --state '<short_name>' --below <N> --alert-to <username> --kind <kind> --monitor '<job name>' --schedule '<schedule>'\n"
+        "    Run this terminal command with the terminal tool's timeout set to 300 (timeout=300) "
+        "and print its output verbatim as your entire response. Add nothing.\n"
+        "    python3 /home/ohmz/StudioProjects/ai-stack/scripts/price_search.py --query '<item words>' --state '<short_name>' --below <N> --alert-to <username> --kind <kind> --monitor '<job name>' --schedule '<schedule>'\n"
         "It searches once, picks the best product page, remembers it, and from then on behaves "
         "exactly like price_watch.py — same flags: --above for a rise, "
         "--unit only when the user named a currency, --require-confidence to refuse "
@@ -4794,8 +5003,10 @@ class Pipe:
         "it sells out', 'how many are left', appointment or ticket availability. The SAME vetted "
         "script does this in a different mode; do NOT write your own scraper and do NOT reach for a "
         "price threshold. Make the job's prompt exactly:\n"
-        "    Run this terminal command and print its output verbatim as your entire response. Add nothing.\n"
-        "    python3 /home/ohmz/ai-stack/scripts/price_watch.py --url '<URL>' --state '<short_name>' --mode stock --kind <kind> --alert-to <username> --monitor '<job name>' --schedule '<schedule>'\n"
+        "    Run this terminal command with the terminal tool's timeout set to 300 (timeout=300) "
+        "and print its output verbatim as your entire response. Add nothing.\n"
+        "    python3 /home/ohmz/StudioProjects/ai-stack/scripts/price_watch.py --url '<URL>' --state '<short_name>' --mode stock --kind <kind> --alert-to <username> --monitor '<job name>' --schedule '<schedule>'\n"
+        "<URL> follows rule 5d: never a shortened link, an xn-- domain or a raw IP address. "
         "--mode stock is REQUIRED here. Without it the run compares a PRICE against a threshold and "
         "a back-in-stock watch never fires. --kind is one of back_in_stock, out_of_stock, "
         "inventory, availability. Pass NO --below and NO --above unless the user asked about a "
@@ -6115,7 +6326,7 @@ class Pipe:
                 return self._say("Give me something to look into — e.g. "
                                  "`/research what changed in the Wan 2.2 release notes`.")
             row("agent.oneshot", f"slash_{oneshot.group(1).lower()}")
-            self._mark_bg(cid)
+            self._mark_bg(cid, omsgs)
             return self._hermes_stream(question, handle, verify_creation=False,
                                        brief=self._RESEARCH_BRIEF, scoped=scoped)
 
@@ -6126,7 +6337,7 @@ class Pipe:
             answered = self._phone_reply(text, handle, pending, cid, scoped=scoped)
             if answered is not None:
                 row("task.create", "chip_phone_reply")
-                self._mark_bg(cid)
+                self._mark_bg(cid, omsgs)
                 return answered
 
         # 2a. A reply to the flight form, BEFORE the manage block for the same load-bearing reason
@@ -6138,7 +6349,7 @@ class Pipe:
                                      resume=True, handle=handle)
             if done is not None:
                 row("flight.slots", "chip_flight_resume")
-                self._mark_bg(cid)
+                self._mark_bg(cid, omsgs)
                 return done
 
         # 3. Anything the deterministic path can answer, it should: it reads the scheduler over
@@ -6158,13 +6369,13 @@ class Pipe:
             done = await self._manage_turn(cid, text, parked, rule, pending=pconf,
                                            user=user, handle=handle)
             if done is not None:
-                self._mark_bg(cid)
+                self._mark_bg(cid, omsgs)
                 return self._say(done)
             # Declined (the deterministic path is switched off). An ordinary user still must not be
             # handed to the agent for a read-only question — its job list is the whole host.
             if scoped and (mg_manage or mg_list):
                 row("task.manage", "chip_scoped_no_fallback", reason="scoped_no_fallback")
-                self._mark_bg(cid)
+                self._mark_bg(cid, omsgs)
                 return self._say(
                     "I can't look up your background tasks right now — task listing is switched "
                     "off on this assistant. An admin can list and change jobs for you in the "
@@ -6193,20 +6404,20 @@ class Pipe:
                     # flight_tier, not tier: row() already passes tier positionally as 0 (this is a
                     # declaration, not a guess), so reusing the name is a TypeError.
                     row("flight.ask", f"chip_{frule}", flight_tier=ftier)
-                    self._mark_bg(cid)
+                    self._mark_bg(cid, omsgs)
                     return done
 
         # 4. Continuing the previous agent turn.
         if self._is_bg_followup(text, omsgs, cid):
-            prev = next((m.get("content") or "" for m in reversed(omsgs)
-                         if m.get("role") == "assistant"), "")
-            sent = (f"Continuing our exchange. You previously said:\n"
-                    f"{prev.replace(self._BG_MARK, '')[-1200:]}\n\n"
-                    f"The user now replies: {text}\n"
-                    f"Act on it against the REAL scheduler state — call "
-                    f"cronjob(action='list') first and work from what is actually there.")
+            if scoped:
+                done = await self._scoped_change(cid, text, omsgs, user, handle,
+                                                 "chip:bg_followup_scoped")
+                if done is not None:
+                    self._mark_bg(cid, omsgs)
+                    return self._say(done)
+            sent = self._bg_followup_text(text, omsgs, cid)
             row("task.followup", "chip_followup")
-            self._mark_bg(cid)
+            self._mark_bg(cid, omsgs)
             return self._hermes_stream(sent, handle, scoped=scoped, verify_creation=False)
 
         # 4b. Not a new watch — a CHANGE to one that already exists ("change/adjust the alert to
@@ -6233,7 +6444,7 @@ class Pipe:
         edit = bool(self._EDIT_VERB.search(raw))
         if edit:
             row("task.edit", "chip_edit")
-            self._mark_bg(cid)
+            self._mark_bg(cid, omsgs)
             return self._hermes_stream(text, handle, verify_creation=True,
                                        brief=self._EDIT_BRIEF, scoped=scoped)
 
@@ -6250,14 +6461,14 @@ class Pipe:
             if (self._WANTS_ALERT.search(text or "")
                     and not self._contact(handle).get("phone")):
                 row("task.create", "chip_phone_prompt")
-                self._mark_bg(cid)
+                self._mark_bg(cid, omsgs)
                 return self._say(self._phone_prompt(handle, text, cid))
             # The confirmation gate is skipped: the control IS the consent, exactly as /task and
             # /research are ungated. Recorded rather than silent, so the accept/decline stream
             # stays an honest measure of what the guessing path gets wrong.
             self._metric(job="confirm", kind="background task", outcome="skipped_task_mode")
             row("task.create", "chip_create")
-            self._mark_bg(cid)
+            self._mark_bg(cid, omsgs)
             return self._hermes_stream(text, handle, verify_creation=True, scoped=scoped)
 
         # 6. No evidence of a schedule: ANSWER it, do not schedule it. The two briefs fail very
@@ -6268,7 +6479,7 @@ class Pipe:
         #    recoverable in a turn; the other leaves state behind.
         self._metric(job="confirm", kind="background task", outcome="skipped_task_mode")
         row("task.research", "chip_research")
-        self._mark_bg(cid)
+        self._mark_bg(cid, omsgs)
         return self._hermes_stream(text, handle, verify_creation=False,
                                    brief=self._RESEARCH_BRIEF, scoped=scoped)
 
@@ -6283,8 +6494,8 @@ class Pipe:
         "source each fact came from. If the tools cannot establish something, say that plainly "
         "instead of filling the gap.\n"
         "4. Never state a number, price or date you did not read from a source in this session.\n"
-        "5. For a price question, query the local SearXNG "
-        "(http://127.0.0.1:8888/search?q=...&format=json) with your web tool, prefer major "
+        "5. For a price question, search with your web_search tool (it queries this host's own "
+        "SearXNG; pass it words, never a URL), prefer major "
         "retailer pages (amazon.ca, bestbuy.ca, walmart.ca), and answer with the price AND the "
         "link to the page you read it from. Rule 4 still holds: no page read, no number.\n"
         "6. Answer in prose for the user, not as a report to a machine. Be concise."
@@ -6321,17 +6532,31 @@ class Pipe:
     )
 
     def _release_chat_tenant(self):
-        """Unload the 32768-ctx chat model so the 65536-ctx agent runner has room.
+        """Release the pipe's own tenants so the 65536-ctx agent runner has room.
+
+        Reads /api/ps and unloads whichever of chat_model, vision_model and coder_model (today two
+        tags: hermes-genesis:apex-compact and qwen38-coder:q4) is resident. It used to unload
+        chat_model alone, so a handoff straight after a coder turn left qwen38-coder:q4 resident,
+        and that does not fit beside the agent either. Exact tag match on purpose:
+        qwen38-coder:q4-128k is the deepseek / Claude Code harness's tenant, not the pipe's, and
+        unloading it would kill a session this pipe knows nothing about.
 
         Targeted rather than _free_vram(): that unloads EVERY model, including a hermes job that
-        may be mid-run, and polls for up to 30 s. Here we only need the one tenant that cannot
-        co-reside with the agent. Best-effort — Ollama would evict eventually anyway; this just
-        makes it happen before the load rather than during it."""
+        may be mid-run, and polls for up to 30 s. Best-effort. Ollama would evict eventually
+        anyway; this just makes it happen before the load rather than during it. With /api/ps
+        unreadable it falls back to the old blind chat_model release."""
+        mine = {self.chat_model, self.vision_model, self.coder_model}
         try:
-            requests.post(f"{self.ollama}/api/generate",
-                          json={"model": self.chat_model, "keep_alive": 0}, timeout=10)
+            ps = requests.get(f"{self.ollama}/api/ps", timeout=10).json().get("models", [])
+            resident = [t for t in ((m.get("name") or m.get("model")) for m in ps) if t in mine]
         except Exception:
-            pass
+            resident = [self.chat_model]
+        for tag in dict.fromkeys(resident):     # one POST per tag, in /api/ps order
+            try:
+                requests.post(f"{self.ollama}/api/generate",
+                              json={"model": tag, "keep_alive": 0}, timeout=10)
+            except Exception:
+                pass
 
     _JOB_ID_RE = re.compile(r"^[a-f0-9]{12}$")
 
@@ -6464,12 +6689,15 @@ class Pipe:
     )
     _JOB_PROMPT_MAX = 5000       # hermes api_server._MAX_PROMPT_LENGTH; a PATCH past it is a 400
     _JOB_PROMPT_MIN = 24         # below this there is no instruction left to keep
-    # Repaired without saying so. `deliver` is here because an OMITTED deliver defaults to
-    # "origin-or-local" in hermes (tools/cronjob_tools.py:316), and on an api_server session that
-    # resolves to origin — so this is a host-level default the brief has to fight, not something the
-    # agent authored, and it will need repairing on a good fraction of all creations. Announcing it
-    # every time is the pipe narrating its own internals, which the verifier above deliberately
-    # refuses to do. The `repaired` metric still counts it, so the rate stays measurable.
+    # Repaired without saying so. At v0.21.4 an OMITTED deliver no longer needs this: hermes stores
+    # "local" whenever the creating session has no push-capable origin (cron/jobs.py:1753-1754),
+    # and an api_server session never has one (_origin_from_env returns None for a surface without
+    # async delivery). What the repair still guards is an EXPLICIT non-local value the agent
+    # writes itself: deliver='origin' on 2026-08-07 (above), or 'local,<name>', which brief rule 5
+    # names because every run then ends in a delivery error. It stays silent because the user never
+    # chose a delivery value, so rewiring it changes nothing they asked for, and announcing it is
+    # the pipe narrating its own internals, which the verifier above deliberately refuses to do.
+    # The `repaired` metric still counts it, so the rate stays measurable.
     #
     # The prompt defects are NOT here: those change the text of the job the user asked for, and a
     # rewrite the user cannot see is a rewrite they cannot correct. A repair that FAILS always
@@ -6505,7 +6733,76 @@ class Pipe:
             out.append(("argv", f"the command leaves {', '.join(repr(s) for s in stray[:3])} "
                                 f"dangling — a flag value with spaces was written unquoted",
                         "argparse rejects it, so every run exits before it checks anything"))
+        # A page address the scheduled run's guard refuses. Measured 2026-09-30 against hermes's
+        # real check_all_command_guards in cron mode: `price_watch.py --url 'https://bit.ly/...'`
+        # is BLOCKED ("Shortened URL detected ... cron jobs run without a user present"), and so is
+        # the rule-5a curl shape, on every run, while the job itself was created without complaint.
+        for url in cls._job_urls(prompt):
+            why = cls._url_guard_block(url)
+            if why:
+                out.append(("url", f"its page address is {why}",
+                            "the scheduled run's security guard blocks that on every run, before "
+                            "anything is checked; ask again with the full page address"))
+                break
         return out
+
+    # tirith's shortener list, as its own rule text names it and as measured through the guard
+    # (2026-09-30, v0.21.4): exact host match, any case. bitly.com, j.mp, cutt.ly, tiny.cc, a.co and
+    # amzn.to, among others, are NOT on it and pass. The TLDs are its "lookalike TLD" rule.
+    _URL_SHORTENERS = frozenset(("bit.ly", "t.co", "tinyurl.com", "is.gd", "v.gd", "goo.gl",
+                                 "ow.ly"))
+    _URL_LOOKALIKE_TLDS = frozenset(("zip", "mov"))
+    _URL_IN_TEXT = re.compile(r"https?://[^\s'\"<>|]+", re.I)
+
+    @classmethod
+    def _job_urls(cls, prompt):
+        """The page addresses a job fetches: a vetted command's --url, else every URL on a line
+        that runs curl. Never prose elsewhere in the prompt."""
+        if cls._JOB_VETTED_RE.search(prompt or ""):
+            u = cls._job_flag_value(prompt, "--url")
+            return [u] if u else []
+        return [u for ln in (prompt or "").splitlines() if re.search(r"\bcurl\b", ln)
+                for u in cls._URL_IN_TEXT.findall(ln)]
+
+    @classmethod
+    def _url_guard_block(cls, url):
+        """Why hermes's cron guard refuses this URL's host (a phrase), or None.
+
+        Only the rules that are decidable from the host alone and measured blocking a cron run:
+        tirith's shortener list, a punycode label, a non-ASCII host, a raw IP (dotted, decimal, hex
+        or octal, as inet_aton reads them; loopback is allowed), a lookalike TLD and a trailing dot.
+        The guard has others (a domain one edit from a well-known one, for example) that cannot be
+        reproduced here; those still fail at run time.
+        """
+        try:
+            host = urllib.parse.urlsplit((url or "").strip()).hostname or ""
+        except ValueError:
+            return None
+        if not host:
+            return None
+        if host.endswith("."):
+            return f"`{host}`, a host ending in a dot"
+        if host in cls._URL_SHORTENERS:
+            return f"a `{host}` link shortener, which hides the real page"
+        if not host.isascii():
+            return f"`{host}`, a domain with non-ASCII letters"
+        if any(label.startswith("xn--") for label in host.split(".")):
+            return f"`{host}`, a punycode (xn--) domain"
+        import ipaddress
+        import socket
+        ip = None
+        try:
+            ip = ipaddress.ip_address(host)
+        except ValueError:
+            try:
+                ip = ipaddress.ip_address(socket.inet_ntoa(socket.inet_aton(host)))
+            except (OSError, ValueError):
+                ip = None
+        if ip is not None:
+            return None if ip.is_loopback else f"`{host}`, a raw IP address"
+        if host.rsplit(".", 1)[-1] in cls._URL_LOOKALIKE_TLDS:
+            return f"`{host}`, a .{host.rsplit('.', 1)[-1]} domain"
+        return None
 
     # Flags whose value is a free-text phrase, i.e. the ones an unquoted value breaks. Taken from
     # price_watch/price_search's own parsers rather than guessed; a flag missing here simply means
@@ -6643,6 +6940,10 @@ class Pipe:
                     fixed.append(defect)
                 else:
                     stuck.append(defect)
+            elif code == "url":
+                # Which page the user meant is not recoverable from a shortened or disguised link,
+                # and following it here would be the pipe choosing the job's target. Report it.
+                stuck.append(defect)
             elif code == "protocol":
                 tail = cls._JOB_PROTOCOL_TAIL.format(who=uname)
                 if len(prompt) + len(tail) > cls._JOB_PROMPT_MAX:
@@ -6728,7 +7029,10 @@ class Pipe:
         # requires knowing what exists. Unconditional now — it used to be taken only when a verdict
         # was wanted, which meant follow-up and /research turns created jobs the pipe never learned
         # the id of, leaving them unowned and so invisible to the person who asked for them.
-        before = self._hermes_jobs()
+        # Every _hermes_jobs call in this method goes through to_thread: it is a blocking urllib
+        # GET with a 10 s timeout, and inline it stalls OpenWebUI's one event loop, which also
+        # serves every other chat on the box.
+        before = await asyncio.to_thread(self._hermes_jobs)
         owners, _oerr = self._read_owners()
         if brief is None:
             brief = self._HERMES_BRIEF
@@ -6765,11 +7069,14 @@ class Pipe:
             ctx += (" Duplicate-check scope: of the jobs already in the scheduler, ONLY these "
                     "belong to this user: " + (", ".join(sorted(mine)) or "(none)") +
                     ". Every other job belongs to someone else — never name, cite, quote or "
-                    "describe one, and never treat one as this user's duplicate.")
+                    "describe one, and never treat one as this user's duplicate. Never modify, "
+                    "pause, resume or delete any job that is not in this list.")
         # hermes runs hermes-genesis:agent at num_ctx 65536 while chat holds apex-compact at 32768.
         # Ollama keys runners by model+options, so those are two distinct ~17 GB allocations and
-        # only one fits. Releasing the chat tenant first makes the handoff deterministic instead of
-        # leaving Ollama to evict under memory pressure mid-load.
+        # only one fits. The coder tenant does not fit beside the agent either (it and
+        # hermes-genesis measured 37.6 GB together against a 24 GB card). Releasing whichever of
+        # the pipe's tenants is resident makes the handoff deterministic instead of leaving
+        # Ollama to evict under memory pressure mid-load.
         #
         # to_thread because _release_chat_tenant is a blocking requests call: running it inline
         # would stall the event loop, and this pipe serves every other conversation on the box.
@@ -6784,7 +7091,7 @@ class Pipe:
         # rather than as a missing row.
         outcome = "incomplete"
         stamped = 0
-        repaired = 0        # brief violations found in what the agent just created (:4863)
+        repaired = 0        # brief violations found in what the agent just created (_job_defects)
         t0 = time.monotonic()
 
         def _attribute(snapshot, src_hint="diff"):
@@ -6832,7 +7139,7 @@ class Pipe:
                                 _runnable = self._job_live
                                 new_jobs = None
                                 for _ in range(6):
-                                    after = self._hermes_jobs()
+                                    after = await asyncio.to_thread(self._hermes_jobs)
                                     if after is not None and before is not None:
                                         new_jobs = [j for i, j in after.items()
                                                     if i not in before and _runnable(j)]
@@ -6858,14 +7165,16 @@ class Pipe:
                                                f"not one. Say *list my tasks* to see them.")
                                     # Verified-to-exist is not verified-to-work. The agent has
                                     # created jobs that could never deliver and whose prompts
-                                    # carried its own tool-call markup (:4863). Hold the record to
-                                    # the three parts of the brief a machine can check, before the
+                                    # carried its own tool-call markup (see _JOB_MARKUP_RE). Hold
+                                    # the record to the parts of the brief a machine can check
+                                    # (_job_defects), before the
                                     # first run rather than after it. to_thread per _hermes_api's
                                     # contract — this pipe serves every other chat on the box.
                                     # Counted BEFORE the repair, and NOT gated on whether the repair
                                     # had anything to say. A deliver-only defect is fixed silently
-                                    # (:4900), so gating this on `shape` recorded repaired=0 for the
-                                    # single most common violation there is — the exact rate the
+                                    # (_JOB_SILENT_FIX), so gating this on `shape` recorded
+                                    # repaired=0 for what was then the most common violation —
+                                    # the exact rate the
                                     # column exists to measure, missing precisely where the reply is
                                     # already silent. Measured after the fact: the metric read 0
                                     # while a PATCH had demonstrably gone out.
@@ -6975,7 +7284,7 @@ class Pipe:
                                 # case (nothing created) is one local GET.
                                 outcome = "n/a"
                                 for attempt in range(2):
-                                    after = self._hermes_jobs()
+                                    after = await asyncio.to_thread(self._hermes_jobs)
                                     if _attribute(after):
                                         break
                                     if attempt == 0:
@@ -7001,7 +7310,8 @@ class Pipe:
                     # connection dropped before its tool-verified truth ever got appended.
                     if verify_creation:
                         try:
-                            _attribute(self._hermes_jobs(), src_hint="dropped_stream")
+                            _attribute(await asyncio.to_thread(self._hermes_jobs),
+                                       src_hint="dropped_stream")
                         except Exception:
                             pass
                         yield ("\n\n⚠️ **Unverified**: the connection to hermes-agent closed before "
@@ -7013,7 +7323,7 @@ class Pipe:
             # The advice line below says the job may still have been created — so claim it before
             # saying so, or the user is told to go look for something they will not be able to see.
             try:
-                _attribute(self._hermes_jobs(), src_hint="timeout")
+                _attribute(await asyncio.to_thread(self._hermes_jobs), src_hint="timeout")
             except Exception:
                 pass
             yield ("\n\n⏳ hermes-agent did not finish within the window — the job may still have "
@@ -7035,7 +7345,8 @@ class Pipe:
             outcome = "stream_error"
             if verify_creation:
                 try:
-                    _attribute(self._hermes_jobs(), src_hint="stream_error")
+                    _attribute(await asyncio.to_thread(self._hermes_jobs),
+                               src_hint="stream_error")
                 except Exception:
                     pass
             yield (f"\n\n⚠️ hermes-agent's connection broke mid-reply ({type(e).__name__}). "
@@ -7756,6 +8067,8 @@ class Pipe:
         entry = self._entry(body)
         if entry != "auto":
             self._route_metric(f"entry:{entry}", 0, "manifold_entry")
+            # A knowledge/coder reply in the same chat is not a hermes reply either.
+            self._settle_bg_turn(self._chat_id(body, __metadata__), msgs)
             _ent = self._ollama_messages(msgs)
             return self._entry_chat_stream(entry, _ent, stream=stream,
                                            suggest=self._suggester(_ent, emitter, __metadata__))
@@ -7773,6 +8086,13 @@ class Pipe:
             done = await self._task_mode_turn(cid, text, msgs, __user__, tm_src, ref=ref)
             if done is not None:
                 return done
+        # Settled HERE, below Task (which reads the store itself and always answers) and above
+        # the first route that can answer without hermes. Nothing is consumed: the record names
+        # the hermes reply's slot, so a notebook, render, coder, vision or chat reply this turn
+        # closes the follow-up window just by landing after it (_bg_slot), while an edit or
+        # regenerate of the message after it still reaches hermes. Only an edit at or above the
+        # hermes reply drops the record.
+        self._settle_bg_turn(cid, msgs)
         # The Notebook control (filters/notebook_mode.py). Same placement rule as Task above, and
         # it goes AFTER Task so that Task's behaviour is bit-identical to what it was before this
         # existed: if both are somehow on, Task wins. The frontend makes them exclusive anyway
@@ -7954,7 +8274,7 @@ class Pipe:
             done = self._flight_turn(cid, text, omsgs, resume=True,
                                      handle=self._alert_username(__user__))
             if done is not None:
-                self._mark_bg(cid)
+                self._mark_bg(cid, omsgs)
                 return done
         if BG_TASKS and MANAGE_DETERMINISTIC and not ref:
             mhandle = self._alert_username(__user__)
@@ -7982,7 +8302,7 @@ class Pipe:
                 done = await self._manage_turn(cid, text, parked, rule, pending=pconf,
                                                user=__user__, handle=mhandle)
                 if done is not None:
-                    self._mark_bg(cid)
+                    self._mark_bg(cid, omsgs)
                     return self._say(done)
         if BG_TASKS and not attached_img and not ref:
             handle = self._alert_username(__user__)
@@ -8009,7 +8329,7 @@ class Pipe:
                                      "`/research what changed in the Wan 2.2 release notes`.")
                 self._route_metric("agent.oneshot", 0,
                                    f"slash_{oneshot.group(1).lower()}", text)
-                self._mark_bg(cid)
+                self._mark_bg(cid, omsgs)
                 return self._hermes_stream(question, handle, verify_creation=False,
                                            brief=self._RESEARCH_BRIEF, scoped=scoped)
             # A turn that answers "what number should I text?" is handled before anything else —
@@ -8020,7 +8340,7 @@ class Pipe:
                 answered = self._phone_reply(text, handle, pending, cid, scoped=scoped)
                 if answered is not None:
                     self._route_metric("task.create", 0, "phone_reply", text)
-                    self._mark_bg(cid)
+                    self._mark_bg(cid, omsgs)
                     return answered
             # A flight ask is claimed BEFORE _is_bg_task_request, which is the whole point of this
             # path. Measured: 7 of 8 realistic phrasings match neither _BG_VERB+_BG_RECURRENCE nor
@@ -8034,7 +8354,7 @@ class Pipe:
                     done = self._flight_turn(cid, text, omsgs, resume=False,
                                              handle=self._alert_username(__user__))
                     if done is not None:
-                        self._mark_bg(cid)
+                        self._mark_bg(cid, omsgs)
                         return done
             # An edit to a job that ALREADY EXISTS ("change/adjust the alert to 15 mins"), not a
             # request for a new one. Checked BEFORE _is_bg_task_request below, for the same
@@ -8062,10 +8382,20 @@ class Pipe:
                         "Okay — nothing changed. If you just wanted an answer rather than a job "
                         "change, ask it directly and I'll answer here.")
                 self._route_metric("task.edit", 0, "chip_edit", text, deterministic=False)
-                self._mark_bg(cid)
+                self._mark_bg(cid, omsgs)
                 return self._hermes_stream(text, handle, verify_creation=True,
                                            brief=self._EDIT_BRIEF, scoped=scoped)
             followup = self._is_bg_followup(text, omsgs, cid)
+            if followup and scoped:
+                # An ordinary user's "no, delete them all" right after a hermes reply. Handing it
+                # to hermes skips the ownership-checked manage path AND the confirm gate, and
+                # hermes's cronjob tool sees every job on the host. So a follow-up that changes a
+                # job goes to the deterministic path, which scopes to this user and confirms.
+                done = await self._scoped_change(cid, text, omsgs, __user__, handle,
+                                                 "bg_followup_scoped")
+                if done is not None:
+                    self._mark_bg(cid, omsgs)
+                    return self._say(done)
             if followup or self._is_bg_task_request(text):
                 raw_l = (text or "").strip().lower()
                 is_manage = bool(self._BG_MANAGE.match(raw_l))
@@ -8095,7 +8425,7 @@ class Pipe:
                 if read_only and scoped:
                     self._route_metric("task.manage", bg_tier, bg_rule, text,
                                        deterministic=False, reason="scoped_no_fallback")
-                    self._mark_bg(cid)
+                    self._mark_bg(cid, omsgs)
                     return self._say(
                         "I can't look up your background tasks right now — task listing is "
                         "switched off on this assistant. An admin can list and change jobs for "
@@ -8111,7 +8441,7 @@ class Pipe:
                 if (not followup and not read_only
                         and self._WANTS_ALERT.search(text or "")
                         and not self._contact(handle).get("phone")):
-                    self._mark_bg(cid)
+                    self._mark_bg(cid, omsgs)
                     return self._say(self._phone_prompt(handle, text, cid))
                 # Confirm ONLY a genuinely new, heuristically-detected job. Delegating loads the
                 # 65536-ctx agent runner, which cannot co-reside with the 32768-ctx chat tenant —
@@ -8138,14 +8468,8 @@ class Pipe:
                 sent = text
                 if followup:
                     # "yes reenable" is meaningless alone — hand hermes what it just asked.
-                    prev = next((m.get("content") or "" for m in reversed(omsgs)
-                                 if m.get("role") == "assistant"), "")
-                    sent = (f"Continuing our exchange. You previously said:\n"
-                            f"{prev.replace(self._BG_MARK, '')[-1200:]}\n\n"
-                            f"The user now replies: {text}\n"
-                            f"Act on it against the REAL scheduler state — call "
-                            f"cronjob(action='list') first and work from what is actually there.")
-                self._mark_bg(cid)
+                    sent = self._bg_followup_text(text, omsgs, cid)
+                self._mark_bg(cid, omsgs)
                 return self._hermes_stream(sent, handle, scoped=scoped,
                                            verify_creation=not (read_only or followup))
         # `code_btn` (an explicit Code-button press) is checked here, alongside the regex/classifier

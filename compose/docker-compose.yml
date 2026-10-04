@@ -40,8 +40,10 @@ services:
     # Pinned to a digest, not :latest. This is the stack's own search dependency — an upstream
     # push that changes the JSON shape or the engine roster degrades web search SILENTLY: the
     # assistant answers from training data and still looks grounded. Bump deliberately, and
-    # re-run tests/test_websearch.py after.  (digest captured 2026-08-01, image built 2026-07-25)
-    image: searxng/searxng@sha256:3bc6ae0e872ecd4b003e97e9cb58ec0fb56b02d46ad97ea67e2fa4ff2e8ff759
+    # re-run tests/test_websearch.py after.  (digest captured 2026-09-29, image 2026.9.29+4e2c1ea7f;
+    # replaced 3bc6ae0e... / 2026.7.25, under which duckduckgo CAPTCHA'd and mojeek returned silent
+    # zeros, leaving chat bing-only — per-engine measurements in compose/searxng/settings.yml.)
+    image: searxng/searxng@sha256:3284e8900e9b3e5df284ae8c48a26851ae2eff6f99b4b0b18ec3da5a4d9095c3
     container_name: searxng
     restart: unless-stopped
     ports:
@@ -98,7 +100,7 @@ services:
   searxng-hermes:
     security_opt:
       - no-new-privileges:true
-    image: searxng/searxng@sha256:3bc6ae0e872ecd4b003e97e9cb58ec0fb56b02d46ad97ea67e2fa4ff2e8ff759
+    image: searxng/searxng@sha256:3284e8900e9b3e5df284ae8c48a26851ae2eff6f99b4b0b18ec3da5a4d9095c3
     container_name: searxng-hermes
     restart: unless-stopped
     ports:

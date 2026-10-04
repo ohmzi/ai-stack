@@ -409,6 +409,16 @@ def main() -> int:
             print(usable_window(select_provider(cfg, model), model) or "")
         return 0
 
+    if "--provider" in sys.argv:
+        # Just the provider name, one per model -- what --route prints plus the
+        # window arithmetic, for callers that only need to know which upstream a
+        # model lands on. The launcher uses it to decide which backend the alias
+        # slots should point at.
+        cfg = load_config()
+        for model in sys.argv[sys.argv.index("--provider") + 1:]:
+            print(select_provider(cfg, model)["name"])
+        return 0
+
     cfg = load_config()
     Router.cfg = cfg
     host = cfg["listen"]["host"]

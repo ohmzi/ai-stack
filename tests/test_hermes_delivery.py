@@ -19,11 +19,90 @@ Pure functions over fixture text; no docker, no network.
 
 Usage:  python3 tests/test_hermes_delivery.py
 """
-import importlib.util, json, os, sys
+import importlib.util, json, os, smtplib, socket, sys, tempfile, urllib.request
 
-spec = importlib.util.spec_from_file_location("hd", "/home/ohmz/ai-stack/scripts/hermes_delivery.py")
-hd = importlib.util.module_from_spec(spec)
-spec.loader.exec_module(hd)
+# ---- Isolation, established BEFORE the module under test loads ----------------------------------
+# hermes_delivery.py and alert_transports.py resolve every path once, at import: ~/.hermes/... via
+# HOME, the shared /volume1/.../alerts/ files via env overrides. This suite used to import them
+# against the live box: its main() calls rewrote the real alerts/profile.json, job_facts() wrote
+# the "abc123" fixture into the real .job_names.json, and the early ticks could drain the REAL
+# subscribe inbox and prune the real cancel tombstones. Worse, an entry waiting in the live inbox
+# would have been handed to the real transport: a real SMS and a real email. Everything now points
+# into one temp dir before exec_module, and the network is closed underneath as a second line.
+_ISO = tempfile.mkdtemp(prefix="test_hermes_delivery-")
+tempfile.tempdir = _ISO                      # every later mkdtemp in this file lands inside it too
+os.makedirs(os.path.join(_ISO, ".hermes", "cron", "output"))
+os.environ.update(
+    HOME=_ISO,                               # ~/.hermes: OUT_DIR, STATE, CANCELLED, NAMES_CACHE,
+                                             # JOBS_FILE, WEBHOOK_FILE, alert_transports CONF/legacy
+    TASK_OWNERS=os.path.join(_ISO, "job_owners.json"),
+    OWNER_CHANNELS=os.path.join(_ISO, "owner_channels.json"),
+    SUBSCRIBE_INBOX=os.path.join(_ISO, "pending_subscriptions.json"),
+    ALERT_PROFILE=os.path.join(_ISO, "profile.json"),
+    ALERT_CONTACTS=os.path.join(_ISO, "contacts.json"),
+    OWUI_DB=os.path.join(_ISO, "webui.db"),
+)
+
+_UNEXPECTED = []                             # every real send/connect attempt; must stay empty
+
+
+def _blocked(what):
+    def refuse(*a, **k):
+        _UNEXPECTED.append((what, repr(a)[:120]))
+        raise OSError(f"test isolation: {what} is blocked in this suite")
+    return refuse
+
+
+# Fixture text only: no SMTP, no HTTP (webhook, Twilio), no socket of any kind.
+smtplib.SMTP = _blocked("smtplib.SMTP")
+smtplib.SMTP_SSL = _blocked("smtplib.SMTP_SSL")
+urllib.request.urlopen = _blocked("urllib.request.urlopen")
+socket.socket.connect = _blocked("socket.connect")
+socket.socket.connect_ex = _blocked("socket.connect_ex")
+socket.create_connection = _blocked("socket.create_connection")
+
+
+def _load(name, path):
+    s = importlib.util.spec_from_file_location(name, path)
+    m = importlib.util.module_from_spec(s)
+    s.loader.exec_module(m)
+    return m
+
+
+def _escaped(mod):
+    """Module-level path constants that still point outside the temp dir."""
+    out = {}
+    for k, v in vars(mod).items():
+        vals = v if isinstance(v, (list, tuple)) else [v]
+        if k.isupper() and any(isinstance(x, str) and x.startswith("/")
+                               and not x.startswith(_ISO + os.sep) for x in vals):
+            out[k] = v
+    return out
+
+
+hd = _load("hd", "/home/ohmz/StudioProjects/ai-stack/scripts/hermes_delivery.py")
+# A path constant added later would otherwise point live without anyone noticing. Refuse to run
+# rather than find out afterwards. alert_transports is loaded under a private name for the same
+# check, so the sys.modules lookup hd.send_alert/publish_profile rely on is left untouched.
+_leaks = {**_escaped(hd), **{f"alert_transports.{k}": v for k, v in _escaped(_load(
+    "_alert_transports_isolation_check", "/home/ohmz/StudioProjects/ai-stack/scripts/alert_transports.py")).items()}}
+if _leaks:
+    print(f"REFUSING TO RUN: path constants escape the test sandbox {_ISO}:")
+    for k, v in _leaks.items():
+        print(f"  {k} = {v!r}")
+    sys.exit(2)
+
+# The real wrapper is kept for the one section that exercises it against a stub transport; every
+# other path through hd.send_alert hits this sentinel unless a section installs its own stub.
+_REAL_SEND_ALERT = hd.send_alert
+
+
+def _no_real_send(*a, **k):
+    _UNEXPECTED.append(("hd.send_alert", repr(a)[:120]))
+    return False, ["test: unexpected real send"]
+
+
+hd.send_alert = _no_real_send
 
 results = []
 
@@ -192,7 +271,7 @@ def main():
     # one line instead of surfacing as an unrelated crash three sections later. It has drifted
     # three times in one day.
     import inspect
-    _real = inspect.signature(hd.send_alert).parameters
+    _real = inspect.signature(_REAL_SEND_ALERT).parameters
     check("send_alert's parameters are the ones the stubs mimic",
           list(_real) == ["recipient", "message", "job", "job_id", "when", "payload"],
           list(_real))
@@ -207,13 +286,13 @@ def main():
     # what these checks exist to catch, and it caught itself when job/job_id/when were added.
     fake.send_alert = lambda r, m, job=None, job_id=None, when=None, payload=None: (True, ["sms sent", "email sent"])
     sys.modules["alert_transports"] = fake
-    got = hd.send_alert("ohmz", "target met")
+    got = _REAL_SEND_ALERT("ohmz", "target met")
     check("returns a 2-tuple, not a bool", isinstance(got, tuple) and len(got) == 2, repr(got))
     check("unpacks the way attempt_alert calls it", got[0] is True and "sms sent" in got[1], repr(got))
 
     fake.send_alert = lambda r, m, job=None, job_id=None, when=None, payload=None: (
         (_ for _ in ()).throw(RuntimeError("smtp down")))
-    got = hd.send_alert("ohmz", "target met")
+    got = _REAL_SEND_ALERT("ohmz", "target met")
     check("a raising transport still returns the pair", isinstance(got, tuple) and len(got) == 2, repr(got))
     check("...reporting failure", got[0] is False, repr(got))
     check("...and carrying the cause into the ledger", any("smtp down" in n for n in got[1]), repr(got))
@@ -508,6 +587,10 @@ def main():
     hd.CANCELLED = os.path.join(d, "corrupt.json")
     check("a corrupt tombstone file is a no-op, not a crash",
           hd.apply_cancel_tombstones(state) == 0)
+
+    print("--- isolation: the suite never reached a real transport or the network ---")
+    check("no real send, SMTP, HTTP or socket connect was attempted",
+          _UNEXPECTED == [], repr(_UNEXPECTED))
 
     fails = results.count(False)
     print(f"\n{len(results)} checks — {'ALL PASS' if not fails else str(fails) + ' FAILURE(S)'}")

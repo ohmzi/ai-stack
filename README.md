@@ -221,6 +221,58 @@ confirmation, silently starving it forever, and `.alerts.json` had no lock acros
 — an assumption a manual test run and the 60-second systemd timer overlapping in the same minute
 disproved outright. Both are fixed and pinned by tests now, not hypothetically.
 
+**The stack's own health alerts wait for a second failure (2026-09-29).** Three monitors watch the
+machinery above rather than a user's condition: `scripts/search_canary.py` (both SearXNG instances,
+every 30 min, because a dead search is the one outage that looks like success),
+`scripts/stack_watchdog.py` (every 5 min: gateway, API, delivery timer, backup freshness, FlightClaw,
+public gate, guest quota, cron ticker, gateway restarts, delivery backlog, hermes version; the list
+with thresholds is in [BACKUPS.md](docs/BACKUPS.md#the-stack-watchdog)) and `scripts/stack_alert.py`
+(any unit that reaches `failed`, via `OnFailure=`). They used to alert on the first failed probe.
+Measured from their journals: the canary sent 22 alerts in 8 days, each a text and an email, for 11
+outages of which 8 were a single probe already healthy at the next run, and the watchdog sent 20 in
+three days. A channel that cries wolf
+that often gets muted, and then the real outage is silent too. All three now go through one engine,
+`scripts/health_alert.py`:
+
+- **Confirm, then alert.** A check alerts after 2 failed runs, and only 2 ok runs in a row recover
+  it; the canary also retries a failed probe twice, 60 s apart, inside the run. Replaying the
+  canary's history gives **8 notifications for 4 real outages instead of 22**; replaying all 2051
+  watchdog runs in the journal gives 9. The cost, accepted: an outage has to span two runs to be
+  reported, and every recovery arrives one run later.
+- **Quiet about what you never heard of.** A recovery is announced only for an outage that was
+  alerted, one message per run covers every check that changed, and a check still down 24 h after
+  its alert gets one reminder a day.
+- **Some failures alert at once.** Backup freshness alerts on its first failed run, since 26 hours
+  of staleness is already slow-moving, and so do gateway restarts (a 6-hour count), the delivery
+  backlog (15 minutes of failed ticks) and the hermes version (a commit id does not blip); each also
+  recovers on one good run. A failed unit alerts immediately, because systemd has already
+  given up on it; units that fail within the same 5 seconds are now one alert, and the text quotes the
+  failed run's own last line. Of 11 unit-failure texts on 2026-09-22..24 not one said why; replayed,
+  9 now name the cause.
+- **A killed monitor is an outage too.** On 2026-09-24 systemd killed 21 watchdog runs on a
+  thrashing host, and a killed run reports nothing. Two in a row now text "Watchdog runs DOWN":
+  replayed, at 10:30, where the old code's first text was 11:40 and confirmation alone would have
+  waited until 14:42.
+- **Severity picks the channel.** DOWN texts and emails; DEGRADED emails only. Degraded means the
+  service still answers: search with 3+ engines out, a gateway that restarted itself 3 times and came
+  back, results waiting on a webhook, a hermes version nobody verified. The email uses the backup
+  report's template (`scripts/ohmz_email.py`), not the job one, whose footer ("a background task you
+  scheduled met its alert condition") was false for a health check. Subjects keep the `[stack] `
+  prefix, so existing mail filters still match.
+- **Four failures that used to pass every check (2026-09-29).** The cron ticker is a thread inside
+  the gateway: it can die, or fail every tick, while the process and the API stay up, and then no job
+  fires. `ticker` fails when any profile's heartbeat or last success is over 5 minutes old;
+  profiles are picked the way hermes picks them, so a `cp -a coding coding.bak` copy cannot page
+  anyone.
+  `gwrestarts` counts hermes's own start ledger (3 in 6 h), because a liveness restart is back
+  between two probes. `backlog` catches a channel webhook that fails every minute and withholds
+  results in silence (15 min). `hermesver` catches an unplanned `hermes update`. The API probe also
+  moved from `/v1/models` to the keyless `/health`: sent without a key, the old probe was 96.5% of
+  the gateway's `errors.log`, 247 "invalid API key" lines a day.
+
+How to read the canary's journal after a text:
+[TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md#a-search-canary-text-and-how-to-read-its-journal-2026-09-29).
+
 ## Models
 
 One 24 GB RTX 3090, and as of the 2026-07-26 consolidation almost everything
@@ -237,8 +289,11 @@ runs on a single tenant:
 The agent tag is the one that costs something. Ollama keys runners by model **plus options**, so a
 65536-context tag of the same weights is a *second* ~17 GB runner, and two of those do not fit on a
 24 GB card. A job firing mid-conversation evicts the chat tenant and the user's next turn pays a cold
-reload — **measured at 22.7 s**. Hence the GPU guard, and hence the pipe releasing the chat tenant
-before it hands off rather than letting Ollama evict under memory pressure mid-load.
+reload — **measured at 22.7 s**. Hence the GPU guard, and hence the pipe releasing its own resident
+tenants before it hands off rather than letting Ollama evict under memory pressure mid-load. It reads
+`/api/ps` and unloads the chat, vision and coder tags by exact name, so a handoff straight after a
+coder turn no longer leaves `qwen38-coder:q4` in the way, and the `deepseek` harness's
+`qwen38-coder:q4-128k` is never touched.
 
 None of these appear in the model picker. Every one has an inactive `model` row, which is
 OpenWebUI's hide switch — the picker is curated down to the three pipes above. That is safe
@@ -275,21 +330,56 @@ host.
 
 **The two SearXNG instances are the point, not duplication.** `searxng` on `:8888` serves chat;
 `searxng-hermes` on `:8889` serves the background monitors and nothing else
-(`compose/searxng-hermes/settings.yml`, 1 uwsgi worker against chat's 4, ~130 MB RSS, roughly one
-request per ten minutes), and `scripts/web_search.py` talks only to `:8889`.
+(`compose/searxng-hermes/settings.yml`, ~130 MB RSS, roughly one request per ten minutes):
+`scripts/web_search.py` talks only to `:8889`, and since 2026-09-29 so does the Hermes agent's own
+`web_search` tool ([docs/HERMES_AGENT.md](docs/HERMES_AGENT.md)). Compose still sets
+`UWSGI_WORKERS` to 4 for chat and 1 for hermes, but the image serves with granian and never reads
+them: `docker top` shows a single `searxng worker-1` in each container (2026-09-29).
 
 The split buys **partial** insulation, and the limit is worth stating precisely because three places
 in this repo overstated it until 2026-08-08. Engine rate limits are per **source IP**, and both
 containers egress from the same host — so splitting the containers does *not* split the budget for an
 engine both rosters enable. What actually insulates chat is the roster difference: chat runs
-`duckduckgo, bing, mojeek, wikipedia, wikidata`, hermes runs `google, brave, mojeek, bing`, so
-`google` and `brave` are hermes-only and `duckduckgo` is chat-only. **`bing` and `mojeek` are shared**,
-and a monitor can still CAPTCHA those for chat. The older claim — that a monitor "can never CAPTCHA an
-engine chat depends on" — is false for exactly those two.
+`duckduckgo, bing, mojeek, yandex, mwmbl, wikipedia`, hermes runs `google, brave, mojeek, bing`, so
+`google` and `brave` are hermes-only and `duckduckgo`, `yandex` and `mwmbl` are chat-only. **`bing`
+and `mojeek` are shared** (a test pins that overlap), and a monitor can still CAPTCHA them for chat.
+The older claim — that a monitor "can never CAPTCHA an engine chat depends
+on" — is false for exactly those two.
 
 That matters because a degraded chat search fails *silently*: the model answers from training data and
 still looks grounded. `tests/test_web_search.py` pins *chat's* `compose/searxng/settings.yml` by
-sha256, so the separation cannot be dissolved by quietly editing the other side.
+sha256, so the separation cannot be dissolved by quietly editing the other side, and
+`scripts/search_canary.py` probes both instances every 30 minutes (see
+[Standing jobs and alerts](#standing-jobs-and-alerts)).
+
+**Until 2026-09-29, chat search was effectively Bing-only**, and nothing said so. Querying each
+engine alone, 5 queries apiece, on the image then pinned (2026.7.25): bing 5/5, duckduckgo 0/5
+(CAPTCHA every time), mojeek 0/5 (empty answers, no error flagged). On 2026.9.29 all three go 5/5,
+and a same-IP, same-query check seconds apart ruled out timing. The new image moved its network layer
+to `curl_cffi` with browser TLS impersonation and now solves mojeek's proof-of-work CAPTCHA instead
+of parsing it as an empty page. The old image also shipped google `inactive: true`, which no
+`disabled: false` overrides, so hermes's declared google never ran. Both containers are now pinned to
+the same digest, `sha256:3284e890…` (`tests/test_web_search.py` requires them to match). Along with
+the bump:
+
+- Chat gained two engines with indexes of their own, `yandex` and `mwmbl`, each 5/5 on both images.
+  mwmbl ranks weaker, so a URL several engines agree on outscores a hit only mwmbl found. yandex,
+  like bing, sees the query text and this host's IP.
+- Chat dropped `wikidata`: 0 results in 10 of 10 probes (Open WebUI reads only `results[]`), up to
+  2.5 s of waiting, and a crash on 1 of 5 queries on the new image, which lands it in
+  `unresponsive_engines` and counts toward the canary's DEGRADED.
+- Chat's `outgoing.request_timeout` is 5.0, like hermes's, up from the 3.0 s default. At 15:17 that
+  day chat returned 0 results with bing timing out at 3.0 s. No roster engine's slowest reply on
+  the new image exceeded 1.9 s, so healthy searches do not wait longer.
+
+Measured after the recreate: `q=wikipedia` on `:8888` returned 138 results from 5 engines in 1.61 s,
+none unresponsive, and `:8889` answered from all four of its engines. Two things to know before the
+next bump. Each image ships its own `disabled`/`inactive` defaults (2026.9.29 marks mojeek inactive
+and google disabled), so both settings files carry explicit pins, `tests/test_web_search.py` holds
+them, and a new digest needs the image's `searx/settings.yml` re-read for every roster engine. And
+Open WebUI still sends `language=all` (its SearXNG language setting), which drew a duckduckgo CAPTCHA
+on 8 of 11 requests against 1 of 17 with `en`; that is an admin setting, left unchanged, and the
+canary sends no language, so it cannot see it.
 
 The reranker is not optional polish: with hybrid search on and no reranker, Open
 WebUI re-embeds the fused candidates and re-sorts by plain cosine, discarding the
@@ -460,7 +550,7 @@ Methodology and the current baseline: [docs/QA_TEST_PLAN.md](docs/QA_TEST_PLAN.m
 | [IMAGE_CONTINUATION.md](docs/IMAGE_CONTINUATION.md) | Why a follow-up edits *that* picture: the task guard, the reference store, the prompt contracts |
 | [openwebui-config-snapshot.md](docs/openwebui-config-snapshot.md) | Sanitized workspace config, and which config rows the runtime actually reads |
 | [KREA_LORA_GUIDE.md](docs/KREA_LORA_GUIDE.md) · [SCAIL_ANIMATE.md](docs/SCAIL_ANIMATE.md) | Media pipe guides |
-| [BACKUPS.md](docs/BACKUPS.md) | Nightly off-disk backups, and the watchdog that alerts on transitions |
+| [BACKUPS.md](docs/BACKUPS.md) | Nightly off-disk backups and what they capture, and the stack watchdog's checks (it alerts on confirmed failures) |
 | [TRACKING_ENHANCEMENT.md](docs/TRACKING_ENHANCEMENT.md) | What the monitor work measured — including what it refuted |
 | [FLIGHT_RECON.md](docs/FLIGHT_RECON.md) | The 19-site fare recon: a negative result, site by site |
 | [ROUTING_ROADMAP.md](docs/ROUTING_ROADMAP.md) · [MANAGE_PATH_PLAN.md](docs/MANAGE_PATH_PLAN.md) | How a turn is routed, and the deterministic job-management path |

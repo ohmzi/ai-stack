@@ -31,6 +31,7 @@ MARKETPLACES=(
 )
 PLUGINS=(
   "mattpocock-skills@claude-plugins-official"
+  "superpowers@claude-plugins-official"
   "humanizer@humanizer"
   "i-have-adhd@i-have-adhd"
 )
@@ -61,6 +62,7 @@ if [[ "${UNINSTALL:-0}" == "1" ]]; then
   rm -f "${HOOKS_DIR}/git-guardrails.py"
   rm -f "${COMMANDS_DIR}/pr-ready.md"
   rm -f "${SKILLS_DIR}/security-audit"
+  rm -f "${RULES_DIR}/security-audit-policy.md"
   python3 - "$SETTINGS" <<'PY' || warn "could not rewrite settings.json; remove the hooks block by hand"
 import json, os, sys
 path = sys.argv[1]
@@ -100,8 +102,9 @@ done
 NODE_MAJOR="$(node -p 'process.versions.node.split(".")[0]')"
 [[ "$NODE_MAJOR" -ge 18 ]] || warn "node ${NODE_MAJOR} found; the security-audit validators want 18+"
 
-[[ -r "${HERE}/hooks/git-guardrails.py" ]] || die "missing ${HERE}/hooks/git-guardrails.py"
-[[ -r "${HERE}/commands/pr-ready.md" ]]    || die "missing ${HERE}/commands/pr-ready.md"
+[[ -r "${HERE}/hooks/git-guardrails.py" ]]            || die "missing ${HERE}/hooks/git-guardrails.py"
+[[ -r "${HERE}/commands/pr-ready.md" ]]               || die "missing ${HERE}/commands/pr-ready.md"
+[[ -r "${HERE}/rules/security-audit-policy.md" ]]     || die "missing ${HERE}/rules/security-audit-policy.md"
 
 # -- plugins ------------------------------------------------------------------
 
@@ -140,11 +143,12 @@ fi
 
 # -- symlinks -----------------------------------------------------------------
 
-mkdir -p "$HOOKS_DIR" "$COMMANDS_DIR" "$SKILLS_DIR"
+mkdir -p "$HOOKS_DIR" "$COMMANDS_DIR" "$SKILLS_DIR" "$RULES_DIR"
 ln -sfn "${HERE}/hooks/git-guardrails.py" "${HOOKS_DIR}/git-guardrails.py"
 chmod +x "${HERE}/hooks/git-guardrails.py"
 ln -sfn "${HERE}/commands/pr-ready.md" "${COMMANDS_DIR}/pr-ready.md"
 ln -sfn "$SECURITY_AUDIT_DIR" "${SKILLS_DIR}/security-audit"
+ln -sfn "${HERE}/rules/security-audit-policy.md" "${RULES_DIR}/security-audit-policy.md"
 
 # -- merge the hook into settings.json ----------------------------------------
 
@@ -195,5 +199,6 @@ printf '  %-34s %s\n' "enabled plugins"      "$(claude plugin list 2>/dev/null |
 printf '  %-34s %s\n' "git-guardrails hook"  "$([[ -x $HOOKS_DIR/git-guardrails.py ]] && echo 'executable' || echo 'NOT EXECUTABLE')"
 printf '  %-34s %s\n' "security-audit skill" "$([[ -r $SKILLS_DIR/security-audit/SKILL.md ]] && echo 'linked' || echo 'MISSING')"
 printf '  %-34s %s\n' "security-audit node deps" "$(node -e 'process.exit(0)' 2>/dev/null && echo 'node ok' || echo 'NODE BROKEN')"
+printf '  %-34s %s\n' "security-audit rule"  "$([[ -r $RULES_DIR/security-audit-policy.md ]] && echo 'linked' || echo 'MISSING')"
 echo
-echo "Restart Claude Code to pick up new skills, commands and hooks."
+echo "Restart Claude Code to pick up new skills, commands, rules and hooks."

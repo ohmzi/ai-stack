@@ -43,7 +43,7 @@ def check(label, ok, detail=""):
 
 def load():
     spec = importlib.util.spec_from_file_location(
-        "pw", "/home/ohmz/ai-stack/scripts/price_watch.py")
+        "pw", "/home/ohmz/StudioProjects/ai-stack/scripts/price_watch.py")
     m = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(m)
     return m
@@ -222,7 +222,7 @@ def main():
 
     print("--- alert text is parseable by the delivery watcher ---")
     spec = importlib.util.spec_from_file_location(
-        "hd", "/home/ohmz/ai-stack/scripts/hermes_delivery.py")
+        "hd", "/home/ohmz/StudioProjects/ai-stack/scripts/hermes_delivery.py")
     hd = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(hd)
     pw.fetch = lambda url: FIX_JSONLD
@@ -235,7 +235,7 @@ def main():
 
     print("--- the fixture matches the real CLI, flag for flag ---")
     # A fixture that drifts from the parser silently tests a program that no longer exists.
-    src = open("/home/ohmz/ai-stack/scripts/price_watch.py").read()
+    src = open("/home/ohmz/StudioProjects/ai-stack/scripts/price_watch.py").read()
     flags = {m.replace("-", "_") for m in re.findall(r'add_argument\("--([a-z-]+)"', src)}
     fixture = set(Args().__dict__) | {"selftest"}
     missing = sorted(flags - fixture)

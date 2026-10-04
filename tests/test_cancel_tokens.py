@@ -37,7 +37,7 @@ JOB, HANDLE, NOW = "ae57d3973b9f", "ohmz", 1_800_000_000
 
 
 def main():
-    ct = load("/home/ohmz/ai-stack/scripts/cancel_tokens.py", "ct")
+    ct = load("/home/ohmz/StudioProjects/ai-stack/scripts/cancel_tokens.py", "ct")
 
     print("--- round trip ---")
     tok = ct.mint(JOB, HANDLE, SECRET, now=NOW)

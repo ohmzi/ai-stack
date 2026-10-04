@@ -39,7 +39,7 @@ def check(label, ok, detail=""):
 
 def load():
     spec = importlib.util.spec_from_file_location(
-        "at", "/home/ohmz/ai-stack/scripts/alert_transports.py")
+        "at", "/home/ohmz/StudioProjects/ai-stack/scripts/alert_transports.py")
     m = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(m)
     return m
@@ -251,7 +251,7 @@ def main():
           payload == before, str(payload))
     tok = re.search(r'/c\?t=([^"\s]+)', got["html"]).group(1)
     ctok = importlib.util.spec_from_file_location(
-        "ct", "/home/ohmz/ai-stack/scripts/cancel_tokens.py")
+        "ct", "/home/ohmz/StudioProjects/ai-stack/scripts/cancel_tokens.py")
     ct = importlib.util.module_from_spec(ctok)
     ctok.loader.exec_module(ct)
     check("the minted token verifies for exactly this job and handle",

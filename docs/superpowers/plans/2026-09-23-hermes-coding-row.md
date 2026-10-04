@@ -226,8 +226,10 @@ Expected: the log names `gpuguard cron scheduler active`; **no** `unexpected key
 Create one bounded job and watch it run:
 
 ```bash
-hermes cron create --name "upgrade smoke test" --schedule "*/2 * * * *" \
-  --prompt "Reply with exactly: LOG: upgrade smoke test fired" 2>&1 | tail -5
+# v0.21.4: schedule and prompt are POSITIONAL. The v0.19.0 --schedule/--prompt flags are gone and
+# the old form exits with "unrecognized arguments". (As run, 2026-09-23; see the ledger.)
+hermes cron create --name "upgrade smoke test" "*/2 * * * *" \
+  "Reply with exactly: LOG: upgrade smoke test fired" 2>&1 | tail -5
 ```
 
 Wait for two ticks, then:
@@ -266,7 +268,12 @@ This task changes no tracked files in this repo. Note the two behaviour changes 
 - Create: `~/.hermes/profiles/coding/config.yaml`
 - Create: `~/.hermes/profiles/coding/.env`
 - Create: `~/.hermes/profiles/coding/plugins/` (symlinks)
-- Create: `/home/ohmz/.hermes/coding_api_key` and its container-side copy `/volume1/docker/openwebui/config/hermes_coding_api_key`
+- Create: the key's container-side copy `/volume1/docker/openwebui/config/hermes_coding_api_key`
+  (↔ `/app/backend/data/hermes_coding_api_key`), staged through the container — Step 3.
+  Its **host-side record is the profile's own `.env`** (Step 3), which is where it is generated.
+  There is deliberately no `~/.hermes/coding_api_key` standalone file: the default profile has no
+  such sibling either (its key lives in `~/.hermes/.env` and is merely *staged* for the container),
+  and nothing in this plan reads a host-side path.
 
 **Interfaces:**
 - Consumes: Task 2's upgraded runtime.
@@ -748,10 +755,20 @@ Expected: `coding_task` listed, enabled. Then:
 ```bash
 CODING_KEY=$(command grep -oP '(?<=API_SERVER_KEY=).*' ~/.hermes/profiles/coding/.env)
 curl -s -H "Authorization: Bearer $CODING_KEY" http://127.0.0.1:8642/p/coding/v1/toolsets \
-  | python3 -c "import json,sys; d=json.load(sys.stdin); names=str(d); print('coding_task present:', 'coding_task' in names); print('terminal present:', 'terminal' in names)"
+  | python3 -c "import json,sys; d=json.load(sys.stdin)['data']; en=[t['name'] for t in d if t.get('enabled')]; print('enabled:', ', '.join(sorted(en))); print('coding_task enabled:', 'coding_task' in en); print('terminal enabled:', 'terminal' in en)"
 ```
 
-Expected: `coding_task present: True`, `terminal present: False`. **This is the check that asserts the isolation is real rather than intended.** If the gateway was already running when the plugin was linked, restart it first (`systemctl --user restart hermes-gateway.service`) — plugin discovery happens at startup.
+Expected: `enabled:` exactly `coding_task, file, memory, session_search, skills, todo, web`, then
+`coding_task enabled: True`, then `terminal enabled: False`. **This is the check that asserts the
+isolation is real rather than intended.** If the gateway was already running when the plugin was
+linked, restart it first (`systemctl --user restart hermes-gateway.service`) — plugin discovery
+happens at startup.
+
+**Do not go back to a substring test on the whole body.** The endpoint enumerates *every* toolset,
+enabled or not, each carrying an `enabled` flag — so `'terminal' in str(d)` is `True` on a correctly
+configured box and can never produce the `False` the old form of this step expected. Read the flag,
+not the name. (Fixed 2026-09-23 after the implementer hit exactly this on the live gateway and
+correctly reported it rather than editing the profile config to make it pass.)
 
 - [ ] **Step 7: Commit**
 
@@ -1568,8 +1585,8 @@ it as a security finding, not a configuration nuisance.
 - [ ] **Step 4: One scheduled coding job, delivered** (Review Focus #5)
 
 ```bash
-hermes -p coding cron create --name "coding smoke test" --schedule "*/5 * * * *" \
-  --prompt "Reply with exactly: LOG: coding profile job fired" 2>&1 | tail -5
+hermes -p coding cron create --name "coding smoke test" "*/5 * * * *" \
+  "Reply with exactly: LOG: coding profile job fired" 2>&1 | tail -5
 ```
 
 Wait one cadence, then check that it fired, that the output landed in the profile's own root, and

@@ -79,11 +79,11 @@ URL = "https://shop.example.com/cat-board"
 
 
 def main():
-    pw = load("/home/ohmz/ai-stack/scripts/price_watch.py", "pw")
-    hd = load("/home/ohmz/ai-stack/scripts/hermes_delivery.py", "hd")
-    at = load("/home/ohmz/ai-stack/scripts/alert_templates.py", "at")
-    tr = load("/home/ohmz/ai-stack/scripts/alert_transports.py", "tr")
-    ps = load("/home/ohmz/ai-stack/scripts/price_search.py", "ps")
+    pw = load("/home/ohmz/StudioProjects/ai-stack/scripts/price_watch.py", "pw")
+    hd = load("/home/ohmz/StudioProjects/ai-stack/scripts/hermes_delivery.py", "hd")
+    at = load("/home/ohmz/StudioProjects/ai-stack/scripts/alert_templates.py", "at")
+    tr = load("/home/ohmz/StudioProjects/ai-stack/scripts/alert_transports.py", "tr")
+    ps = load("/home/ohmz/StudioProjects/ai-stack/scripts/price_search.py", "ps")
     pw.STATE_DIR = tempfile.mkdtemp()
 
     clock = [1_700_000_000.0]
@@ -424,7 +424,7 @@ def main():
     check("...in exactly one LOG line", len(logs(out)) == 1, out)
 
     print("--- the fixture and the forwarding cannot drift ---")
-    src = open("/home/ohmz/ai-stack/scripts/price_watch.py").read()
+    src = open("/home/ohmz/StudioProjects/ai-stack/scripts/price_watch.py").read()
     flags = {m.replace("-", "_") for m in re.findall(r'add_argument\("--([a-z-]+)"', src)}
     check("every price_watch flag exists on the local fixture",
           not (flags - set(Args().__dict__) - {"selftest"}),

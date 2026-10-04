@@ -22,17 +22,50 @@
 # A small curated set means each engine sees far fewer requests, so normal interactive use stays well
 # under their thresholds. Note a CAPTCHA block lasts ~3600 s, not the 180 s of a plain rate-limit.
 #
+# RE-MEASURED 2026-09-29, because chat search had quietly become BING-ONLY. Per engine
+# (&engines=NAME, 5 varied queries) on the 2026.7.25 image this file ran until then: bing 5/5,
+# duckduckgo CAPTCHA 5/5, mojeek ZERO results 5/5 with NO error flagged (so the canary never counted
+# it), wikipedia/wikidata never in results[]. At 19:17 UTC bing hit ConnectTimeout at the 3.0 s
+# default, the canary query came back empty, and search went DOWN: one engine was the whole roster.
+# The 2026.9.29 image (compose/docker-compose.yml) revives duckduckgo and mojeek — measured
+# interleaved, same IP, same query, seconds apart: old image CAPTCHA / 0 results, new image 10 / 10.
+# Two changes in it fit that: the network layer moved from httpx to curl_cffi with browser TLS
+# impersonation (the likely reason duckduckgo, brave, yahoo and google all recovered at once), and
+# mojeek's proof-of-work CAPTCHA is now solved instead of being parsed as an empty page.
+#
+# Engine rate limits are per SOURCE IP and searxng-hermes (:8889) runs google, brave, mojeek, bing,
+# so an engine added here must not be on that roster, nor the reverse. bing and mojeek are already
+# shared; add no more — tests/test_web_search.py pins the overlap to exactly those two.
+#
 # Health check:
 #   curl -s 'localhost:8888/search?q=test&format=json' \
 #     | python3 -c "import json,sys; print(json.load(sys.stdin)['unresponsive_engines'])"
 use_default_settings:
   engines:
     keep_only:
-      - duckduckgo      # good general coverage; CAPTCHAs only under sustained load
-      - bing            # the most tolerant of server-to-server use from this IP
-      - mojeek          # independent index, no API key, rarely rate-limits
-      - wikipedia       # note: populates infoboxes[], not results[]
-      - wikidata
+      - duckduckgo      # chat-only. CAPTCHA on every request under 2026.7.25, 5/5 under 2026.9.29 —
+                        # mostly, and it depends on the locale. language=all, which OpenWebUI sends
+                        # while its SearXNG-language setting is "all" (as on this host), becomes
+                        # region wt-wt plus "Accept-Language: all,all-ALL" in this engine: CAPTCHA on
+                        # 8 of 11 requests on the new image, against 1 of 17 with en, en-US or no
+                        # language. The canary sends no language (so default_lang "en") and cannot
+                        # see that difference; OpenWebUI's own searches can.
+      - bing            # shared with hermes. 5/5 on both images, and still the one that timed out.
+      - mojeek          # shared with hermes. Independent index. The silent zero was an unsolved
+                        # proof-of-work CAPTCHA page parsing as "no results"; 2026.9.29 solves it.
+      - yandex          # chat-only, added 2026-09-29. Its own crawl, not a Bing/Google reseller;
+                        # 10/10 across BOTH images at ~0.9 s, so unlike duckduckgo it never depended
+                        # on the TLS change. It sees the query text and this host's IP, as bing does.
+      - mwmbl           # chat-only, added 2026-09-29. Non-profit independent index behind an open,
+                        # keyless API; 10/10 across both images at ~0.5 s. Weaker ranking, so it is a
+                        # floor, not a lead: OWUI keeps the top 5 by score, and a URL several engines
+                        # agree on outscores a hit only mwmbl found.
+      - wikipedia       # populates infoboxes[], not results[] (OWUI reads only results[]). Kept for
+                        # the HTML UI; ~0.1 s, so it costs the fan-out nothing.
+      # wikidata DROPPED 2026-09-29: 0 results[] on 10 of 10 probes across both images, up to 2.5 s
+      # (a fan-out finishes when its slowest engine does), and under 2026.9.29 an "unexpected crash"
+      # (TypeError) on 1 query in 5, which lands in unresponsive_engines and spends the canary's
+      # DEGRADED threshold on an engine that never contributed a result.
 
 general:
   debug: false
@@ -58,26 +91,58 @@ search:
     - html
     - json
 
+outgoing:
+  # 5.0, not the 3.0 default — matching searxng-hermes. At 2026-09-29 19:17 UTC bing, then the only
+  # engine returning results, hit ConnectTimeout at 3.0 s and the whole search came back empty. A
+  # fan-out finishes when its slowest engine does, so this is also the worst case a stalled engine
+  # adds to a chat search; per-engine maxima measured on 2026.9.29 are 0.1-1.9 s (mojeek slowest,
+  # it solves a proof-of-work challenge), so healthy searches do not wait on it.
+  request_timeout: 5.0
+
 ui:
   static_use_hash: true
 
 # BOTH directives are required and they do different jobs:
 #   use_default_settings.engines.keep_only (top of file) RESTRICTS which engines exist at all.
-#   this `engines:` list FLIPS THE disabled FLAG on the ones that ship disabled by default.
+#   this `engines:` list FLIPS THE FLAGS on the ones that ship switched off.
 #
 # keep_only alone is not enough, and it fails quietly: bing and mojeek ship `disabled: true`
 # upstream, so keeping them still left them switched off. Verified via /config — with keep_only alone
 # only duckduckgo, wikipedia and wikidata were enabled, i.e. one real web engine and no fallback.
 #
+# There are TWO flags, and they fail differently. `disabled: true` loads the engine but leaves it
+# off. `inactive: true` never loads it at all, so `disabled: false` alone does nothing and the engine
+# is simply missing from /config — clean start, empty logs. The 2026.9.29 image ships mojeek
+# `inactive` (its proof-of-work CAPTCHA costs CPU to solve), so without `inactive: false` below the
+# image bump would have silently dropped mojeek from both instances. Check each roster name's flags
+# in the image's own searx/settings.yml at every bump; the same trap is why google was missing from
+# searxng-hermes from 2026-08-07 to 2026-09-29 (2026.7.25 shipped google `inactive`).
+#
 # Verify after any change:
 #   curl -s localhost:8888/config | python3 -c \
 #     "import json,sys; [print(e['name'], e.get('enabled')) for e in json.load(sys.stdin)['engines']]"
+# Expect exactly the six keep_only names, all True.
 #
-# Deliberately NOT kept: google cse, startpage and brave. All three rate-limited or CAPTCHA-blocked
-# this IP during the audit ("too many requests" / CAPTCHA). Re-add one at a time and watch
-# unresponsive_engines if you want broader coverage.
+# Deliberately NOT kept, measured 2026-09-29 (&engines=NAME, 5 queries per image, 2026.7.25 then
+# 2026.9.29):
+#   google, brave — 5/5 on the new image but hermes-only: sharing them would spend monitors' budget.
+#   startpage — 5/5 on the new image only (it now solves a proof-of-work CAPTCHA, which is why the
+#     image ships it `inactive`), CAPTCHA on the old; a Google reseller, and pinned absent by
+#     tests/test_web_search.py. qwant — CAPTCHA 5/5 on both images.
+#   yahoo, yep, tusksearch, resulthunter — 5/5 on the new image but blocked or broken on the old
+#     ("HTTP protocol error", "access denied"): the same fingerprint dependence that killed
+#     duckduckgo, and resulthunter took up to 3.2 s.
+#   duckduckgo web — 10/10 on both, but it is duckduckgo's upstream again at two requests a query.
+#   zapmeta — 10/10 on both, always exactly 9 rows from an xpath scraper; no index of its own.
+#   dogpile, fireball, privacywall — "access denied" on both. crowdview 2/10, encyclosearch 8/10
+#     from a small wiki index, quark crashes on 5 of 10.
 engines:
   - name: bing
     disabled: false
   - name: mojeek
+    disabled: false
+    inactive: false
+  - name: yandex
+    disabled: false
+  - name: mwmbl
     disabled: false

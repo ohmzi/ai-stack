@@ -361,17 +361,86 @@ container **recreated** rather than restarted — the `--force-recreate` on 2026
 the file had been reloaded and the roster was still wrong for some other reason.
 
 Nothing in that settings file fails loudly: a wrong roster starts clean, exit 0, empty logs. So verify
-against the live instance, not the file:
+against the live instance, not the file. The script that used to do this (`scripts/flight_probe.py
+--stack`) went with the scraping stack in `8f16fb2`; the live half is one line:
 
 ```bash
-python3 scripts/flight_probe.py --stack      # Phase 0 only; zero site traffic
+curl -s 127.0.0.1:8889/config | python3 -c "import sys,json; print(sorted(e['name'] for e in json.load(sys.stdin)['engines'] if e.get('enabled')))"
 ```
 
-`probe_stack()` does the three-way check by itself — `web_search.ENGINE_ORDER` vs `settings.yml`'s
-`keep_only` vs the live `127.0.0.1:8889/config` — and reports `missing_from_live` and
-`unexpected_in_live` as separate fields, because they are different bugs: an addition that never
-landed versus a removal that never landed. `tests/test_web_search.py` catches neither; it pins the two
-declarations to each other and neither to the live instance.
+Compare it both ways with `web_search.ENGINE_ORDER` and the file's `keep_only`, because the two
+directions are different bugs: an engine missing from live is an addition that never landed, one
+unexpected in live is a removal that never landed. google was the first kind until 2026-09-29: the
+2026.7.25 image shipped it `inactive: true`, which no `disabled: false` overrides. An image bump is
+the usual cause, since each image ships its own `disabled`/`inactive` defaults (2026.9.29 marks mojeek
+inactive). `tests/test_web_search.py` catches neither direction; it pins the declarations to each
+other and neither to the live instance, and nothing compares them with the live rosters
+automatically.
+
+## A search-canary text, and how to read its journal (2026-09-29)
+
+**Symptom.** A text and email headed `[stack] Web search (chat) DOWN: 0 results for 'wikipedia'`, or
+the same for `Monitor search (background jobs)`, or an email-only `DEGRADED`. It comes from
+`scripts/search_canary.py`, run every 30 minutes by `search-canary.timer`.
+
+### What it probes
+
+One check per instance: chat's `searxng` on `:8888` (`SEARXNG_URL`) and the monitors'
+`searxng-hermes` on `:8889` (`SEARXNG_HERMES_URL`). A probe is one
+`GET /search?q=wikipedia&format=json` (20 s timeout), plus one `GET /config` per instance per run for
+the enabled engines, which SearXNG answers locally (measured 1.3 ms, ~11 KB) without querying
+anything upstream. The `:8889` probe names `engines=bing,mojeek` only. Probing that whole roster kept
+google CAPTCHA-suspended all evening on 2026-09-29: `docker logs searxng-hermes` has one
+`CAPTCHA (suspended_time=3600)` an hour, each on the second of a canary run, and the canary was that
+instance's only client. So `:8889` cannot go DEGRADED, and this check says nothing about google or
+brave.
+
+- **DOWN**: unreachable, not JSON, fewer than 3 results, or no verdict within the run's 200 s budget.
+- **DEGRADED**: results came back, but 3 or more *distinct* engines are in `unresponsive_engines`.
+  SearXNG can list one twice; on 2026-09-28 "duckduckgo, mojeek, mojeek" was counted as three and
+  sent a DEGRADED for a two-engine blip, so names are deduplicated before counting.
+
+### When it alerts
+
+Until 2026-09-29 16:56 the canary watched chat only and alerted on every ok/non-ok flip: 22 alerts
+in 8 days, each a text and an email, for 11 outages of which 8 were a single probe already healthy
+30 minutes later. Now, through `scripts/health_alert.py`:
+
+1. **In the run**, a failed probe is repeated twice more, 60 s apart. An ok probe never is.
+2. **Across runs**, DOWN or DEGRADED goes out only on the second non-ok run, about 30 minutes after
+   the first failed probe, and only 2 ok runs in a row end an outage. Replaying the 8 days above
+   gives 8 notifications for 4 real outages instead of 22. A recovery is sent only for an outage
+   that was alerted, one run after the first good probe.
+3. A reboot, or more than 90 minutes since the last run started, restarts a streak that has not
+   alerted yet.
+4. Still down 24 hours after the alert: one reminder a day.
+5. Two runs in a row killed by systemd (`TimeoutStartSec=300`) send `Search canary runs DOWN`. The
+   unit has no `OnFailure=`, so a killed run would otherwise be silent.
+
+### Reading `journalctl --user -u search-canary`
+
+Every run logs one verdict per instance. Other lines appear only when something happened:
+
+```text
+[search-canary] OK: Web search (chat) @ 127.0.0.1:8888: 135 results, 0 engine(s) down (none)
+[search-canary] retry: Web search (chat) attempt 1/3 DOWN: 0 results for 'wikipedia' (unresponsive: bing (timeout); no results: mojeek); again in 60s
+[search-canary] DOWN: Web search (chat) @ 127.0.0.1:8888: query 'wikipedia' returned 0 results (need 3); engines down: ... (after 3 attempts)
+[search-canary] notify down:search_chat via sms+email sent=True [...]
+```
+
+- `retry:` followed by an `OK` verdict is a blip the retry absorbed. Nothing was sent.
+- A non-OK verdict with no `notify` line is run 1 of 2. `python3 scripts/search_canary.py --dry-run`
+  probes, says where each streak stands ("non-ok run 1 of the 2 needed before alerting"), and sends
+  and saves nothing.
+- `sent=False` means the message is still owed: nothing is marked delivered, the unit exits 1 (so it
+  shows in `systemctl --user --failed`), and the next run sends it again.
+- `no results: <engine>` names engines that were enabled but answered with nothing and flagged no
+  error, which is how mojeek failed on every probe on the 2026.7.25 image.
+- `restarted the unalerted streak`, `did not finish (killed at TimeoutStartSec`, `another run is in
+  progress` and `holding back` are the reboot or gap, killed-run, lock and unsaveable-state cases.
+  State is `~/.hermes/search_canary_state.json`.
+
+Lines before 2026-09-29 16:56 are the old canary, with an `alert sent=` line after every flip.
 
 ## LAN exposure — the deliberate list (2026-08-01)
 
@@ -384,6 +453,25 @@ is. Reviewed once, deliberately, rather than closed ad hoc:
 | OpenWebUI `4567` | **Kept on `0.0.0.0`** — owner decision, LAN devices open it directly. Public signup is also deliberately left **open**. Recorded in `compose/openwebui/run.sh`. |
 | host `redis-server *:6379` | **Left as-is, flagged.** Not a container (`/usr/bin/redis-server`, pid on the host, no systemd unit found). It answers from the LAN IP with `-DENIED … protected mode`, so it refuses commands without a password — and every established client is `127.0.0.1`. Binding it to loopback would therefore break nothing observed, but it is not part of this stack, so it is the owner's call. |
 | `hermes_api_key` | **Fixed** — was `0644` (any local user could read the key that authenticates to the agent gateway). Now `0640 root:ohmz` — world-read removed, owner and the uid-0 container both still read it. (0600 also works for the container but locks the owner out of host-side debugging for no gain.) |
-| cloudflared token | **Flagged, not moved.** Visible in `ps aux`, so any local user can read the tunnel credential. Fixing means reconfiguring a working tunnel to use a credentials file — worth doing, but not worth breaking remote access unattended. |
+| cloudflared token | **Fixed 2026-09-14.** It was on the `ExecStart` command line, and `/proc/<pid>/cmdline` is world-readable, so any local user could read the tunnel credential in `ps aux`. The unit now loads it from `EnvironmentFile=/etc/cloudflared/cloudflared.env` (`0600 root:root`) and runs `cloudflared --no-autoupdate tunnel run` with no token argument; `/proc/<pid>/environ` is `0400`, root only. Checked with `ps` on 2026-09-29. |
+| Ollama `*:11434` | **Open on every interface since 2026-09-18, fenced by ufw.** `/etc/systemd/system/ollama.service.d/host-binding.conf` sets `OLLAMA_HOST=0.0.0.0:11434` so containers can reach it, and Ollama has no auth. It is a host process, not a Docker-published port, so here ufw is the control: `INPUT` defaults to `DROP`, and 11434 is open only to `192.168.224.0/20` (`open-notebook_default`) and `10.99.0.0/24` (`deploy_default`, omnivoice-studio). The LAN is not on that list, and neither is the public instance's bridge: `172.16.240.1:11434` answers `000` from inside `open-webui-public`, while its `:11435` pinhole answers 200 (2026-09-30). The Cloudflare tunnel does get past this fence; see `ollama.ohmzhomelab.ca` below. |
+| OpenWebUI data dir `/volume1/docker/openwebui/config` | **Fixed 2026-09-29.** It was `755 root:root`, with `webui.db*` (every chat and the user table) and `alerts/contacts.json` (the opt-in phone numbers) at `644` and `.gpu.lock` at `666`, so any local user could read all of it and write the lock. Now the directory is `750 root:ohmz`, `webui.db*`, `webui.db.bak-x-batch` and `alerts/contacts.json` are `640 root:ohmz`, and `.gpu.lock` is `660`. The directory mode is the control that lasts: SQLite recreates `-wal`/`-shm` with the container's `0644` umask, and `uploads/` and `vector_db/` sit behind it too. The container runs as root and the host-side readers as `ohmz`, so both keep access. The two `contacts.json` writers (the pipe and `scripts/alert_transports.py`) give each replacement file the old one's mode and group, so a save does not reopen it. |
+| Still world-readable | **Flagged, owner's call.** `/volume1/docker/openwebui/pre-reset-backup-20260716-195349/webui.db*` (`644 root:root` under `755` directories), a 2026-07-16 copy of the private instance's database, and `/volume1/docker/openwebui-public/config` (`755 ohmz:ohmz`, `webui.db*` at `644`), the public instance's guest chats. Checked 2026-09-30. |
 
 The `~/.hermes/.env` (which holds the real gateway secret) was already `0600`.
+
+### Public hostnames that are still open (verified 2026-09-29 and 2026-09-30)
+
+These are routes on the host's one tunnel (`cloudflared.service`), set in the Zero Trust dashboard:
+the tunnel is token-based, so there is no local ingress file. The tunnel reaches each service from the host itself, so ufw never
+sees the traffic and the bind address does not matter. The tunnel's last `Updated to new
+configuration` line in `journalctl -u cloudflared` maps `ollama` to `localhost:11434`, `notebook`
+to `localhost:8502` and `seerr` to `localhost:5055`. All three answered anonymous requests from the
+internet with HTTP 200 on both days. **Each is waiting on the owner's change in the Cloudflare
+dashboard**: delete the public hostname, or put an Access policy in front of it.
+
+| Hostname | What answers |
+|---|---|
+| `ollama.ohmzhomelab.ca` | **OPEN.** The Ollama API with no authentication: `GET /` returns `Ollama is running` and `/api/version` returns 200. Anyone who finds the name can run generation on the GPU and pull or delete models. |
+| `notebook.ohmzhomelab.ca` | **OPEN.** Open Notebook's frontend on `:8502`, and Open Notebook has no password: `/api/notebooks` returns 200 JSON to an anonymous request. Its ports `5055` and `8502` are also Docker-published on `0.0.0.0`, which ufw does not filter, so the LAN can reach it too. |
+| `seerr.ohmzhomelab.ca` | **OPEN, and misrouted.** It answers `{"message":"Open Notebook API is running"}`: the route points at Open Notebook's API on `:5055`, one port off Seerr on `:5056`. So it is a second public door to the passwordless notebook API (`/api/notebooks` returns 200 there too), and Seerr cannot be reached at its own name. |

@@ -45,8 +45,8 @@ BASE = {"to": "ohmz", "item": "Zakkart 2-Pack Cat Scratching Board", "unit": "$"
 
 
 def main():
-    t = load("/home/ohmz/ai-stack/scripts/alert_templates.py", "tpl")
-    at = load("/home/ohmz/ai-stack/scripts/alert_transports.py", "at")
+    t = load("/home/ohmz/StudioProjects/ai-stack/scripts/alert_templates.py", "tpl")
+    at = load("/home/ohmz/StudioProjects/ai-stack/scripts/alert_transports.py", "at")
 
     print("--- the item names itself from the page title ---")
     # Retail titles are keyword soup written for search, not for a lock screen. The useful name is

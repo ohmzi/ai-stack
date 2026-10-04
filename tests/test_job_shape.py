@@ -32,7 +32,7 @@ Usage:  python3 tests/test_job_shape.py [pipe_path]
 import importlib.util
 import sys
 
-PIPE = sys.argv[1] if len(sys.argv) > 1 else "/home/ohmz/ai-stack/pipes/live/auto_assistant.py"
+PIPE = sys.argv[1] if len(sys.argv) > 1 else "/home/ohmz/StudioProjects/ai-stack/pipes/live/auto_assistant.py"
 spec = importlib.util.spec_from_file_location("aa_shape", PIPE)
 mod = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(mod)
@@ -67,14 +67,14 @@ REAL = {"id": "4df0ab5bed14", "name": "Toronto-Astana Flight Tracker",
 # What rule 5d-ii is supposed to produce instead. Its whole contract is "add nothing".
 VETTED = {"id": "52f821a8d3a2", "name": "YTO-YVR Flight Price Watch ($1000)", "deliver": "local",
           "prompt": ("Run this terminal command and print its output verbatim as your entire "
-                     "response. Add nothing.\npython3 /home/ohmz/ai-stack/scripts/price_watch.py "
+                     "response. Add nothing.\npython3 /home/ohmz/StudioProjects/ai-stack/scripts/price_watch.py "
                      "--url 'https://example.com/x' --state 'yto_yvr' --below 1000 "
                      "--alert-to ohmz --kind fare --monitor 'YTO-YVR' --schedule 'every 15m'")}
 
 # A hand-written job that obeys the brief: bounded prompt, protocol tail, local delivery.
 GOOD = {"id": "aaaaaaaaaaaa", "name": "book price", "deliver": "local",
         "prompt": ("Fetch https://books.toscrape.com/ and extract the price of the first book "
-                   "inside one execute_code call.\n\nFinish with:\nLOG: <summary>\n"
+                   "inside one python3 terminal command.\n\nFinish with:\nLOG: <summary>\n"
                    "ALERT(ohmz): <what happened>")}
 
 
@@ -253,7 +253,7 @@ print("--- a stored command argparse will reject (job e6df1739a275, 2026-08-09) 
 # defines no positional arguments, so argparse exits 2 before the script checks anything: every
 # run fails, with no LOG line, for a reason none of the other three checks looks at.
 LIVE = ("Run this terminal command and print its output verbatim as your entire response. Add "
-        "nothing.\n\npython3 /home/ohmz/ai-stack/scripts/price_search.py --query 'Toronto "
+        "nothing.\n\npython3 /home/ohmz/StudioProjects/ai-stack/scripts/price_search.py --query 'Toronto "
         "Vancouver flights October November 2026 roundtrip' --state yto_yvr_oct_nov2026 --below "
         "1000 --alert-to ohmzaiowui --kind fare --monitor YTO\u2192YVR fare watch --schedule "
         "'every 1d' --unit CAD")
@@ -281,7 +281,7 @@ check("an --flag=value form is understood",
 # The boundary: repair only where the reading is forced. Strays after an unknown flag could belong
 # anywhere, so they are reported for the user to cancel rather than re-joined by guess.
 odd = {"id": "y", "deliver": "local",
-       "prompt": "python3 /home/ohmz/ai-stack/scripts/price_watch.py --url https://x --weird a b"}
+       "prompt": "python3 /home/ohmz/StudioProjects/ai-stack/scripts/price_watch.py --url https://x --weird a b"}
 _pa, _fx, _st = P._job_patch(odd, "u")
 check("strays after an UNKNOWN flag are reported, never re-joined",
       [d[0] for d in _st] == ["argv"] and not _fx, (_fx, _st))
@@ -289,6 +289,43 @@ check("a non-vetted prompt is never argv-checked at all",
       P._job_stray_args("just some prose the agent wrote with stray words")[0] == [])
 check("unbalanced quotes are left alone rather than guessed at",
       P._job_stray_args("python3 /x/scripts/price_watch.py --monitor 'unclosed")[0] == [])
+
+print("--- a page address the scheduled run's guard refuses is reported, never repaired ---")
+# Measured 2026-09-30 through hermes's real cron guard: a vetted price_watch.py command on a bit.ly
+# or tinyurl link is BLOCKED on every run ("Shortened URL detected"), and so is the rule-5a curl
+# shape, while the job itself was created and passed every check here. a.co and amzn.to pass.
+HDR = ("Run this terminal command with the terminal tool's timeout set to 300 (timeout=300) and "
+       "print its output verbatim as your entire response. Add nothing.\n")
+short = {"id": "5h0r7ened001", "deliver": "local",
+         "prompt": HDR + "python3 /home/ohmz/StudioProjects/ai-stack/scripts/price_watch.py --url "
+                         "'https://bit.ly/3XyZabc' --state 'rtx' --below 50 --alert-to ohmz "
+                         "--kind price_drop --monitor 'RTX watch' --schedule 'every 6h'"}
+check("a vetted command on a bit.ly link is a url defect", codes(short) == ["url"], codes(short))
+text, api = enforce([short])
+check("...reported as unfixable, naming the shortener and the way out",
+      "could not fix" in text and "bit.ly" in text and "full page address" in text
+      and "cancel 5h0r7ened001" in text, text)
+check("...and nothing is PATCHed: which page was meant is not the pipe's to guess",
+      api.calls == [], str(api.calls))
+for url in ("https://tinyurl.com/2p8abcde", "https://xn--80ak6aa92e.com/p",
+            "https://93.184.216.34/p", "https://www.shop.zip/p"):
+    j = dict(short, prompt=short["prompt"].replace("https://bit.ly/3XyZabc", url))
+    check(f"...and so is {url}", codes(j) == ["url"], codes(j))
+for url in ("https://a.co/d/3xYzAbC", "https://amzn.to/3XyZabc", "https://www.amazon.ca/dp/B0"):
+    j = dict(short, prompt=short["prompt"].replace("https://bit.ly/3XyZabc", url))
+    check(f"a full or guard-approved address is clean: {url}", codes(j) == [], codes(j))
+curl_job = {"id": "cur1short001", "deliver": "local",
+            "prompt": "Run: curl -sL --max-time 60 'https://bit.ly/3XyZabc' | grep -oE "
+                      "'[0-9]+' | head -n 5\nLOG: <price>"}
+check("an agent-authored curl on a shortener is caught too", "url" in codes(curl_job),
+      codes(curl_job))
+prose = dict(curl_job, prompt="Background: https://bit.ly/x\nRun: curl -sL "
+                              "'https://www.amazon.ca/dp/B0' | grep -oE '[0-9]+' | head\nLOG: x")
+check("...but a URL in prose, not on the curl line, is not", "url" not in codes(prose),
+      codes(prose))
+check("a vetted command's decoy URL elsewhere in the prompt is ignored",
+      codes(dict(short, prompt="see https://bit.ly/x\n" + short["prompt"].replace(
+          "https://bit.ly/3XyZabc", "https://www.amazon.ca/dp/B0"))) == [])
 
 print("--- a job with no id still produces readable text rather than raising ---")
 text, _ = enforce([{"deliver": "origin", "prompt": "Fetch it."}])

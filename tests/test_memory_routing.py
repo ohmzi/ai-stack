@@ -24,8 +24,8 @@ Usage:  python3 tests/test_memory_routing.py [pipe_path]
 """
 import importlib.util, os, re, sqlite3, sys
 
-PIPE_PATH = sys.argv[1] if len(sys.argv) > 1 else "/home/ohmz/ai-stack/pipes/live/auto_assistant.py"
-FILTER_PATH = "/home/ohmz/ai-stack/filters/adaptive_memory.py"
+PIPE_PATH = sys.argv[1] if len(sys.argv) > 1 else "/home/ohmz/StudioProjects/ai-stack/pipes/live/auto_assistant.py"
+FILTER_PATH = "/home/ohmz/StudioProjects/ai-stack/filters/adaptive_memory.py"
 DB = "/volume1/docker/openwebui/config/webui.db"
 
 spec = importlib.util.spec_from_file_location("aa_mem", PIPE_PATH)

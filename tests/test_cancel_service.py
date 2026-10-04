@@ -52,14 +52,14 @@ SECRET = "e" * 64
 JID, JID2, JID3 = "ae57d3973b9f", "beef00112233", "cafe44556677"
 NAME = "YTO->YVR fare watch under $1,000"
 PROMPT = ("Run this terminal command and print its output verbatim.\n"
-          "python3 /home/ohmz/ai-stack/scripts/flightclaw_watch.py "
+          "python3 /home/ohmz/StudioProjects/ai-stack/scripts/flightclaw_watch.py "
           "--route-id YYZ-YVR-2026-10-02-RT-2026-11-02 --state fc-yyz-yvr "
           "--alert-to ohmz --below 1000 --monitor 'fare watch' --schedule 'every 15m'")
 
 
 def main():
-    cs = load("/home/ohmz/ai-stack/scripts/cancel_service.py", "cs")
-    ct = load("/home/ohmz/ai-stack/scripts/cancel_tokens.py", "ct")
+    cs = load("/home/ohmz/StudioProjects/ai-stack/scripts/cancel_service.py", "cs")
+    ct = load("/home/ohmz/StudioProjects/ai-stack/scripts/cancel_tokens.py", "ct")
 
     d = tempfile.mkdtemp()
     out_dir = os.path.join(d, "output")

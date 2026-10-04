@@ -62,9 +62,9 @@ def main():
     json.dump({"channels": ["sms", "email"], "sms_from": "relay@gmail.com",
                "sms_gateway": "msg.telus.com"}, open(profile, "w"))
 
-    mod = load("/home/ohmz/ai-stack/pipes/live/auto_assistant.py", "aa",
+    mod = load("/home/ohmz/StudioProjects/ai-stack/pipes/live/auto_assistant.py", "aa",
                ALERT_CONTACTS=contacts, ALERT_PROFILE=profile)
-    at = load("/home/ohmz/ai-stack/scripts/alert_transports.py", "at")
+    at = load("/home/ohmz/StudioProjects/ai-stack/scripts/alert_transports.py", "at")
     p = mod.Pipe()
 
     print("--- alert intent is detected, ordinary tasks are not gated ---")
@@ -143,8 +143,16 @@ def main():
         return go()
     p._hermes_stream = fake_stream
 
+    # The live file is 0640 with group ohmz; a save from chat must not widen it back to 0644.
+    os.chmod(contacts, 0o640)
+    gid_before = os.stat(contacts).st_gid
     out = drain(p._phone_reply("514-555-0123", "ohmz", parked, CID))
     check("confirms the saved number", "✅ Saved" in out and "514-555-0123" in out, out)
+    st = os.stat(contacts)
+    check("the pipe's save keeps contacts.json at 0640 and its group",
+          (st.st_mode & 0o777) == 0o640 and st.st_gid == gid_before,
+          f"mode={oct(st.st_mode & 0o777)} gid={st.st_gid} (was {gid_before})")
+    check("...and leaves no .tmp behind", not os.path.exists(contacts + ".tmp"))
     check("the parked request is what got delegated", sent.get("text") == parked, repr(sent))
     check("creation is still verified", sent.get("verify") is True, repr(sent))
     check("...and the ownership scope is carried across the phone turn",
@@ -152,6 +160,31 @@ def main():
     saved = json.load(open(contacts))
     check("number persisted in E.164", saved["ohmz"]["phone"] == "+15145550123", repr(saved))
     check("existing email was not clobbered", saved["ohmz"]["email"] == "o@gmail.com", repr(saved))
+    # The host-side writer, on the same (temp) file: ALERT_CONTACTS above points it there too.
+    check("setup: alert_transports writes the temp contacts file, not the live one",
+          at.CONTACTS == contacts, at.CONTACTS)
+    if at.CONTACTS == contacts:
+        ok, note = at.save_contact("ohmz", email="o@gmail.com")
+        st = os.stat(contacts)
+        check("alert_transports.save_contact also keeps 0640 and the group",
+              ok and (st.st_mode & 0o777) == 0o640 and st.st_gid == gid_before,
+              f"{note} mode={oct(st.st_mode & 0o777)} gid={st.st_gid}")
+    # The mode is COPIED, not forced: after rollback-item21.sh puts the file back to 0644
+    # root:root, forcing 0640 onto root's group would lock the host transports out of it.
+    os.chmod(contacts, 0o644)
+    p._save_phone("ohmz", "+15145550123")
+    check("a 0644 file stays 0644 (copied, never narrowed onto a group the reader lacks)",
+          (os.stat(contacts).st_mode & 0o777) == 0o644, oct(os.stat(contacts).st_mode & 0o777))
+    os.chmod(contacts, 0o640)
+    fresh = os.path.join(tmp, "fresh", "contacts.json")
+    os.makedirs(os.path.dirname(fresh))
+    tmpf = fresh + ".tmp"
+    open(tmpf, "w").write("{}")
+    p._keep_private(tmpf, fresh)
+    st = os.stat(tmpf)
+    check("a first-ever file is 0640 with its directory's group",
+          (st.st_mode & 0o777) == 0o640 and st.st_gid == os.stat(os.path.dirname(fresh)).st_gid,
+          oct(st.st_mode & 0o777))
 
     print("--- a junk number is rejected where it was typed, not at 3am ---")
     out = drain(p._say(""))  # warm-up, keeps the helper exercised

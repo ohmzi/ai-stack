@@ -363,7 +363,7 @@ nothing for the actual conversation. The first real turn overflows, and Ollama a
 
 **The tag:** `qwen38-coder:q4-128k`, built with
 `ollama create qwen38-coder:q4-128k -f models/qwen38-coder-128k.Modelfile`
-(`/home/ohmz/ai-stack/harness/deepseek/models/qwen38-coder-128k.Modelfile`). It is
+(`/home/ohmz/StudioProjects/ai-stack/harness/deepseek/models/qwen38-coder-128k.Modelfile`). It is
 `FROM qwen38-coder:q4` with a single override, `PARAMETER num_ctx 131072`, so it inherits that tag's
 template and its pinned non-thinking sampling profile (temp 0.7 / top_p 0.8 / top_k 20 /
 `repeat_penalty` 1.0, and `presence_penalty` 1.0 — which the base tag deliberately sets *below*

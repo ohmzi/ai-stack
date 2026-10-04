@@ -2,7 +2,8 @@
 #
 # deepseek -- launch Claude Code against a backend you can switch mid-session.
 #
-#   deepseek                    DeepSeek cloud API (default)
+#   deepseek                    DeepSeek cloud API (default); no local traffic
+#   deepseek --cloud            the same thing, kept for muscle memory
 #   deepseek --local            local Qwen 3.8 on the RTX 3090
 #   deepseek --model NAME       any routable model name
 #   deepseek --status           router health and backend reachability
@@ -13,8 +14,10 @@
 #   deepseek --local -p "summarise this repo"
 #   deepseek --continue
 #
-# Inside a session, /model switches backend live: 'opus' is the cloud API,
-# 'sonnet' is the local Qwen, 'haiku' is a fast local model for background work.
+# The alias slots follow the main model's backend, so a cloud session never talks
+# to the local models at all. 'opus' is always the cloud API. In a --local session
+# 'sonnet' is the local Qwen -- the live /model switch -- 'haiku' is a fast local
+# model for background work, and 'opus' is the way back out to the cloud.
 #
 set -euo pipefail
 
@@ -46,8 +49,9 @@ BASE_URL="http://${ROUTER_HOST}:${ROUTER_PORT}"
 # secrets.env is SOURCED below, so it overwrites an ambient variable of the same
 # name rather than losing to it. The file therefore wins over the shell, which is
 # the opposite of what "environment beats file" intuition suggests. It only matters
-# when both places set the same variable; on this host secrets.env does not exist
-# and the token arrives from ~/.bashrc.
+# when both places set the same variable. On this host the token lives only in
+# secrets.env (mode 600, DEEPSEEK_API_TOKEN); ~/.bashrc stopped exporting it on
+# 2026-09-21, so the file is the sole source.
 # shellcheck disable=SC1090
 [[ -r "$SECRETS" ]] && source "$SECRETS"
 AUTH_TOKEN="${DEEPSEEK_API_TOKEN:-${ANTHROPIC_AUTH_TOKEN:-}}"
@@ -98,37 +102,51 @@ case "${1:-}" in
       start_router
     fi
     echo "router restarted on ${BASE_URL}"; exit 0 ;;
-  --help|-h) sed -n '3,19p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+  --help|-h)
+    # Print the header comment block (line 3 until the first non-comment line).
+    # Deliberately not a hardcoded range: that silently truncates the help text
+    # every time the header grows.
+    awk 'NR > 2 && /^#/ { sub(/^# ?/, ""); print; next } NR > 2 { exit }' "$0"
+    exit 0 ;;
 esac
 
 MODEL="$CLOUD_MODEL"
-CLOUD_ONLY=0
 case "${1:-}" in
   --local)   MODEL="$LOCAL_MODEL"; shift ;;
-  --cloud)   MODEL="$CLOUD_MODEL"; CLOUD_ONLY=1; shift ;;
+  --cloud)   MODEL="$CLOUD_MODEL"; shift ;;
   --model)   [[ -n "${2:-}" ]] || die "--model needs a name"; MODEL="$2"; shift 2 ;;
 esac
 
 command -v claude >/dev/null 2>&1 || die "claude not found on PATH"
 ensure_router
 
+# Everything below keys off which upstream the chosen model resolves to, rather
+# than off the --local/--cloud flags, so it stays right for `--model ANYTHING`
+# and for a router.json that renames its providers.
+CLOUD_PROVIDER="$(python3 "$ROUTER_PY" --provider "$CLOUD_MODEL" 2>/dev/null)"
+PROVIDER="$(python3 "$ROUTER_PY" --provider "$MODEL" 2>/dev/null)"
+[[ -n "$PROVIDER" ]] || die "router could not resolve a provider for '$MODEL'"
+
 # A local backend needs two things spelled out that a cloud one doesn't: its real
 # context window (Claude Code otherwise assumes 200k and over-fills the request,
 # which a 32K model answers with an error) and no idle timeout (a 27B model can
-# pause for minutes between chunks while it loads into VRAM).
-# The context window is read ONCE, at launch, but /model can switch backends at any
-# time. So advertise the LOCAL window by default: it is the smaller of the two
-# backends' windows, which keeps a mid-session switch to a local model safe. Giving
-# the session a larger window than the backend actually has hands the local model a
-# prompt it answers with a hard 400 ("exceeds the available context size").
-#
-# `--cloud` opts out and lets the cloud model keep its full window -- do not switch
-# a --cloud session to a local model, or the next long turn will overflow.
-LOCAL_WINDOW="$(python3 "$ROUTER_PY" --window "$LOCAL_MODEL" 2>/dev/null)"
-if [[ "$CLOUD_ONLY" != "1" && -n "$LOCAL_WINDOW" ]]; then
-  export CLAUDE_CODE_MAX_CONTEXT_TOKENS="$LOCAL_WINDOW"
-  # A 27B model can pause for minutes between chunks while loading into VRAM.
-  export API_FORCE_IDLE_TIMEOUT=0
+# pause for minutes between chunks while it loads into VRAM). The window is read
+# ONCE, at launch, so it is only safe to advertise the small one when the small
+# model is what the session is actually on -- a cloud session keeps the window its
+# model really has.
+if [[ "$PROVIDER" != "$CLOUD_PROVIDER" ]]; then
+  LOCAL_WINDOW="$(python3 "$ROUTER_PY" --window "$MODEL" 2>/dev/null)"
+  if [[ -n "$LOCAL_WINDOW" ]]; then
+    export CLAUDE_CODE_MAX_CONTEXT_TOKENS="$LOCAL_WINDOW"
+    # A 27B model can pause for minutes between chunks while loading into VRAM.
+    export API_FORCE_IDLE_TIMEOUT=0
+  fi
+else
+  # Unset rather than merely not setting. A cloud session launched from a shell
+  # that already carries a local session's cap -- a nested shell, or Claude Code's
+  # own Bash tool inside a --local session -- would otherwise inherit it and lose
+  # most of the cloud model's window.
+  unset CLAUDE_CODE_MAX_CONTEXT_TOKENS API_FORCE_IDLE_TIMEOUT
 fi
 
 # Override the ambient DeepSeek-cloud exports for this process only.
@@ -136,7 +154,36 @@ export ANTHROPIC_BASE_URL="$BASE_URL"
 export ANTHROPIC_AUTH_TOKEN="${AUTH_TOKEN:-router-local}"
 export ANTHROPIC_MODEL="$MODEL"
 export ANTHROPIC_DEFAULT_OPUS_MODEL="$CLOUD_MODEL"
-export ANTHROPIC_DEFAULT_SONNET_MODEL="$LOCAL_MODEL"
-export ANTHROPIC_DEFAULT_HAIKU_MODEL="$FAST_MODEL"
 
-exec claude "$@"
+# The alias slots are not spare copies of ANTHROPIC_MODEL: they are what Claude Code
+# resolves its *other* traffic through -- background chores, session titles, the
+# auto-mode classifier, subagents. Left pointing at the local tags in a cloud
+# session they silently put all of it on the 3090 (measured 2026-09-24: 2.3k calls
+# at a ~29k-token prefill each, GPU pinned at 99%, 383W, while the session model was
+# cloud). So they follow the main model's provider. A cloud session then never
+# touches the local backend at all; a local session keeps the live `/model sonnet`
+# switch, with `opus` as the way back out to the cloud.
+if [[ "$PROVIDER" == "$CLOUD_PROVIDER" ]]; then
+  export ANTHROPIC_DEFAULT_SONNET_MODEL="$CLOUD_MODEL"
+  export ANTHROPIC_DEFAULT_HAIKU_MODEL="$CLOUD_MODEL"
+else
+  export ANTHROPIC_DEFAULT_SONNET_MODEL="$MODEL"
+  export ANTHROPIC_DEFAULT_HAIKU_MODEL="$FAST_MODEL"
+fi
+
+# --model is passed explicitly, not left to ANTHROPIC_MODEL above. Both paths end in
+# the same binary reading the same ~/.claude/settings.json, and `model` there outranks
+# the environment. A `/model` change in a stock `claude` session writes that key, and it
+# would then launch this harness asking for a subscription model the router cannot route.
+# The flag sits before "$@" so an explicit `deepseek --model NAME` still wins.
+#
+# Host-auth variables are dropped before exec, and this is a credential fix, not tidying.
+# A shell spawned by Claude Desktop (its Bash tool, a subagent, an embedded terminal)
+# carries CLAUDE_CODE_ENTRYPOINT=claude-desktop, and that one variable makes claude
+# authenticate with the desktop app's claude.ai OAuth bearer instead of AUTH_TOKEN.
+# The router forwards client auth verbatim, so the OAuth token went to api.deepseek.com:
+# 11 requests on 2026-09-29 16:29-16:32, all 401 (bisected to ENTRYPOINT alone; the
+# others are unset too because they belong to the same host-auth handshake).
+unset CLAUDE_CODE_ENTRYPOINT CLAUDE_CODE_SDK_HAS_HOST_AUTH_REFRESH \
+      CLAUDE_CODE_OAUTH_TOKEN CLAUDE_CODE_OAUTH_SCOPES
+exec claude --model "$MODEL" "$@"

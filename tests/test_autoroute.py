@@ -20,7 +20,7 @@ import asyncio, importlib.util, json, sys
 
 argv = [a for a in sys.argv[1:] if a != "--live"]
 LIVE = "--live" in sys.argv
-PIPE_PATH = argv[0] if argv else "/home/ohmz/ai-stack/pipes/live/auto_assistant.py"
+PIPE_PATH = argv[0] if argv else "/home/ohmz/StudioProjects/ai-stack/pipes/live/auto_assistant.py"
 
 spec = importlib.util.spec_from_file_location("aa_autoroute", PIPE_PATH)
 mod = importlib.util.module_from_spec(spec)

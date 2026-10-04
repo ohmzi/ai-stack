@@ -27,7 +27,7 @@ Usage:  python3 tests/test_manage_path.py [pipe_path]
 """
 import asyncio, base64, importlib.util, json, os, sys, tempfile, time
 
-PIPE_PATH = sys.argv[1] if len(sys.argv) > 1 else "/home/ohmz/ai-stack/pipes/live/auto_assistant.py"
+PIPE_PATH = sys.argv[1] if len(sys.argv) > 1 else "/home/ohmz/StudioProjects/ai-stack/pipes/live/auto_assistant.py"
 spec = importlib.util.spec_from_file_location("aa_mng", PIPE_PATH)
 mod = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(mod)
@@ -489,7 +489,7 @@ def main():
           "amazon.ca price monitor" in wout2, wout2[:200])
     # And the guard itself must not mistake the envelope for OpenWebUI's own machinery.
     import importlib.util as _il
-    _msp = _il.spec_from_file_location("ms_t", "/home/ohmz/ai-stack/pipes/shared/media_session.py")
+    _msp = _il.spec_from_file_location("ms_t", "/home/ohmz/StudioProjects/ai-stack/pipes/shared/media_session.py")
     _ms = _il.module_from_spec(_msp); _msp.loader.exec_module(_ms)
     check("a RAG-wrapped user turn is NOT an internal task request",
           not _ms.is_task_request(RAG_ENVELOPE + "list all my task"))
@@ -641,7 +641,7 @@ def main():
     def fc(route_id):
         return {"id": "x", "prompt":
                 "Run this terminal command and print its output verbatim as your entire response. "
-                "Add nothing.\npython3 /home/ohmz/ai-stack/scripts/flightclaw_watch.py "
+                "Add nothing.\npython3 /home/ohmz/StudioProjects/ai-stack/scripts/flightclaw_watch.py "
                 f"--route-id {route_id} --state fc-x --alert-to ohmz "
                 "--below 1000 --monitor 'YYZ→YVR fare watch' --schedule 'every 1d'"}
 
@@ -655,7 +655,7 @@ def main():
           "**one way**" in t and "return" not in t, t)
     check("a quoted route id parses the same",
           "YYZ → YVR" in T({"id": "q", "prompt":
-                            "python3 /home/ohmz/ai-stack/scripts/flightclaw_watch.py "
+                            "python3 /home/ohmz/StudioProjects/ai-stack/scripts/flightclaw_watch.py "
                             "--route-id 'YYZ-YVR-2026-10-02-RT-2026-11-02' --state s"}), "")
     check("a flightclaw command with a malformed route id grows no trip line",
           T({"id": "m", "prompt": "python3 scripts/flightclaw_watch.py --route-id nonsense"})
@@ -665,7 +665,7 @@ def main():
     # cannot have one — and the run refuses (scripts/price_search.py:360) while the confirmation
     # card reads like a working watch.
     dateless = {"id": "ba2a91e18def", "prompt":
-                "python3 /home/ohmz/ai-stack/scripts/price_search.py --query 'Toronto to Vancouver "
+                "python3 /home/ohmz/StudioProjects/ai-stack/scripts/price_search.py --query 'Toronto to Vancouver "
                 "flights' --state 'YYZ-YVR-fare' --below 1000 --alert-to ohmz --kind fare"}
     t = T(dateless)
     check("a fare watch with no itinerary is called out, not left blank",
@@ -681,7 +681,7 @@ def main():
     # flight search page, which is the $358.72 fabrication in docs/TRACKING_ENHANCEMENT.md. The two
     # must therefore read differently, and the --kind must not be what decides.
     mislabelled = {"id": "c9776e4c21f9", "prompt":
-                   "python3 /home/ohmz/ai-stack/scripts/price_search.py --query 'Toronto to "
+                   "python3 /home/ohmz/StudioProjects/ai-stack/scripts/price_search.py --query 'Toronto to "
                    "Vancouver flights' --state 'yyz-yvr-flights' --below 1000 --alert-to ohmz "
                    "--kind price_drop --monitor 'YYZ→YVR Flight Price Watch (Under $1,000)'"}
     t = T(mislabelled)

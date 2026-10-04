@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """The coding_task tool: a bounded capability, not a shell.
 
-Why this file exists. The chat surface must not be able to shell out (auto_assistant.py:25-26).
+Why this file exists. The chat surface must not be able to shell out (docs/HERMES_AGENT.md
+§ Config decisions that are deliberate).
 This tool is the one capability the coding profile gets instead: a FIXED argv that runs the local
 `deepseek` CLI. Everything asserted here is a property that turns "we pass a string to a command"
 into something auditable:
@@ -16,7 +17,7 @@ Usage:  python3 tests/test_coding_task_plugin.py
 """
 import importlib.util, os, sys
 
-PLUGIN = "/home/ohmz/ai-stack/hermes/plugins/coding_task/__init__.py"
+PLUGIN = "/home/ohmz/StudioProjects/ai-stack/hermes/plugins/coding_task/__init__.py"
 
 results = []
 
@@ -79,16 +80,21 @@ def main():
         # The working directory: default root, then an allowlisted repo, then a refusal.
         check("defaults to the first allowlisted root",
               calls["kwargs"].get("cwd") == mod.CODING_TASK_ROOTS[0], repr(calls["kwargs"].get("cwd")))
-        mod._handle_coding_task({"task": "t", "repo": "/home/ohmz/ai-stack"})
+        mod._handle_coding_task({"task": "t", "repo": "/home/ohmz/StudioProjects/ai-stack"})
         check("an allowlisted repo is used as cwd",
-              calls["kwargs"].get("cwd") == "/home/ohmz/ai-stack", repr(calls["kwargs"].get("cwd")))
+              calls["kwargs"].get("cwd") == "/home/ohmz/StudioProjects/ai-stack", repr(calls["kwargs"].get("cwd")))
         calls.clear()
         mod.subprocess.run = refused_run
         out = mod._handle_coding_task({"task": "t", "repo": "/etc"})
         check("a repo outside the roots is refused", "outside" in out.lower(), repr(out))
         check("...and nothing was executed", "executed" not in calls, repr(calls))
         mod.subprocess.run = fake_run
-        out = mod._handle_coding_task({"task": "t", "repo": "/home/ohmz/ai-stack/../../etc"})
+        # Built from the configured root, not from the repo path: it must climb out of the ROOT
+        # for `..` to be the thing under test. Hardcoding a repo-relative depth silently became a
+        # still-inside-root path when the repo moved (2026-10-04), so the probe would have passed
+        # for the wrong reason — "not a directory" — had it escaped one level less.
+        escape = mod.CODING_TASK_ROOTS[0] + "/../../etc"
+        out = mod._handle_coding_task({"task": "t", "repo": escape})
         check("traversal is resolved before the check, not after", "outside" in out.lower(), repr(out))
 
         # The denylist applies inside an allowed root.

@@ -168,12 +168,16 @@ with this host's own LAN (`192.168.40.0/24`). An unpinned `up` would either fail
 by handing the network a subnet that already routes to real LAN hosts.
 
 That network has no route to `127.0.0.1` on the host, which is where ComfyUI (`:8188`, no auth), the
-hermes gateway (`:8642`) and qdrant (`:6333`) all live. The one deliberate hole is Ollama: it's a
-*host* systemd unit bound to `127.0.0.1:11434` only, so `owui-public-ollama` (an `alpine/socat`
-container on `network_mode: host`) forwards `172.16.240.1:11435` (this bridge's gateway address) to
-it and nothing else. `172.16.240.1:11435` needed an explicit `ufw allow from 172.16.240.0/24 to any
-port 11435 proto tcp` rule — this host's UFW default-denies incoming, including from bridge networks
-to host-bound ports, and Docker's own iptables rules don't override that.
+hermes gateway (`:8642`) and qdrant (`:6333`) all live. The one deliberate hole is Ollama, a *host*
+systemd unit. It was bound to `127.0.0.1:11434` when this was built; since 2026-09-18 it binds
+`*:11434` (`ollama.service.d/host-binding.conf`, for open-notebook's containers), but ufw's `INPUT`
+policy is `DROP` and opens 11434 only to `192.168.224.0/20` and `10.99.0.0/24`, so this bridge still
+cannot reach it: `172.16.240.1:11434` answers `000` from inside `open-webui-public` (2026-09-30).
+`owui-public-ollama` (an `alpine/socat` container on `network_mode: host`) forwards
+`172.16.240.1:11435` (this bridge's gateway address) to Ollama and nothing else.
+`172.16.240.1:11435` needed an explicit `ufw allow from 172.16.240.0/24 to any port 11435 proto tcp`
+rule — this host's UFW default-denies incoming, including from bridge networks to host-bound ports,
+and Docker's own iptables rules don't override that.
 
 Verify from inside the container:
 

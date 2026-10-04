@@ -2,7 +2,7 @@
  "suite_version": "1.0.0",
  "tier": "full",
  "when": "20260729T124321Z",
- "pipe": "/home/ohmz/ai-stack/pipes/live/auto_assistant.py",
+ "pipe": "/home/ohmz/StudioProjects/ai-stack/pipes/live/auto_assistant.py",
  "judge": "gemma4:e2b",
  "models": {
   "chat": "hermes-genesis:apex-compact",

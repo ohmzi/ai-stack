@@ -94,13 +94,14 @@ Client disconnects are routine rather than errors: `handle()` swallows
 ## 3. Usage
 
 The launcher runs `claude` with the environment rewired **for its own process only**. Plain
-`claude` still goes straight to the DeepSeek cloud API, unchanged — so the two never fight over
-`~/.bashrc`.
+`claude` is left alone — it runs stock against the claude.ai login, so the two never fight over
+`~/.bashrc`, which now sets no `ANTHROPIC_*` at all (the cloud token comes from
+`~/.config/deepseek/secrets.env`).
 
 ```bash
-deepseek                     # DeepSeek cloud, default; window capped at the local one
+deepseek                     # DeepSeek cloud, default; no local traffic at all
 deepseek --local             # local Qwen 3.8 27B on the RTX 3090
-deepseek --cloud             # cloud, no cap — full cloud window
+deepseek --cloud             # the same as the default; kept for muscle memory
 deepseek --model NAME        # any routable model name
 deepseek --status, -s        # router health, token presence, routing table; starts the router
                              # if it is down, rather than only reporting
@@ -134,15 +135,24 @@ missing — which is why `install.sh` warns when it is absent.
 
 Inside a session, `/model` is the switch. The launcher binds the three aliases through
 `ANTHROPIC_DEFAULT_{OPUS,SONNET,HAIKU}_MODEL`, and each default is overridable by an environment
-variable:
+variable. Which backend they point at is decided at launch, from the provider the main model
+resolved to:
 
-| `/model` alias | Model name sent | Upstream | Env override |
+| `/model` alias | `deepseek` / `--cloud` | `deepseek --local` | Env override |
 |---|---|---|---|
-| `opus` | `deepseek-flash[1m]` | DeepSeek cloud | `DEEPSEEK_CLOUD_MODEL` |
-| `sonnet` | `qwen38-coder:q4-128k` | local Ollama | `DEEPSEEK_LOCAL_MODEL` |
-| `haiku` | `gemma3:1b` | local Ollama | `DEEPSEEK_FAST_MODEL` |
+| `opus` | `deepseek-flash[1m]` | `deepseek-flash[1m]` — the way back out | `DEEPSEEK_CLOUD_MODEL` |
+| `sonnet` | `deepseek-flash[1m]` | `qwen38-coder:q4-128k` | `DEEPSEEK_LOCAL_MODEL` |
+| `haiku` | `deepseek-flash[1m]` | `gemma3:1b` | `DEEPSEEK_FAST_MODEL` |
 
-`deepseek --model NAME` sets the *starting* model the same way; `/model` then moves from there.
+The cloud column is not a convenience. The alias slots carry everything that is *not* the main
+model — background chores, session titles, the auto-mode classifier, subagents — so pointed at the
+local tags in a cloud session they quietly put all of it on the 3090 (measured 2026-09-24: 2.3k
+calls at a ~29k-token prefill each, GPU pinned at 99% and 383 W while the session model was cloud).
+A cloud session binds all three to the cloud model and never touches the local backend; a `--local`
+session binds them to the local tags, where `/model` really does switch.
+
+`deepseek --model NAME` sets the *starting* model the same way, and the aliases follow whichever
+provider that name resolves to; `/model` then moves from there.
 
 ### Why an unknown model name is safe
 
@@ -220,12 +230,12 @@ Both are real and both can bite:
   advertised more context than it actually has. The tags that really are bigger opt in explicitly:
   `qwen38-coder:q4-128k` (131072, reserve 32768) and `hermes-genesis:agent` (65536).
 
-  This matters because the alias table spans both sizes. Only `sonnet` points at the 128K tag;
-  `haiku` is `gemma3:1b`, which carries no `num_ctx` parameter at all and so runs at the server's
-  `OLLAMA_CONTEXT_LENGTH` (32768 here). Sizing the window per *provider* — which this did until
-  2026-09-17 — reports a confident 98304 for that 32768 model: three times its real window, and a
-  400 waiting the moment anyone switches to it. Check any model with
-  `python3 router.py --window MODEL`; `--route MODEL` prints the upstream and both numbers.
+  This matters because the alias table spans both sizes. Only `sonnet` reaches the 128K tag, and
+  only in a `--local` session; `haiku` is `gemma3:1b`, which carries no `num_ctx` parameter at all
+  and so runs at the server's `OLLAMA_CONTEXT_LENGTH` (32768 here). Sizing the window per
+  *provider* — which this did until 2026-09-17 — reports a confident 98304 for that 32768 model:
+  three times its real window, and a 400 waiting the moment anyone switches to it. Check any model
+  with `python3 router.py --window MODEL`; `--route MODEL` prints the upstream and both numbers.
 - **Token counting is estimated, not measured.** Ollama has no `count_tokens` endpoint (it answers
   with a plain-text 404 that Claude Code cannot parse), so when a provider sets
   `supports_count_tokens: false` the relay synthesises `{"input_tokens": ceil(chars/4)}` over the
@@ -307,8 +317,8 @@ unreachable" are distinguishable from the client.
 **Failure it prevents:** a local turn dying while the model loads.
 
 A 27B model can legitimately pause for minutes between chunks while it loads into VRAM. The
-launcher sets `API_FORCE_IDLE_TIMEOUT=0` for non-`--cloud` sessions, and the relay's own upstream
-timeout is a generous 900 s (`DEEPSEEK_ROUTER_TIMEOUT` overrides it).
+launcher sets `API_FORCE_IDLE_TIMEOUT=0` whenever the main model resolved to the local provider,
+and the relay's own upstream timeout is a generous 900 s (`DEEPSEEK_ROUTER_TIMEOUT` overrides it).
 
 ## 6. Mounting it on a new machine
 
@@ -355,18 +365,17 @@ and does not touch Ollama — `qwen38-coder:q4-128k` stays until you `ollama rm`
 
 `install.sh` installs **no credential, on purpose.** Because the router forwards the client's own
 credential to the cloud upstream (`auth: "passthrough"`), the key never has to be duplicated into
-this repo or into `router.json`. It belongs in the shell environment — this stack keeps it in
-`~/.bashrc` alongside the ambient `ANTHROPIC_BASE_URL` that plain `claude` uses.
+this repo or into `router.json`. On this host it lives in `~/.config/deepseek/secrets.env`
+(mode 600), which the launcher sources — deliberately *not* in `~/.bashrc`, where it used to sit
+readable by every process in every shell.
 
 The launcher resolves the token in this order: `DEEPSEEK_API_TOKEN`, then `ANTHROPIC_AUTH_TOKEN`,
-after sourcing `~/.config/deepseek/secrets.env` if that file exists. The `secrets.env` path is an
-alternative for people who prefer a file; note that it is **sourced after the environment is
-already exported**, so a variable set there wins over an ambient one of the same name — the file
-beats the shell, the opposite of what "environment beats file" intuition suggests. It matters only
-if both places set the *same* variable; on this host `secrets.env` does not exist and the token
-arrives from `~/.bashrc`. With no token at all the launcher still starts, exporting the
-placeholder `router-local` — the local leg ignores credentials entirely, so a local-only session
-works without one, and only the cloud leg fails.
+after sourcing `~/.config/deepseek/secrets.env` if that file exists. Note that the file is
+**sourced after the environment is already exported**, so a variable set there wins over an
+ambient one of the same name — the file beats the shell, the opposite of what "environment beats
+file" intuition suggests. It matters only if both places set the *same* variable. With no token at
+all the launcher still starts, exporting the placeholder `router-local` — the local leg ignores
+credentials entirely, so a local-only session works without one, and only the cloud leg fails.
 
 ### Building the Ollama tag
 
@@ -424,7 +433,8 @@ nvidia-smi       # expect ~21857 MiB resident
 | `deepseek: missing /home/USER/.config/deepseek/router.json` (or `router.py`) | `install.sh` has not been run on this machine, or `--uninstall` removed the links. | Re-run `./install.sh`. |
 | `router did not come up`, `deepseek --status` says `DOWN` | A bad `router.json`, a stale process holding port 8788, or a Python error at import. | `deepseek --restart`; then read `~/.cache/deepseek-router.log` (or `journalctl --user -u deepseek-router.service` if a unit exists). Port and host come from `router.json`'s `listen` block — a mismatch between it and anything else pointing at the router shows up here. |
 | Every request returns `502 … unreachable` | Ollama is not running, or `base_url` in `router.json` is wrong for the leg that matched. | Start Ollama; confirm the port. The 502 body names the provider (§5.4), which tells you which leg failed. |
-| Cloud turns fail with an auth error, local turns are fine | No credential in the environment — the router passes the *client's* token through, so it has nothing to forward. | `deepseek --status` prints `cloud … (auth: present\|MISSING)`. Export the key in `~/.bashrc` (or put it in `~/.config/deepseek/secrets.env`). §6. |
-| A local turn hangs, then dies mid-stream; the router logs `client hung up mid-stream` | A 27B model can pause for minutes between chunks while it loads into VRAM, and an idle timeout kills the connection first. | Use the launcher, which sets `API_FORCE_IDLE_TIMEOUT=0` for non-`--cloud` sessions (§5.5). The relay's own upstream timeout is 900 s. |
+| Cloud turns fail with an auth error, local turns are fine | No credential to forward — the router passes the *client's* token through, so the launcher found none to give it. | `deepseek --status` prints `cloud … (auth: present\|MISSING)`. Put `DEEPSEEK_API_TOKEN` in `~/.config/deepseek/secrets.env` (mode 600). §6. |
+| A local turn hangs, then dies mid-stream; the router logs `client hung up mid-stream` | A 27B model can pause for minutes between chunks while it loads into VRAM, and an idle timeout kills the connection first. | Use the launcher, which sets `API_FORCE_IDLE_TIMEOUT=0` for local sessions (§5.5). The relay's own upstream timeout is 900 s. |
 | A model name you invented silently produces local answers | It hit the `local` provider's `"*"` catch-all — by design, so a typo can never bill the paid API. | `deepseek --routes MODEL` to see where a name lands; `GET /v1/models` is not the routing table (it lists only glob-free names, so no cloud names appear). |
-| A long turn in a `deepseek --cloud` session overflows after switching to a local model | `--cloud` opts out of the local window cap, so the session was launched with the cloud's full window. | Start such a session with plain `deepseek` (or `--local`) if you intend to switch. The cap exists precisely so a mid-session switch stays safe. |
+| The 3090 is pinned at 99% during a session you thought was on the cloud | The session was started *before* 2026-09-24, when the launcher bound `sonnet` and `haiku` to the local tags regardless of the main model, so every background call and subagent ran locally. | Restart the session: the slots now follow the main model's provider. Verify with `deepseek --status` — in a cloud session all three aliases should read `deepseek-flash`. |
+| A cloud session reports a 98304-token window | It inherited `CLAUDE_CODE_MAX_CONTEXT_TOKENS` from a shell that already carried a local session's cap. | Fixed in the launcher, which now unsets it for cloud sessions. Existing sessions keep the window they launched with. |

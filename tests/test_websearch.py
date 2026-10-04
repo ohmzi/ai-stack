@@ -29,7 +29,7 @@ Usage:  python3 tests/test_websearch.py [pipe_path]
 """
 import asyncio, importlib.util, json, os, re, sys, urllib.parse, urllib.request
 
-PIPE_PATH = sys.argv[1] if len(sys.argv) > 1 else "/home/ohmz/ai-stack/pipes/live/auto_assistant.py"
+PIPE_PATH = sys.argv[1] if len(sys.argv) > 1 else "/home/ohmz/StudioProjects/ai-stack/pipes/live/auto_assistant.py"
 SEARXNG_URL = os.environ.get("SEARXNG_QUERY_URL", "http://localhost:8888/search")
 TOP_N = 5  # OpenWebUI's web.search.result_count on this host
 
@@ -68,7 +68,8 @@ def live_search(query, n=TOP_N):
         data = json.load(r)
     hits = [h for h in data.get("results", [])
             if h.get("url") and (h.get("content") or h.get("title"))]
-    return hits[:n], len(data.get("results", []))
+    engines = {e for h in data.get("results", []) for e in (h.get("engines") or [])}
+    return hits[:n], len(data.get("results", [])), engines
 
 
 async def ask(hits, question):
@@ -95,7 +96,7 @@ async def main():
     for label, query, question, want in CASES:
         print(f"\n--- {label}: {query!r}")
         try:
-            hits, total = live_search(query)
+            hits, total, engines = live_search(query)
         except Exception as e:
             check(f"{label}: SearXNG reachable", False, str(e)[:160])
             check(f"{label}: answer grounded in results", False, "no search results")
@@ -104,6 +105,11 @@ async def main():
 
         check(f"{label}: SearXNG returned >=3 usable results", len(hits) >= 3,
               f"got {len(hits)} usable of {total} raw")
+        # Chat search was bing-only until 2026-09-29 (duckduckgo CAPTCHA'd, mojeek returned silent
+        # zeros) and every other check here still passed; the first bing ConnectTimeout then took
+        # search DOWN. One engine answering is a single point of failure, not a pass.
+        check(f"{label}: results came from >=2 distinct engines", len(engines) >= 2,
+              f"only {sorted(engines)}")
         for i, h in enumerate(hits, 1):
             print(f"      [{i}] {h['url'][:76]}")
         if len(hits) < 3:

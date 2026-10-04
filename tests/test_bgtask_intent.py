@@ -21,9 +21,9 @@ runs before coder routing ("track the price and alert me" must not reach the cod
 
 Usage:  python3 tests/test_bgtask_intent.py [pipe_path]
 """
-import importlib.util, sys
+import asyncio, importlib.util, sys
 
-PIPE_PATH = sys.argv[1] if len(sys.argv) > 1 else "/home/ohmz/ai-stack/pipes/live/auto_assistant.py"
+PIPE_PATH = sys.argv[1] if len(sys.argv) > 1 else "/home/ohmz/StudioProjects/ai-stack/pipes/live/auto_assistant.py"
 spec = importlib.util.spec_from_file_location("aa_bg", PIPE_PATH)
 mod = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(mod)
@@ -118,9 +118,71 @@ MEDIA_FIRST = [
 results = []
 
 
-def check(label, ok):
+def check(label, ok, detail=None):
     results.append(ok)
-    print(f"  [{'PASS' if ok else 'FAIL'}] {label[:70]}")
+    print(f"  [{'PASS' if ok else 'FAIL'}] {label[:70]}"
+          + (f"   {detail!r}"[:300] if detail is not None and not ok else ""))
+
+
+HERMES_REPLY = ("Created two watches: `abc123abc123` (RTX 5090) and `def456def456` (RTX 5080), "
+                "both every 6 hours.")
+CHAT_REPLY = "Paris is the capital of France."
+
+
+def followup_rig(hermes_reply=HERMES_REPLY, chat_reply=CHAT_REPLY):
+    """A pipe whose hermes stream, chat stream and scheduler are stubs. Records who answered.
+    Either reply may be a list, consumed one per call (the last one repeats)."""
+    q = mod.Pipe()
+    sent, chat = [], []
+
+    def pick(r, n):
+        return r if isinstance(r, str) else r[min(n, len(r) - 1)]
+
+    def api(method, path, body=None, timeout=10):
+        return (200, {"jobs": []}, None) if path.startswith("/api/jobs") else (200, {}, None)
+
+    def hermes(text, uname="user", verify_creation=False, brief=None, scoped=False):
+        sent.append(text)
+        out = pick(hermes_reply, len(sent) - 1)
+
+        async def go():
+            yield out
+        return go()
+
+    def achat(*a, **kw):
+        chat.append(True)
+        out = pick(chat_reply, len(chat) - 1)
+
+        async def go():
+            yield out
+        return go()
+
+    q._hermes_api, q._hermes_stream, q._achat_stream = api, hermes, achat
+    q._contact = lambda h: {"phone": "+15145550123"}
+    q._is_code_request = lambda t: False
+    q._route_metric = lambda *a, **k: None
+    q._metric = lambda **f: None
+    return q, sent, chat
+
+
+ADMIN = {"role": "admin", "email": "tester@example.com"}
+BOB = {"role": "user", "email": "bob@example.com", "name": "bob"}
+
+
+def pipe_turn(q, history, text, cid="c-followup", user=ADMIN, keep=True, meta=None):
+    """One full pipe() turn (default path unless `meta` turns a control on). Appends both sides
+    to `history` unless keep=False: a branch OpenWebUI later discards (an edited message)."""
+    msgs = history + [{"role": "user", "content": text}]
+
+    async def go():
+        res = await q.pipe({"messages": msgs, "model": "auto_assistant.auto", "chat_id": cid},
+                           __metadata__={"user_prompt": text, "chat_id": cid, **(meta or {})},
+                           __user__=user)
+        return "".join([c async for c in res]) if hasattr(res, "__aiter__") else res
+    out = asyncio.run(go())
+    if keep:
+        history.extend([{"role": "user", "content": text}, {"role": "assistant", "content": out}])
+    return out
 
 
 def main():
@@ -165,6 +227,144 @@ def main():
           not p._is_bg_followup("yes and also please write a detailed essay about scheduling "
                                 "systems and their history in computing", after_task))
     check("hermes replies carry the invisible marker", MARK.startswith("<!--") and MARK.endswith("-->"))
+
+    print("--- ...and the window closes at the first reply hermes did not write ---")
+    # The marker used to be set by every hermes reply and cleared by nothing, so for PARK_TTL_S
+    # (24 h) any short "no ..."/"remove ..." went to hermes: past the confirm gate, with the CHAT
+    # model's last answer quoted back as "you previously said", and told to act on the real
+    # scheduler. End to end through pipe(), because the fix lives in pipe()'s ordering.
+    q, sent, chat = followup_rig()
+    hist = []
+    pipe_turn(q, hist, "monitor the price of the RTX 5090 on newegg for 2 weeks")
+    check("setup: the watch request reached hermes", len(sent) == 1)
+    out = pipe_turn(q, hist, "no, remove the second one")
+    check("straight after a hermes reply, 'no, remove the second one' reaches hermes",
+          len(sent) == 2 and out == HERMES_REPLY and not chat)
+    check("...as a follow-up that quotes what hermes itself said",
+          len(sent) == 2 and "You previously said" in sent[1] and "def456def456" in sent[1])
+
+    q, sent, chat = followup_rig()
+    hist = []
+    pipe_turn(q, hist, "monitor the price of the RTX 5090 on newegg for 2 weeks")
+    out = pipe_turn(q, hist, "what is the capital of France?")
+    check("setup: an ordinary question in between is answered by the chat model",
+          out == CHAT_REPLY and len(chat) == 1 and len(sent) == 1)
+    check("...and that chat reply ends the follow-up window",
+          not q._was_bg_turn("c-followup", hist + [{"role": "user", "content": "no"}]))
+    out = pipe_turn(q, hist, "no, remove the second one")
+    check("after an intervening chat reply, 'no, remove the second one' does NOT reach hermes",
+          len(sent) == 1 and out == CHAT_REPLY and len(chat) == 2)
+    pipe_turn(q, hist, "monitor the price of the RTX 5080 on newegg for 2 weeks")
+    out = pipe_turn(q, hist, "yes, cancel the first one")
+    check("a new hermes reply reopens it for the very next turn",
+          len(sent) == 3 and out == HERMES_REPLY)
+
+    print("--- the window belongs to the hermes REPLY, not to whichever turn comes next ---")
+    # The one-turn marker was consumed by any pipe() call, so a turn the user later discarded, or
+    # a clarifying question, spent it, and the answer to hermes's own question went to the
+    # tool-less chat model: the live failure behind _BG_FOLLOWUP, where it confirmed a
+    # re-enable that never happened, citing the real job id from the transcript.
+    Q = "Job `37d9907d5dfa` is finished. Re-enable it, or create a new one?"
+    q, sent, chat = followup_rig(hermes_reply=Q, chat_reply="The weather is mild today.")
+    hist = []
+    pipe_turn(q, hist, "monitor the price of the RTX 5090 on newegg for 2 weeks")
+    pipe_turn(q, hist, "hmm what is the weather", keep=False)       # edited away afterwards
+    out = pipe_turn(q, hist, "yes reenable")                          # ...into this
+    check("an edited message after hermes's question still reaches hermes",
+          len(sent) == 2 and out == Q, (len(sent), out))
+    check("...quoting hermes's question", len(sent) == 2 and "37d9907d5dfa" in sent[1])
+
+    q, sent, chat = followup_rig(hermes_reply=Q,
+                                 chat_reply="Re-enabling resumes the old job with its old schedule.")
+    hist = []
+    pipe_turn(q, hist, "monitor the price of the RTX 5090 on newegg for 2 weeks")
+    out = pipe_turn(q, hist, "what does re-enable mean?")
+    check("setup: a clarifying question is answered by the chat model", len(chat) == 1)
+    out = pipe_turn(q, hist, "yes reenable")
+    check("after one clarifying exchange, 'yes reenable' still reaches hermes",
+          len(sent) == 2 and out == Q, (len(sent), out))
+    check("...quoting HERMES's question, never the chat model's answer",
+          len(sent) == 2 and "37d9907d5dfa" in sent[1] and "old schedule" not in sent[1])
+    pipe_turn(q, hist, "what is the capital of France?")
+    pipe_turn(q, hist, "and of Italy?")
+    out = pipe_turn(q, hist, "yes")
+    check("...but only one exchange away: after two, a bare 'yes' is chat again",
+          len(sent) == 2 and len(chat) == 4, (len(sent), len(chat)))
+
+    q, sent, chat = followup_rig(hermes_reply=Q, chat_reply=[
+        "Paris is the capital of France. Want to know more about it?", CHAT_REPLY])
+    hist = []
+    pipe_turn(q, hist, "monitor the price of the RTX 5090 on newegg for 2 weeks")
+    pipe_turn(q, hist, "what is the capital of France?")
+    out = pipe_turn(q, hist, "yes please")
+    check("a 'yes please' that answers the CHAT model's own question stays chat",
+          len(sent) == 1 and len(chat) == 2, (len(sent), len(chat)))
+
+    q, sent, chat = followup_rig(hermes_reply=Q)
+    pipe_turn(q, [], "monitor the price of the RTX 5090 on newegg for 2 weeks")
+    hist = []
+    pipe_turn(q, hist, "what is the capital of France?")               # the SAME turn, edited
+    check("editing the message that produced the hermes reply drops the record",
+          "c-followup" not in q._bg_turn)
+    out = pipe_turn(q, hist, "yes please")
+    check("...so a later 'yes please' is chat, not hermes", len(sent) == 1 and len(chat) == 2)
+
+    q, sent, chat = followup_rig(hermes_reply=Q)
+    pipe_turn(q, [], "monitor the price of the RTX 5090 on newegg for 2 weeks")
+    hist = []
+    pipe_turn(q, hist, "monitor the price of the RTX 5090 on newegg for 2 weeks")  # regenerate
+    out = pipe_turn(q, hist, "yes reenable")
+    check("a regenerated hermes reply keeps the window open for its answer",
+          len(sent) == 3 and out == Q, (len(sent), out))
+
+    print("--- an ordinary user's job-changing follow-up never goes to hermes ---")
+    # hermes's cronjob tool sees every job on the host; the scoped context only tells it not to
+    # describe other users' jobs. "no, delete them all" matched _BG_FOLLOWUP (no task noun for
+    # _BG_MANAGE, no job table for `referring`) and went to hermes unconfirmed.
+    for label, user, text, to_hermes in (
+            ("user: 'no, delete them all'", BOB, "no, delete them all", False),
+            ("user: 'remove both'", BOB, "remove both", False),
+            ("user: 'cancel all of them'", BOB, "cancel all of them", False),
+            ("user: 'yes reenable' (a state change too)", BOB, "yes reenable", False),
+            ("user: 'yes please' is not a change: hermes", BOB, "yes please", True),
+            ("admin: 'no, delete them all' is unchanged: hermes", ADMIN, "no, delete them all",
+             True)):
+        q, sent, chat = followup_rig()
+        managed = []
+        real_manage = q._manage_turn
+
+        async def manage(cid, text, parked, rule, pending=None, user=None, handle="",
+                         _real=real_manage, _log=managed):
+            _log.append((text, rule, handle))
+            return await _real(cid, text, parked, rule, pending=pending, user=user, handle=handle)
+        q._manage_turn = manage
+        hist = []
+        pipe_turn(q, hist, "monitor the price of the RTX 5090 on newegg for 2 weeks", user=user)
+        out = pipe_turn(q, hist, text, user=user)
+        if to_hermes:
+            check(label, len(sent) == 2 and not managed, (len(sent), managed))
+        else:
+            check(label + " -> the ownership-checked manage path",
+                  len(sent) == 1 and managed and managed[-1][1] == "bg_followup_scoped"
+                  and out != HERMES_REPLY, (len(sent), managed, out[:120]))
+    q, sent, chat = followup_rig()
+    hist = []
+    pipe_turn(q, hist, "monitor the price of the RTX 5090 on newegg for 2 weeks", user=BOB)
+    out = pipe_turn(q, hist, "both of them, delete", user=BOB)
+    check("user: a change the manage path cannot place is refused with a way forward",
+          len(sent) == 1 and "list my tasks" in out and not chat, out[:160])
+    q, sent, chat = followup_rig()
+    hist = []
+    task_on = {"task_mode": True}
+    pipe_turn(q, hist, "monitor the price of the RTX 5090 on newegg for 2 weeks", user=BOB,
+              meta=task_on)
+    out = pipe_turn(q, hist, "no, delete them all", user=BOB, meta=task_on)
+    check("...and the same under the Task control", len(sent) == 1 and out != HERMES_REPLY,
+          (len(sent), out[:120]))
+    ctx_src = open(PIPE_PATH).read()
+    check("the scoped context forbids changing a job outside the user's list",
+          '"describe one, and never treat one as this user\'s duplicate. Never modify, "' in ctx_src
+          and '"pause, resume or delete any job that is not in this list."' in ctx_src)
 
     print("--- a FINISHED job must not block a new one (live failure 37d9907d5dfa) ---")
     brief = mod.Pipe._HERMES_BRIEF

@@ -7,29 +7,85 @@ bounded, GPU-safe scheduled job, executed by a local agent and reported back int
 
 | Piece | What / where |
 |---|---|
-| Runtime | [NousResearch/hermes-agent](https://github.com/NousResearch/hermes-agent) **v0.19.0**, pinned at commit `b6729ba9`, installed at `~/.hermes` (uv venv, MIT). Do not run `hermes update` casually — upstream merges ~660 PRs between patch releases; re-verify with the tests below after any update. |
+| Runtime | [NousResearch/hermes-agent](https://github.com/NousResearch/hermes-agent) **v0.21.4** (tag `v2026.9.21`), pinned at commit `d337b736aa` since 2026-09-23 by tag checkout (was v0.19.0 at `b6729ba9`), installed at `~/.hermes` (uv venv, MIT). One gateway serves two profiles, `default` and `coding` (its log: `Multiplex cron scheduler started for 2 profile(s): ['default', 'coding']`). **Never run `hermes update`**: on a detached checkout it switches to `main` (`hermes_cli/update_cmd.py:963`), and upstream merges ~660 PRs between patch releases. Upgrade by checking out the next tag on purpose, bump `HERMES_PIN` in `scripts/stack_watchdog.py` in the same change, and re-verify with the tests below; the watchdog's `hermesver` check emails when the checkout or the running gateway's `/health` version leaves the pin. The v0.21.4 step shows why: `InProcessCronScheduler.start()` gained three keyword arguments, and the gpuguard provider's fixed signature would have raised on every spawn — no cron job would ever have fired again while the API kept serving and every pipe-side check passed (fixed in `a0d828a`). Its config migration also added a toolset to both platform lists without asking (`connections`, below). |
 | Model | `hermes-genesis:agent` — a second Ollama tag of the SAME weights as the chat model (`ollama create` from `apex-compact` + `PARAMETER num_ctx 65536`; shares blobs, ~0 extra disk). Exists because hermes hard-requires a 64 K context window, and raising the global `OLLAMA_CONTEXT_LENGTH=32768` would tax every OpenWebUI chat turn instead. |
 | Service | `hermes-gateway` systemd **user** service (linger enabled). Hosts the cron scheduler and the API server on `127.0.0.1:8642` (key in `~/.hermes/.env`, a copy staged at `/volume1/docker/openwebui/config/hermes_api_key` so the pipe can read it in-container). |
 | GPU guard | `hermes/plugins/gpuguard/` in this repo, **symlinked** to `~/.hermes/plugins/gpuguard/` (config `cron.provider: gpuguard`). A cron scheduler provider that defers ticks while **either** ComfyUI's `/queue` shows work **or** Ollama's `/api/ps` shows a big model that isn't ours. Due jobs are never lost, only deferred to the next 60 s tick. Covered by `tests/test_gpuguard.py` (24 checks). **Caveat:** a hand-run `hermes cron tick` bypasses the provider; the gateway path — the only unattended path — is guarded. |
 | ↳ why Ollama too | Added 2026-07-31. The cron tag runs at `num_ctx 65536` and the pipe's chat tenant at 32768; Ollama keys runners by model+options, so those are two **distinct** ~17 GB runners that cannot co-reside on a 24 GB card. A tick firing mid-conversation evicted the chat model and the user's next turn paid a cold reload — **measured at 22.7 s**. Co-residency is unreachable without taxing every chat turn, so the fix is scheduling. `/api/ps` answers "is a big model *resident*", not "*generating*" — with `OLLAMA_KEEP_ALIVE=60s` those differ by at most one tick, which is the accepted trade. Helpers are excluded by footprint (measured: tenant 16.70 GiB vs `gemma4:e2b` 1.81, `gemma3:1b` 0.92, `bge-m3` 0.62 — threshold 10 GiB), because OWUI runs title/tag generation and the route classifier constantly and "any model loaded ⇒ defer" would starve cron permanently. Our own `hermes-genesis:agent` never defers: resident means a job just ran, and reusing that warm runner is the best case. |
 | ↳ starvation escape | Continuous chat keeps the tenant resident indefinitely, so the gate cannot be stateless. `HERMES_GPUGUARD_MAX_DEFER_S` (default 900) force-dispatches when **only Ollama** blocks — three cadence periods of the tightest 5-minute monitor. `HERMES_GPUGUARD_HARD_DEFER_S` (default 3600) force-dispatches regardless, releasing a wedged queue. The two tiers deliberately do **not** share a threshold: forcing past a resident-idle tenant costs one recoverable eviction, but forcing past a *running render* OOMs a job that may be twenty minutes in — the exact failure this plugin exists to prevent. |
-| Delivery | **Deterministic since 2026-07-30**: jobs run NO delivery commands — they end their response with `LOG: <summary>` (always) and `ALERT(<user>): <msg>` (only when the user's condition holds). `scripts/hermes_delivery.py` (user timer, 1 min) parses each new output under `~/.hermes/cron/output/<job>/` and does the delivery itself: LOG → background-tasks channel webhook, ALERT → `send_alert()` → text (carrier email-to-SMS gateway) + email, both proven live 2026-07-30. Recipients validated against `^[a-z0-9_-]+$`, 3 alerts/run cap, per-leg retry (a failed push never re-posts the channel log). Born from two live failures: an agent-authored job that invented `send_webhook_post()` helpers and delivered nothing, then an agent that *claimed* deliveries which never happened. The LLM writes text; infrastructure delivers. Covered by `tests/test_hermes_delivery.py` (70 checks). |
-| Entry point | The `auto_assistant` pipe routes background-task intent (`tests/test_bgtask_intent.py`, 124 checks — 25 positive, 39 negative — default-deny) to `POST 127.0.0.1:8642/v1/chat/completions` — an agent runtime, not an LLM proxy. The agent creates/manages its own cron jobs via its `cronjob` tool and streams confirmation back into the same chat. **No second model row in the picker; the single-pipe architecture holds.** |
+| Delivery | **Deterministic since 2026-07-30**: jobs run NO delivery commands — they end their response with `LOG: <summary>` (always) and `ALERT(<user>): <msg>` (only when the user's condition holds). `scripts/hermes_delivery.py` (user timer, 1 min) parses each new output under `~/.hermes/cron/output/<job>/` and does the delivery itself: LOG → background-tasks channel webhook, ALERT → `send_alert()` → text (carrier email-to-SMS gateway) + email, both proven live 2026-07-30. Recipients validated against `^[a-z0-9_-]+$`, 3 alerts/run cap, per-leg retry (a failed push never re-posts the channel log). Born from two live failures: an agent-authored job that invented `send_webhook_post()` helpers and delivered nothing, then an agent that *claimed* deliveries which never happened. The LLM writes text; infrastructure delivers. Covered by `tests/test_hermes_delivery.py` (101 checks). It runs against a temporary `HOME` with SMTP, HTTP and sockets blocked, so running it can no longer touch the live queue or send a real text (2026-09-29). |
+| Entry point | The `auto_assistant` pipe routes background-task intent (`tests/test_bgtask_intent.py`, 150 checks, default-deny) to `POST 127.0.0.1:8642/v1/chat/completions` — an agent runtime, not an LLM proxy. The agent creates/manages its own cron jobs via its `cronjob` tool and streams confirmation back into the same chat. **No second model row in the picker; the single-pipe architecture holds.** |
 
 ## Config decisions that are deliberate
 
 - `model.provider: ollama`, `base_url http://127.0.0.1:11434/v1`, `reasoning_effort: low` — on this
   endpoint `reasoning_effort` IS honoured (2 tokens vs 126 on a trivial call, measured); the pipe's
   native `/api/chat` uses `think:false` instead. The two endpoints behave oppositely — see MODELS.md.
-- `platform_toolsets.api_server: [web, file, memory, session_search, todo, cronjob, skills]` —
+- `platform_toolsets.api_server: [connections, cronjob, file, memory, session_search, skills, todo, web]` —
   **no terminal, no browser, no code execution** on the chat-facing surface. Chat-reachable text
-  must not be able to shell out; creating a cron job needs none of those.
-- `platform_toolsets.cron: [web, terminal, file, memory, todo, cronjob, skills]` — jobs need
-  `terminal` for `curl` (fetching pages, SearXNG at `:8888`, and the delivery POST). Hermes runs
+  must not be able to shell out; creating a cron job needs none of those. `connections` (remote
+  connectors and MCP servers) was not a decision made here: v0.21.4's config migration
+  (`hermes_cli/config_migrations.py`) adds it to each explicit platform list and sorts the list,
+  which is why both are alphabetical now. Nothing is configured for it (`mcp_servers` is empty);
+  untick it in `hermes tools` if that ever changes. These two lists are the `default` profile's; the
+  `coding` profile keeps its own in `~/.hermes/profiles/coding/config.yaml`. The same file also
+  listed `platform_toolsets.teams` and `google_chat`, whose toolsets (`hermes-teams`,
+  `hermes-google_chat`) do not exist in v0.21.4; both entries were removed on 2026-09-29.
+- `platform_toolsets.cron: [connections, cronjob, file, memory, skills, terminal, todo, web]` — jobs
+  need `terminal` to fetch pages. Nobody is present to approve a scheduled run's commands, so
+  hermes's guard (`tools.approval.check_all_command_guards` with `HERMES_CRON_SESSION=1`) refuses
+  whatever it flags: inline code (`python3 -c`, `bash -c`), heredocs, a download piped into an
+  interpreter, `curl` to a plain-`http://` remote host (loopback is allowed), a `>` redirect into
+  `~/.hermes`, and any address it cannot verify (link shorteners, `xn--` or non-ASCII domains, raw
+  IPs, `.zip`/`.mov` domains, a trailing dot). **So the fetch path is fixed (owner decision,
+  2026-09-29):** an agent-authored job fetches with `curl` to an `https://` URL piped into `grep`,
+  `sed` or `head` (brief rule 5a), or runs one of the vetted scripts (rules 5d, 5d-ii, 5d-iii). A
+  plain-http page no vetted script covers is refused rather than watched, and an address the guard
+  cannot verify gets a request for the full link. Monitor state is read and written with the
+  `read_file` / `write_file` tools (rule 4), because the guard reads `echo … > ~/.hermes/…` as a
+  dotfile overwrite. The brief got this wrong twice first: until 2026-09-29 it prescribed
+  `execute_code`, which lives only in the `code_execution` toolset that cron does not have, and then
+  `python3` (urllib) for http-only pages, which in practice means `python3 -c` or a heredoc, both
+  refused. `tests/test_brief_guard.py` runs every command shape the brief prescribes, and every host
+  it names as blocked, through the real guard in cron mode (82 checks), so the next wording drift
+  fails a test instead of a live job. Jobs run no delivery commands (see Delivery above). Hermes runs
   unattended jobs with dangerous-command approval in DENY mode by default; the hardline blocklist
   (fork bombs, filesystem wipes) applies regardless.
-- No Nous Portal account, no cloud keys: search is local SearXNG via curl, fetching is curl. The
-  hosted-tier tools (Firecrawl search, cloud browser, image gen) are simply absent.
+- **A job's terminal timeout is set by its prompt, not by config.** `terminal.timeout: 180` in
+  `config.yaml` and `TERMINAL_TIMEOUT=180` in `~/.hermes/.env` agree, and `config.yaml` wins wherever
+  it is set: the gateway bridges it over the environment at startup and every cron run layers it over
+  `.env` (`tools/terminal_scope.py`), so in practice the `.env` line only sets the cron worker's
+  process-wait clamp (`tools/process_registry.py`). Neither applies when the model passes `timeout=`
+  itself, and it does. In 41 of 53 fare-watch terminal calls (~77%) it chose `timeout=60`, and all
+  three `[Command timed out after 60s]` kills (2026-09-04 and 2026-09-26) were among them; the 4
+  calls that omitted it completed. So raising the `.env` value from 60 to 180 on 2026-09-29 fixed
+  nothing. The vetted-command headers (the fare-watch builder `_fc_watch_cmd` and brief rules 5d,
+  5d-ii and 5d-iii) now tell the model to run with `timeout=300`: above the fare script's own 240 s
+  budget (two 30 s MCP handshake steps, then `CHECK_TIMEOUT_S=180`), so its "could not reach
+  flightclaw" LOG line wins the race, and below the tool's 600 s foreground cap, past which a call
+  turns into a background process. `tests/test_brief_guard.py` pins all four headers. **The live
+  fare watch `e76a6b27c17f` still carries the old header, with no timeout**, so it can still be
+  killed at 60 s. Changing a live job's prompt waits on the owner's decision; only new jobs get the
+  new header.
+- **Search is local; page reading is not.** `web.search_backend: searxng` routes the `web_search`
+  tool (chat surface and jobs alike) to hermes's bundled SearXNG plugin, pointed at the monitors'
+  instance on `:8889` by `SEARXNG_URL`. The plugin reads that address only from the environment
+  (there is no config key), and profiles do not inherit each other's `.env`, so both
+  `~/.hermes/.env` and `~/.hermes/profiles/coding/.env` carry it. Until 2026-09-29 neither was
+  set, and hermes's autodetect fell through to its keyless public rotation (firecrawl, exa,
+  parallel, keenable): every agent search went to a cloud service, silently, while this line said
+  search was local. Checked after the change: `agent.log` shows `Web search via searxng`, a socket
+  snapshot showed connections to `:8889` and none to chat's `:8888`, and no keyless lines. Page
+  reading (`web_extract`) stays on Firecrawl's keyless free tier, pinned by
+  `web.extract_backend: firecrawl`: SearXNG can only search, and with `SEARXNG_URL` set the
+  autodetect would route extraction to it and fail as a "search-only backend". v0.21.4 has no local
+  extractor short of self-hosting Firecrawl (`FIRECRAWL_API_URL`), and `web_extract` refuses
+  private addresses, so it cannot read loopback anyway. `web.keyless_rescue` is at its default
+  (on): a SearXNG call that fails at the HTTP level is retried once on the public rotation;
+  `web.keyless_rescue: false` would keep search strictly local. Both of those cloud legs, Firecrawl
+  for page reading and the keyless rescue, are waiting on the owner's decision (2026-09-30) and are
+  unchanged until then. No Nous Portal account, no cloud keys; the cloud browser and image
+  generation are absent.
 
 ## Using it
 
@@ -118,7 +174,7 @@ Design decisions worth keeping:
 - **Unconfigured is not an error.** Missing config, missing phone, or every channel failing folds
   the alert text into the channel post flagged `⚠️ [alert]` — a fired condition is never lost.
 
-Covered by `tests/test_alert_transports.py` (130 checks: normalization, resolution precedence,
+Covered by `tests/test_alert_transports.py` (141 checks: normalization, resolution precedence,
 fan-out semantics, channel selection, and the Twilio request shape against the documented API).
 Everything verifiable offline is pinned there, so a live failure has exactly one unknown left.
 
@@ -154,6 +210,29 @@ python3 scripts/hermes_delivery.py --ledger   # history + what is still pending
 When an alert exhausts its attempts, a loud notice goes to the background-tasks channel with the
 last error — an undeliverable alert is never silent.
 
+### The stack's own health alerts take a different path (2026-09-29)
+
+The search canary, the stack watchdog and the unit-failure alerter (`scripts/search_canary.py`,
+`stack_watchdog.py`, `stack_alert.py`) report on the machinery described on this page, so they share
+its transports but not its queue. They send through `alert_transports.send_report`, not
+`send_alert`: `send_alert` wraps a job alert, and its footer ("a background task you scheduled met
+its alert condition") was false for a health check nobody scheduled. Policy and rendering live in
+`scripts/health_alert.py`. A check alerts only after 2 failed runs and recovers only after 2 ok
+runs in a row, and only if it was alerted. A failed unit alerts at once, and the watchdog's backup,
+gateway-restart, delivery-backlog and version-pin checks alert and recover on one run, since a
+second look 5 minutes later adds no evidence. Each monitor sends one message per run and reminds
+once a day. The measured case for waiting is 22 canary alerts in 8 days,
+for 11 outages of which 8 were a single failed probe; replaying that history under this policy gives
+8 notifications for 4 outages. The README and the scripts' docstrings have the rest. There is no
+ledger and no 5-minute retry queue: bookkeeping is committed only after a send succeeds, so a failed
+canary or watchdog send stays owed and that monitor's next run (30 or 5 minutes later) tries again.
+A unit-failure alert has no next run; its `stack_alert: sent=` line is in the batch leader's
+`stack-alert@<unit>` journal.
+
+Known limitation, accepted: all three ride the same SMTP as everything else, texts included (they go
+through the carrier's email gateway), so a total SMTP outage is invisible to the monitors that would
+report it. A second transport is the fix, not more code in the monitors.
+
 ### Price monitoring is deterministic code, not a per-run scraper
 
 `scripts/price_watch.py` fetches, extracts, compares against saved state and prints the LOG/ALERT
@@ -166,8 +245,8 @@ absence of a model.
 > Corrected 2026-07-31. This section previously claimed jobs run via `--script <name>.py
 > --no-agent`, so "no model runs at all". That was true of the retired model-authored era and is
 > not how any live monitor works — commit 2418669 narrowed a blanket `--no-agent` ban that
-> "forbade the one thing that fixes the bug it was written about". The only `--no-agent` job left
-> in `jobs.json` is the retired `amazon_price_check.py`, whose last status is an error.
+> "forbade the one thing that fixes the bug it was written about". No `--no-agent` job is left in
+> `jobs.json`: on 2026-09-30 it holds one job, the vetted fare watch `e76a6b27c17f`.
 
 State is keyed by `--state` **and bound to the URL it was recorded for**. The agent picks and
 reuses these short names — this box already has two different watches both called
@@ -409,7 +488,7 @@ Repairs are mechanical only:
   defect and is *reported* rather than silently truncated to make space. The mirror limit is
   `_JOB_PROMPT_MIN = 24`, below which a markup cut has left no instruction worth keeping.
 
-Covered by `tests/test_job_shape.py` (97 checks, stubbed scheduler), which pins the real 2026-08-07
+Covered by `tests/test_job_shape.py` (122 checks, stubbed scheduler), which pins the real 2026-08-07
 job record verbatim rather than a paraphrase of it. The `hermes` metric row carries a `repaired`
 count, so how often the model ignores its brief is now measurable instead of anecdotal.
 
@@ -482,6 +561,11 @@ Contacts and the display profile live in `/volume1/docker/openwebui/config/alert
 both sides reach — the pipe runs inside the container, the transports on the host. The directory is
 owned by the host user, not root: an atomic `tmp+rename` needs write permission on the DIRECTORY,
 and publishing the profile from the unprivileged delivery timer silently failed until it had one.
+`contacts.json` holds phone numbers, so it is `640 root:ohmz` since 2026-09-29, behind a `750`
+parent (docs/TROUBLESHOOTING.md, LAN exposure). A `tmp+rename` creates a new file with the writer's
+default mode, so both writers (`_keep_private` in the pipe and in `alert_transports.py`) give the
+new file the old one's mode and group before the rename; a file that did not exist yet gets `0640`
+and the directory's group.
 
 ### What an alert actually says
 
@@ -730,16 +814,31 @@ mistaken for a placeholder; `tests/test_hermes_delivery.py` pins both directions
 
 ### Follow-ups in a task conversation
 
-Every hermes reply ends with an invisible `<!--bg-task-->` marker. A short next message ("yes
-reenable", "go ahead", "the first one") is routed back to hermes **only when the previous assistant
-turn carried that marker** — otherwise the same words are ordinary chat. The prior exchange is sent
-along so the answer has a referent, and the agent is told to call `cronjob(action='list')` and work
+A short next message ("yes reenable", "go ahead", "the first one") is routed back to hermes **only
+while it can be answering a hermes reply**; otherwise the same words are ordinary chat. The pipe
+records, per chat, which assistant slot the hermes reply occupies (`_mark_bg`). An invisible marker
+in the reply text was the first design, but OpenWebUI escapes and displays HTML comments wherever
+they appear. The window stays open while that reply is still the chat's last assistant message, for
+at most 24 h (`PARK_TTL_S`). One exchange in between is allowed only when it was a clarifying
+question: hermes asked something, the user asked a question back, and the chat answer did not ask
+one of its own. Any other reply in between closes the window, and so does an edit or a regenerate at
+or above the hermes reply (`_settle_bg_turn`). Hermes is handed its own reply, never whatever the
+chat model said since, plus the user's words, and is told to call `cronjob(action='list')` and work
 from real scheduler state.
 
 This exists because of a live failure: the agent asked "re-enable this one, or create a new pair?",
 the user answered "yes reenable", the message matched no task predicate, went to the **chat** model
 — which read the job id out of the transcript and produced a confident confirmation of something it
-had not done and could not do.
+had not done and could not do. The first fix overshot the other way. Until 2026-09-30 the record
+only expired after 24 h, whatever came after it, so a "yes please" to a chat-model question hours
+after an unrelated hermes turn went to hermes, unconfirmed and under the cron brief.
+
+For an ordinary user, a follow-up that changes a job ("no, delete them all") no longer reaches
+hermes at all, because its `cronjob` tool sees every job on the host. `_scoped_change` sends it to
+the deterministic manage path, which sees only that user's jobs and confirms before a cancel, and
+refuses with a way forward when it cannot pin the change to one of them. An edit ("change the
+alert to 15 min") or a re-run still goes to hermes, held only by the scoped context's instruction
+never to modify, pause, resume or delete a job outside the user's list.
 
 ### Jobs belong to a user, even though hermes has no idea who that is
 
@@ -763,8 +862,8 @@ from `_alert_username`, i.e. the email local part.
 
 Why not patch hermes: its REST `PATCH` whitelist rejects unknown keys, the agent's `cronjob` tool
 cannot set them, and the pipe cannot import hermes across the container boundary. The vendored
-checkout is a plain `git pull --ff-only` clone, so a local patch is one `hermes update` away from
-being stashed or reset. The sidecar needs none of that and is readable by the host-side delivery
+checkout is a detached tag checkout that `hermes update` would stash and switch to `main`, so a
+local patch would not survive the next upgrade. The sidecar needs none of that and is readable by the host-side delivery
 timer, which is the other thing that needs it.
 
 Consequences, all covered by `tests/test_task_ownership.py`:
@@ -804,6 +903,32 @@ An unowned job, an owner with no channel mapped, or a corrupt map all fall back 
 shared webhook. That fallback is deliberate — a routing miss must never *drop* a result — which is
 why the shared channel should be restricted to admins. The ALERT leg (text/email) was already
 per-user and is unchanged.
+
+## Incidents
+
+**2026-09-23/24: 20 gateway starts in two days.** Hermes's own ledger,
+`~/.hermes/gateway-starts.log` (one epoch per start), shows 10 of them at boot, since the host
+rebooted 10 times, and the rest restarts within a boot, the upgrade's among them. The cause was not
+hermes. SurrealDB, Open Notebook's database, sized its RocksDB caches from the host's 94 GiB, grew
+to ~90 GB RSS and took the machine into kernel OOM with swap at 100%. The fix is on the Open
+Notebook side: `mem_limit: 24g`, with `memswap_limit` equal to it, in
+`~/StudioProjects/open-notebook/docker-compose.override.yml:27`, so a spike kills that container
+instead of the host. The ledger shows one start since, at 2026-09-29 16:33. A liveness restart
+(exit 75) is usually back between two `is-active` probes, so the gateway check can miss a string of
+them; the watchdog's `gwrestarts` check now emails at 3 starts in 6 h. It reads this ledger rather
+than systemd's `NRestarts`, which resets at every boot.
+
+**2026-09-29 16:29-16:32: the deepseek launcher sent a claude.ai OAuth token to DeepSeek.** The
+coding profile's `coding_task` tool runs the local `deepseek` CLI, which is also started directly
+from shells. Started from a shell Claude Desktop had spawned, it inherited
+`CLAUDE_CODE_ENTRYPOINT=claude-desktop`, and that one variable makes `claude` authenticate with the
+desktop app's claude.ai OAuth bearer instead of the harness's token. The harness's relay forwards
+client auth verbatim, so 11 requests carried that token to `api.deepseek.com`, all answered 401
+(bisected to that variable alone). `harness/deepseek/deepseek` now unsets it, with the rest of the
+host-auth set (`CLAUDE_CODE_SDK_HAS_HOST_AUTH_REFRESH`, `CLAUDE_CODE_OAUTH_TOKEN`,
+`CLAUDE_CODE_OAUTH_SCOPES`), before it runs `exec claude`. The `coding_task` path was never exposed: it
+hands the CLI only `TOOL_ENV_KEYS` (`HOME`, `PATH`, `USER`, `LOGNAME`, `LANG`, `LC_ALL`,
+`XDG_CACHE_HOME`, `TERM`).
 
 ## Rollback
 

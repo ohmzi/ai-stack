@@ -12,7 +12,7 @@ selection under test are production code.
 """
 import asyncio, importlib.util, json, sys
 
-PIPE_PATH = sys.argv[1] if len(sys.argv) > 1 else "/home/ohmz/ai-stack/pipes/live/auto_assistant.py"
+PIPE_PATH = sys.argv[1] if len(sys.argv) > 1 else "/home/ohmz/StudioProjects/ai-stack/pipes/live/auto_assistant.py"
 
 spec = importlib.util.spec_from_file_location("auto_assistant_manifold_test", PIPE_PATH)
 mod = importlib.util.module_from_spec(spec)

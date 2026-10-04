@@ -25,8 +25,9 @@ import datetime
 import importlib.util
 import sys
 import time
+import types
 
-PIPE = sys.argv[1] if len(sys.argv) > 1 else "/home/ohmz/ai-stack/pipes/live/auto_assistant.py"
+PIPE = sys.argv[1] if len(sys.argv) > 1 else "/home/ohmz/StudioProjects/ai-stack/pipes/live/auto_assistant.py"
 spec = importlib.util.spec_from_file_location("aa_flight", PIPE)
 mod = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(mod)
@@ -37,6 +38,39 @@ p._route_metric = lambda *a, **k: None
 
 TODAY = datetime.date(2026, 8, 7)          # injected, always. See the note at the bottom.
 results = []
+
+
+class _FrozenDate(datetime.date):
+    @classmethod
+    def today(cls):
+        return cls(TODAY.year, TODAY.month, TODAY.day)
+
+
+class _Clock:
+    """The pipe's `datetime` with date.today() pinned to TODAY; every other name passes through.
+
+    _fl_find_dates takes `today` as an argument and the date section below injects it explicitly.
+    The form path does not: _flight_turn -> _flight_slots -> datetime.date.today() reads the
+    module global, so the two-turn exchange was the one section still on the real clock. That was
+    invisible until the real month caught up with the test's "leaving October" — on 2026-10-04 the
+    window clamped its start to today and two assertions failed. Pinning the module global makes
+    the injection total, which is the property the note at the bottom of this file claims.
+    """
+    date = _FrozenDate
+
+    def __init__(self, real):
+        self._real = real
+
+    def __getattr__(self, name):
+        return getattr(self._real, name)
+
+
+_REAL_MOD_DATETIME = mod.datetime
+
+
+def freeze_clock():
+    mod.datetime = _Clock(_REAL_MOD_DATETIME)
+    return lambda: setattr(mod, "datetime", _REAL_MOD_DATETIME)
 
 
 def check(label, ok, detail=""):
@@ -342,6 +376,7 @@ def main():
           p._fl_find_dates("may i ask what this costs", TODAY) == [])
 
     print("\n--- the reported two-turn exchange, end to end (hermetic engine) ---")
+    freeze_clock()   # from here the form path reads TODAY, not the wall clock
     # Every turn that completes the form now calls FlightClaw. The stub returns canned text in
     # the SAME shapes the live service emits (pinned against a live capture, 2026-08-09) — these
     # tests must never touch the network, and a fabricated engine reply here is fine because what
@@ -495,6 +530,55 @@ def main():
     check("...and the confirmation shows the alert channels", "[alert-setup]" in out)
     check("...and the baseline price FlightClaw just recorded",
           "C$338" in out, out[-900:])
+    check("...and the job's prompt sets the terminal timeout to 300, past the script's 240 s budget",
+          "timeout=300" in jobs[0]["prompt"].splitlines()[0], jobs[0]["prompt"].splitlines()[0])
+
+    print("\n--- the flight path prunes job_owners.json, but only from a list that loaded ---")
+    # _hermes_stream's stamps pass live ids and prune; this path passed none, so every fare watch
+    # only ever added records (26 stale ones by 2026-09-29). A FAILED list must not prune: read as
+    # "no jobs exist", it would drop every record past the 72 h gate.
+    import json as _json, os as _os, tempfile as _tempfile
+    NOW = time.time()
+
+    def owners_after(listing):
+        """Seed a real owners file, create a watch with the real _stamp_owner, read it back."""
+        path = _os.path.join(_tempfile.mkdtemp(), "job_owners.json")
+        _json.dump({"deadold00001": {"h": "bob", "t": NOW - 100 * 3600, "src": "diff"},
+                    "liveold00002": {"h": "bob", "t": NOW - 100 * 3600, "src": "diff"},
+                    "deadnew00003": {"h": "bob", "t": NOW - 3600, "src": "diff"}}, open(path, "w"))
+        saved_file = mod.TASK_OWNERS_FILE
+        mod.TASK_OWNERS_FILE = path
+        q = P.__new__(P); q._flight_draft = {}
+        q, calls, jobs = rig(q)
+        del q._stamp_owner                       # the real one, against the temp file
+        q._metric = lambda **f: None
+        base_api = q._hermes_api
+
+        def api(method, path_, body=None, timeout=10):
+            if method == "GET" and path_.startswith("/api/jobs"):
+                return listing
+            return base_api(method, path_, body, timeout)
+        q._hermes_api = api
+        try:
+            drain(q._flight_turn("c", TURN1, [], resume=False, handle="tester"))
+            return _json.load(open(path))
+        finally:
+            mod.TASK_OWNERS_FILE = saved_file
+
+    got = owners_after((200, {"jobs": [{"id": "liveold00002"}, {"id": "fcjob1234567"}]}, None))
+    check("with a loaded list: the new watch is stamped to its owner",
+          got.get("fcjob1234567", {}).get("h") == "tester"
+          and got["fcjob1234567"].get("src") == "flight", got)
+    check("...a record for a job the scheduler no longer has, past 72 h, is pruned",
+          "deadold00001" not in got, sorted(got))
+    check("...while a live job's record and a recent dead one are kept",
+          "liveold00002" in got and "deadnew00003" in got, sorted(got))
+    got = owners_after((200, {"jobs": []}, None))
+    check("the new id counts as live even when the list does not show it yet",
+          "fcjob1234567" in got and "deadold00001" not in got, sorted(got))
+    got = owners_after((0, None, "unreachable"))
+    check("a FAILED list prunes nothing, and the watch is still stamped",
+          {"deadold00001", "liveold00002", "deadnew00003", "fcjob1234567"} <= set(got), sorted(got))
 
     print("\n--- 'track it' after a search-only answer creates the same watch ---")
     S_EXACT = p._flight_slots("find flights from toronto to vancouver oct 15 returning nov 12 "

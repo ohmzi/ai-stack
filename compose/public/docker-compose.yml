@@ -306,10 +306,12 @@ services:
         max-size: "5m"
         max-file: "3"
 
-  # Ollama is a HOST systemd unit bound to 127.0.0.1:11434 only (verified 2026-08-11) — a bridged
-  # container has no route to it. This is a one-service pinhole through that wall: it forwards
-  # 172.16.240.1:11435 (this bridge's gateway address, reachable from every container on it) to
-  # Ollama and nothing else. The alternative, running open-webui-public with --network host, was
+  # Ollama is a HOST systemd unit. It bound 127.0.0.1:11434 only when this was written (verified
+  # 2026-08-11); since 2026-09-18 it binds *:11434 (ollama.service.d/host-binding.conf), and ufw
+  # (INPUT DROP, 11434 open only to 192.168.224.0/20 and 10.99.0.0/24) is what keeps this bridge
+  # out: 172.16.240.1:11434 answers 000 from open-webui-public (2026-09-30). This is a one-service
+  # pinhole through that wall: it forwards 172.16.240.1:11435 (this bridge's gateway address,
+  # reachable from every container on it) to Ollama and nothing else. The alternative, running open-webui-public with --network host, was
   # rejected because it would hand the public container ComfyUI (:8188, no auth) and the hermes
   # gateway (:8642) along with Ollama — see the isolation tests in tests/test_public_instance.py.
   owui-public-ollama:

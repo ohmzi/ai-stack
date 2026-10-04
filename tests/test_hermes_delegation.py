@@ -24,9 +24,9 @@ so this never talks to hermes and never creates a job.
 
 Usage:  python3 tests/test_hermes_delegation.py [pipe_path]
 """
-import asyncio, importlib.util, json, os, sys, tempfile, time
+import asyncio, importlib.util, json, os, sys, tempfile, threading, time
 
-PIPE_PATH = sys.argv[1] if len(sys.argv) > 1 else "/home/ohmz/ai-stack/pipes/live/auto_assistant.py"
+PIPE_PATH = sys.argv[1] if len(sys.argv) > 1 else "/home/ohmz/StudioProjects/ai-stack/pipes/live/auto_assistant.py"
 spec = importlib.util.spec_from_file_location("aa_del", PIPE_PATH)
 mod = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(mod)
@@ -157,8 +157,13 @@ def drive(reply, snapshots, verify=True, status=200, brief=None, exc=None, post_
     p = mod.Pipe()
     seq = list(snapshots)
     released = []
+    # Which thread each /api/jobs read ran on. _hermes_jobs is a blocking urllib GET, so every call
+    # from _hermes_stream has to go through asyncio.to_thread; one made inline would record the
+    # loop's own thread here (asyncio.run runs the loop on this, the main, thread).
+    drive.job_threads = []
 
     def fake_jobs():
+        drive.job_threads.append(threading.get_ident())
         return seq.pop(0) if len(seq) > 1 else seq[0]
 
     p._hermes_jobs = fake_jobs
@@ -176,8 +181,9 @@ def drive(reply, snapshots, verify=True, status=200, brief=None, exc=None, post_
     drive.metrics = []
     p._metric = lambda **f: drive.metrics.append(f)
     p._alert_setup_block = lambda uname: "\n<alert-setup>"
-    # Never touch the real Ollama from a test; record that the handoff released the tenant.
-    p._release_chat_tenant = lambda: released.append(p.chat_model)
+    # Never touch the real Ollama from a test; record that the handoff asked for the release. WHAT
+    # it releases is pinned separately, against the real method with requests stubbed.
+    p._release_chat_tenant = lambda: released.append("release")
     drive.released = released
 
     real_aiohttp = mod.aiohttp
@@ -264,9 +270,10 @@ def main():
           any(m.get("outcome") == "created" for m in drive.metrics), repr(drive.metrics)[:200])
     check("...with the alert-setup block still shown after it", "<alert-setup>" in out, out[-200:])
 
-    # A SILENT repair still has to be counted. `deliver` is the one defect fixed without saying so,
-    # and it is also the most common — hermes defaults an omitted deliver to origin on this host, so
-    # the brief has to fight it on a good fraction of all creations. The count was originally
+    # A SILENT repair still has to be counted. `deliver` is the one defect fixed without saying so.
+    # Since v0.21.4 an omitted deliver is stored as local on this host (cron/jobs.py:1753-1754: an
+    # api_server session has no push-capable origin), so the repair now guards an EXPLICIT
+    # non-local value the agent writes, like the deliver='origin' below. The count was originally
     # computed inside `if shape:`, and _enforce_job_shape returns "" when every repair was silent,
     # so the single most frequent violation recorded repaired=0 while its PATCH demonstrably went
     # out. That is the rate the column exists to measure, missing exactly where the reply is already
@@ -414,8 +421,75 @@ def main():
     # The cron tag runs at num_ctx 65536 and chat at 32768; Ollama keys runners by model+options,
     # so they are two distinct ~17 GB allocations and only one fits on the card.
     drive("ok", [before, before], verify=False)
-    check("delegating releases the chat tenant first", drive.released == [mod.Pipe().chat_model],
+    check("delegating releases the pipe's tenants first", drive.released == ["release"],
           repr(drive.released))
+
+    # The real method, with Ollama stubbed. It used to unload chat_model alone, so a handoff right
+    # after a coder turn left qwen38-coder:q4 resident beside the 65536-ctx agent, which does not
+    # fit. qwen38-coder:q4-128k is the deepseek/Claude Code harness's tenant and must survive.
+    class _PsResp:
+        def __init__(self, models):
+            self._m = models
+
+        def json(self):
+            return {"models": [{"name": n, "model": n} for n in self._m]}
+
+    def run_release(resident=None, ps_error=False):
+        posts = []
+        real_get, real_post = mod.requests.get, mod.requests.post
+
+        def fake_get(url, timeout=None):
+            if ps_error:
+                raise ConnectionError("ollama down")
+            assert url.endswith("/api/ps"), url
+            return _PsResp(resident or [])
+
+        def fake_post(url, json=None, timeout=None):
+            posts.append((url.rsplit("/", 1)[-1], json.get("model"), json.get("keep_alive")))
+
+        mod.requests.get, mod.requests.post = fake_get, fake_post
+        try:
+            mod.Pipe()._release_chat_tenant()
+        finally:
+            mod.requests.get, mod.requests.post = real_get, real_post
+        return posts
+
+    pp = mod.Pipe()
+    got = run_release([pp.coder_model, "qwen38-coder:q4-128k", pp.chat_model, "gemma3:1b"])
+    check("releases every resident pipe tenant (chat AND coder), each with keep_alive 0",
+          sorted(got) == sorted([("generate", pp.coder_model, 0), ("generate", pp.chat_model, 0)]),
+          repr(got))
+    check("...and never the harness's qwen38-coder:q4-128k, nor anything else resident",
+          all(m in (pp.chat_model, pp.coder_model) for _, m, _k in got), repr(got))
+    check("...one POST per tag even though vision_model is the chat tag",
+          len(got) == len({m for _, m, _k in got}), repr(got))
+    got = run_release(["qwen38-coder:q4-128k", "hermes-genesis:agent"])
+    check("with none of its tenants resident it unloads nothing (a hermes job may be mid-run)",
+          got == [], repr(got))
+    got = run_release(ps_error=True)
+    check("an unreadable /api/ps falls back to the old blind chat_model release, without raising",
+          got == [("generate", pp.chat_model, 0)], repr(got))
+
+    print("--- no blocking /api/jobs read runs on the event loop ---")
+    # _hermes_stream serves from OpenWebUI's one event loop; an inline urllib GET (10 s timeout)
+    # there stalls every other chat. Each path below reads /api/jobs at least once.
+    loop_thread = threading.get_ident()
+    for label, kw in (("the verified-creation path (before + verify loop)",
+                       dict(reply="scheduled it", snapshots=[before, {**before, "t1": job("t1")}])),
+                      ("the no-verdict path", dict(reply="ok", snapshots=[before, before],
+                                                   verify=False)),
+                      ("the dropped-stream path", dict(reply="partial", snapshots=[before, before],
+                                                       drop_done=True)),
+                      ("the timeout path", dict(reply="partial", snapshots=[before, before],
+                                                exc=asyncio.TimeoutError())),
+                      ("the stream-error path",
+                       dict(reply="partial", snapshots=[before, before],
+                            exc=mod.aiohttp.ClientPayloadError("truncated")))):
+        drive(kw.pop("reply"), kw.pop("snapshots"), **kw)
+        # >= 2: the before-snapshot plus the path's own read, so the path itself was exercised.
+        check(f"{label}: every read ran off the loop thread",
+              len(drive.job_threads) >= 2 and loop_thread not in drive.job_threads,
+              f"{len(drive.job_threads)} reads, on loop: {drive.job_threads.count(loop_thread)}")
 
     print("--- one-shot research uses its OWN contract, not the cron brief ---")
     rb = mod.Pipe._RESEARCH_BRIEF
@@ -429,6 +503,27 @@ def main():
     check("research forbids LOG/ALERT lines (they would be delivered as a real alert)",
           "ALERT(" in rb and "LOG:" in rb)
     check("research still bans unsourced numbers", "did not read" in rb.lower())
+
+    print("--- the briefs name only tools and endpoints the agent actually has ---")
+    hb = mod.Pipe._HERMES_BRIEF
+    # :8888 is chat's SearXNG. A job's queries share its engines' per-IP budget, so hermes gets its
+    # own instance on :8889 (README "Support services", scripts/web_search.py).
+    for name, brief in (("cron", hb), ("research", rb)):
+        check(f"the {name} brief never points hermes at chat's SearXNG (:8888)", ":8888" not in brief)
+    check("the cron brief names the hermes SearXNG (:8889)", "127.0.0.1:8889/search" in hb)
+    # platform_toolsets.cron in ~/.hermes/config.yaml has terminal but no code_execution toolset, so
+    # a job told to use execute_code is told to call a tool that is not there.
+    check("the cron brief never asks for execute_code", "execute_code" not in hb)
+    # ...nor for python3/urllib in a terminal command: under HERMES_CRON_SESSION=1 the guard refuses
+    # python3 -c and heredocs outright, which is what that wording produces. Fetching is curl to
+    # https:// or a vetted script; tests/test_brief_guard.py runs every shape through the guard.
+    check("...and fetches with curl to https:// or a vetted script, never python3/urllib",
+          "curl to an https:// URL" in hb and "python3 with urllib" not in hb
+          and "python3 (urllib)" not in hb)
+    # web_search(query, limit) has no URL parameter and the api_server surface has no terminal, so
+    # "query http://...:8888/search with your web tool" was an instruction nothing could follow.
+    check("the research brief sends searches through web_search, not a URL",
+          "web_search tool" in rb and "http://" not in rb)
 
     # And the default path must be unchanged by the parameterisation.
     drive("scheduled", [before, before], verify=False)

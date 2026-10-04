@@ -20,7 +20,7 @@ import os
 import sys
 import tempfile
 
-PIPE = sys.argv[1] if len(sys.argv) > 1 else "/home/ohmz/ai-stack/pipes/live/auto_assistant.py"
+PIPE = sys.argv[1] if len(sys.argv) > 1 else "/home/ohmz/StudioProjects/ai-stack/pipes/live/auto_assistant.py"
 spec = importlib.util.spec_from_file_location("aa_subscribe", PIPE)
 mod = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(mod)
@@ -62,7 +62,7 @@ def main():
     print("--- Path A (_job_flag_value): reading a job's own vetted command line ---")
     p = new_pipe(inbox_path)
     cmd = ("Run this terminal command and print its output verbatim as your entire response. "
-          "Add nothing.\npython3 /home/ohmz/ai-stack/scripts/price_watch.py --url "
+          "Add nothing.\npython3 /home/ohmz/StudioProjects/ai-stack/scripts/price_watch.py --url "
           "'https://amazon.ca/dp/B0DP6D3TRB' --state cat-board --alert-to ohmz --below 50 "
           "--unit '$' --monitor 'cat board watch' --schedule 'every 6h'")
     check("pulls --url", p._job_flag_value(cmd, "--url") == "https://amazon.ca/dp/B0DP6D3TRB")
@@ -89,7 +89,7 @@ def main():
     # on a personal single-admin box, but it IS a plain correctness bug: the confirmation must
     # describe what the JOB watches, never something that merely appears earlier in the prompt.
     decoy = ("note --url http://evil.example/steal ; python3 "
-            "/home/ohmz/ai-stack/scripts/price_watch.py --url https://real-site.example "
+            "/home/ohmz/StudioProjects/ai-stack/scripts/price_watch.py --url https://real-site.example "
             "--below 50 --alert-to ohmz")
     check("the real command's --url wins, not the decoy ahead of it",
           p._job_flag_value(decoy, "--url") == "https://real-site.example",
@@ -100,11 +100,11 @@ def main():
     print("--- Path A (_enqueue_subscriptions_for): price-rise, stock counts, and target-free ---")
     p = new_pipe(inbox_path)
     rise_cmd = ("Run this terminal command...\npython3 "
-               "/home/ohmz/ai-stack/scripts/price_watch.py --url 'https://x.example' "
+               "/home/ohmz/StudioProjects/ai-stack/scripts/price_watch.py --url 'https://x.example' "
                "--state x --alert-to ohmz --above 500 --kind price_rise "
                "--monitor 'resale watch' --schedule 'every 1h'")
     stock_cmd = ("Run this terminal command...\npython3 "
-                "/home/ohmz/ai-stack/scripts/price_watch.py --url 'https://y.example' "
+                "/home/ohmz/StudioProjects/ai-stack/scripts/price_watch.py --url 'https://y.example' "
                 "--state y --mode stock --kind inventory --below 3 --alert-to ohmz "
                 "--monitor 'ticket count watch' --schedule 'every 15m'")
     p._enqueue_subscriptions_for(
@@ -137,7 +137,7 @@ def main():
         {"id": "aaaa11112222", "name": "cat board watch", "schedule_display": "every 6h",
          "prompt": cmd},
         {"id": "bbbb33334444", "name": "no-details watch", "schedule_display": "every 1h",
-         "prompt": "python3 /home/ohmz/ai-stack/scripts/stock_watch.py --url x --monitor y "
+         "prompt": "python3 /home/ohmz/StudioProjects/ai-stack/scripts/stock_watch.py --url x --monitor y "
                   "--alert-to ohmz --schedule 'every 1h'"},
         {"id": "", "name": "an id-less job should never enqueue"},   # defensive: malformed record
     ]

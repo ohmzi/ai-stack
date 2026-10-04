@@ -35,8 +35,8 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 # checks below then patch THAT object, which is the one the pipe actually calls.
 sys.path.insert(0, os.path.join(ROOT, "pipes", "shared"))
 
-PIPE_PATH = sys.argv[1] if len(sys.argv) > 1 else "/home/ohmz/ai-stack/pipes/live/auto_assistant.py"
-FILTER_PATH = "/home/ohmz/ai-stack/filters/notebook_mode.py"
+PIPE_PATH = sys.argv[1] if len(sys.argv) > 1 else "/home/ohmz/StudioProjects/ai-stack/pipes/live/auto_assistant.py"
+FILTER_PATH = "/home/ohmz/StudioProjects/ai-stack/filters/notebook_mode.py"
 OWUI_DB = "/volume1/docker/openwebui/config/webui.db"
 
 spec = importlib.util.spec_from_file_location("aa_nb", PIPE_PATH)

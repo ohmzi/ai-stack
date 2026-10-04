@@ -19,7 +19,7 @@ Usage:  python3 tests/qa_live.py [pipe_path]
 """
 import asyncio, importlib.util, json, sys, time
 
-PIPE_PATH = sys.argv[1] if len(sys.argv) > 1 else "/home/ohmz/ai-stack/pipes/live/auto_assistant.py"
+PIPE_PATH = sys.argv[1] if len(sys.argv) > 1 else "/home/ohmz/StudioProjects/ai-stack/pipes/live/auto_assistant.py"
 OLLAMA = "http://localhost:11434"
 # Judge must NOT be the model under test — self-grading inflates scores, which is the whole reason
 # QA_TEST_PLAN.md insists on cross-family judging. gemma4:31b was retired, and the only remaining

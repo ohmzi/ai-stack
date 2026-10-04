@@ -3,9 +3,9 @@
 WHY THIS EXISTS
 ---------------
 The coding agent needs a shell to reach `deepseek`, and the chat-facing surface must not have one
-(`pipes/auto_assistant.py:25-26`). So instead of a shell it gets this: a FIXED argv, a pinned working
-directory, an explicit environment, a timeout and an output cap. There is no argument a chat message
-can supply that changes which program runs.
+(docs/HERMES_AGENT.md § Config decisions that are deliberate). So instead of a shell it gets this: a
+FIXED argv, a pinned working directory, an explicit environment, a timeout and an output cap. There
+is no argument a chat message can supply that changes which program runs.
 
 There is deliberately NO `pre_tool_call` hook. A plugin tool is subject to hermes's approval gate
 only when the plugin's own hook returns `{"action": "approve"}`; without one, this tool is never

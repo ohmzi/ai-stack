@@ -38,13 +38,16 @@ import urllib.parse
 
 results = []
 
-HERMES_SETTINGS = "/home/ohmz/ai-stack/compose/searxng-hermes/settings.yml"
-CHAT_SETTINGS = "/home/ohmz/ai-stack/compose/searxng/settings.yml"
-COMPOSE = "/home/ohmz/ai-stack/compose/docker-compose.yml"
+HERMES_SETTINGS = "/home/ohmz/StudioProjects/ai-stack/compose/searxng-hermes/settings.yml"
+CHAT_SETTINGS = "/home/ohmz/StudioProjects/ai-stack/compose/searxng/settings.yml"
+COMPOSE = "/home/ohmz/StudioProjects/ai-stack/compose/docker-compose.yml"
 # The chat instance's roster is the one OpenWebUI depends on, and a regression there is INVISIBLE:
 # the model answers from training data and still looks grounded. This pin makes touching that file
 # a deliberate act with a diff to review, rather than a side effect of working on monitors.
-CHAT_SETTINGS_SHA256 = "968528585ec90fac3843011027b26c18362c430f6e808844ab0406c6b996e717"
+# Re-pinned 2026-09-29 (was 9685285...): chat had become bing-only, so the roster gained yandex and
+# mwmbl, dropped wikidata, mojeek got `inactive: false` for the 2026.9.29 image, and request_timeout
+# went 3.0 -> 5.0. The measurements behind each line are in the file itself.
+CHAT_SETTINGS_SHA256 = "ffc78e72230bd88443c19c3d95e8466221a7951b611d061153110c8d1759a17e"
 
 
 def check(label, ok, detail=""):
@@ -73,8 +76,8 @@ def row(url, score=1.0, engines=("bing",), positions=(1,), title="t", content=""
 
 
 def main():
-    ws = load("/home/ohmz/ai-stack/scripts/web_search.py", "ws")
-    pw = load("/home/ohmz/ai-stack/scripts/price_watch.py", "pw")
+    ws = load("/home/ohmz/StudioProjects/ai-stack/scripts/web_search.py", "ws")
+    pw = load("/home/ohmz/StudioProjects/ai-stack/scripts/price_watch.py", "pw")
     pw.STATE_DIR = tempfile.mkdtemp()
 
     calls = []
@@ -102,7 +105,7 @@ def main():
           set(q) == {"q", "format"}, sorted(q))
     for banned in ("engines", "categories", "pageno", "safesearch", "time_range", "language"):
         check(f"...specifically no {banned}=", banned not in q)
-    src = open("/home/ohmz/ai-stack/scripts/web_search.py").read()
+    src = open("/home/ohmz/StudioProjects/ai-stack/scripts/web_search.py").read()
     check("the default instance is the hermes one, not chat's",
           ws.SEARXNG.endswith(":8889"), ws.SEARXNG)
     default_line = [ln for ln in src.splitlines() if ln.startswith("SEARXNG =")][0]
@@ -349,15 +352,25 @@ def main():
     check("the drift check found both directives", len(keep) >= 3 and len(flip) >= 2, (keep, flip))
     check("ENGINE_ORDER equals keep_only — 'tries = roster minus dead' is only honest if it does",
           sorted(ws.ENGINE_ORDER) == sorted(keep), (ws.ENGINE_ORDER, keep))
-    # The flip block is a SUBSET on purpose: it exists only to switch on engines that ship
-    # disabled: true upstream. Measured 2026-08-07 — an entry here for an engine that does not need
-    # one silently removed google from the roster entirely, with a clean start and empty logs.
+    # The flip block is a SUBSET on purpose: it exists only to switch on engines that ship switched
+    # off upstream, and WHICH ones do is a property of the pinned image, not of this repo. On
+    # 2026.9.29 that is bing and google (`disabled: true`) and mojeek (`inactive: true`). google was
+    # missing from the live roster 2026-08-07 .. 2026-09-29 not because of an entry here, as this
+    # comment used to say, but because 2026.7.25 shipped it `inactive`, which no flip of `disabled`
+    # reaches. Re-derive this set from the image's searx/settings.yml at every digest bump.
     check("the engines: block only flips engines that are in the roster",
           set(flip) <= set(keep), (flip, keep))
     check("...and it does not list engines that need no flip",
-          set(flip) == {"bing", "mojeek"}, flip)
+          set(flip) == {"bing", "mojeek", "google"}, flip)
     check("google is on the hermes roster — the whole point of the second instance",
           "google" in keep)
+    # 2026.9.29 ships mojeek `inactive` (its proof-of-work CAPTCHA costs CPU), so without this line
+    # the digest bump drops it from both instances with a clean start and empty logs.
+    chat_cfg = open(CHAT_SETTINGS).read()
+    for label, text in (("hermes", cfg), ("chat", chat_cfg)):
+        check(f"mojeek carries inactive: false on the {label} instance",
+              bool(re.search(r"^  - name: mojeek\n(    \w+: \w+\n)*?    inactive: false$",
+                             text, re.M)))
 
     print("--- the chat instance is not touched by any of this ---")
     check("compose/searxng/settings.yml still matches its pinned sha256",
@@ -367,6 +380,16 @@ def main():
     for engine in ("google", "startpage", "brave", "qwant"):
         check(f"...and {engine} is still absent from the chat roster",
               not re.search(r"^      - " + engine + r"\b", chat, re.M))
+    # Engine limits are per source IP, so every engine on both rosters is budget both consumers
+    # spend. bing and mojeek were already shared when chat was widened on 2026-09-29; the rule is
+    # to add no more, in either direction.
+    chat_keep = set(re.findall(r"^      - (\w+)", chat, re.M))
+    hermes_keep = set(re.findall(r"^      - (\w+)", open(HERMES_SETTINGS).read(), re.M))
+    check("the two rosters share exactly bing and mojeek — no new shared engine",
+          chat_keep & hermes_keep == {"bing", "mojeek"}, sorted(chat_keep & hermes_keep))
+    check("...and chat keeps at least two web engines of its own",
+          len(chat_keep - hermes_keep - {"wikipedia", "wikidata"}) >= 2,
+          sorted(chat_keep - hermes_keep))
     comp = open(COMPOSE).read()
     check("the hermes service binds loopback :8889", '"127.0.0.1:8889:8080"' in comp)
     digests = re.findall(r"image: searxng/searxng@(sha256:[0-9a-f]+)", comp)

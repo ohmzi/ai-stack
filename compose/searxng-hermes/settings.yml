@@ -31,26 +31,32 @@
 #   server.limiter does nothing about any of that — the limits are upstream, not local.
 # Measured load on this instance: <=1 query per unresolved monitor per 600 s, and zero for a
 # monitor whose page is healthy. Three unresolved monitors is ~3 q/10 min per engine, ~6% of the
-# break point. There is deliberately NO canary against this port: a canary would spend google's
-# budget on monitoring, and the whole point of this instance is that its budget belongs to
-# monitors. Poll GET /config instead — it costs zero upstream queries.
+# break point. That budget belongs to monitors, which is why scripts/search_canary.py probes this
+# port with engines=bing,mojeek only: the floor engines, already shared with chat, never google or
+# brave. Its first version probed the whole roster, and on 2026-09-29 google was CAPTCHA-suspended
+# from 17:28 EDT on: one "CAPTCHA (suspended_time=3600)" per hour in `docker logs searxng-hermes`
+# (21:28:43 .. 01:42:43 UTC), each on the second of a canary run, and no other client all evening.
+# The first probe after each suspension re-triggered it, as the line above warns: google blocks
+# this IP on sight, not on load. For anything beyond the floor, poll GET /config: it costs zero
+# upstream queries.
 #
 # Verify after any change, BOTH commands, in this order:
 #   docker logs --tail 40 searxng-hermes    # an unknown engine NAME in `engines:` fails LOUDLY here
 #   curl -s localhost:8889/config | python3 -c \
 #     "import json,sys; [print(e['name'], e.get('enabled')) for e in json.load(sys.stdin)['engines']]"
-# Expect exactly the six names below, all True. A MISSING name means keep_only dropped it
-# silently — fix this file and web_search.ENGINE_ORDER together (a drift test pins them equal).
+# Expect exactly the four keep_only names below, all True. A MISSING name means keep_only dropped
+# it silently, or the image ships it `inactive` (see the `engines:` block) — fix this file and
+# web_search.ENGINE_ORDER together (a drift test pins them equal).
 use_default_settings:
   engines:
     keep_only:
       - google        # best long-tail recall for product and fare pages; also the highest CAPTCHA
                       # risk here, and safe only because it is absent from the chat roster, so
                       # chat can never spend its budget and it can never spend chat's.
-                      # It exists in the image's defaults (its settings.yml:1217, and note that is
-                      # a DIFFERENT engine from `google cse` at :1236, which is the keyed API the
-                      # chat roster's comment says was dropped). See the `engines:` block below for
-                      # why it is deliberately NOT repeated there.
+                      # A DIFFERENT engine from `google cse`, the keyed API the chat roster's
+                      # comment says was dropped. Absent from the live roster 2026-08-07 ..
+                      # 2026-09-29 because the 2026.7.25 image shipped it `inactive: true`; the
+                      # 2026.9.29 image ships it `disabled: true` instead, hence its flip below.
       - brave         # genuinely independent crawl (not a Bing/Google reseller), keyless, its own
                       # limit bucket. Measured 2026-08-07: INTERMITTENT, not dead — "too many
                       # requests (suspended_time=180)" on one query and healthy on the next, where
@@ -58,12 +64,16 @@ use_default_settings:
                       # payday-loan sites. A 180 s suspension is weather; keeping it is what makes
                       # the fan-out worth having at all on this IP.
       - mojeek        # independent crawler, measured on this host never to rate-limit
-                      # (compose/searxng/settings.yml:33). This is the FLOOR: it is what stops a
+                      # (the chat roster's comment until 2026-09-29). This is the FLOOR: it stops a
                       # fan-out ever returning zero results, which is what keeps the
-                      # outage-vs-fruitless conjunction in web_search.search() harmless
+                      # outage-vs-fruitless conjunction in web_search.search() harmless.
+                      # CORRECTED 2026-09-29: under the 2026.7.25 image it returned ZERO results
+                      # on every query with no error flagged (an unsolved proof-of-work CAPTCHA
+                      # page parses as "no results"), so the floor did not exist. 2026.9.29 solves
+                      # it: 5/5 in the probe recorded in compose/searxng/settings.yml.
       - bing          # measured "the most tolerant of server-to-server use from this IP"
-                      # (compose/searxng/settings.yml:32) and the one engine that survived the
-                      # audit's 50-query burst. Second floor engine.
+                      # (the chat roster's comment until 2026-09-29) and the one engine that
+                      # survived the audit's 50-query burst. Second floor engine.
       # NOT kept, and the first two are a MEASURED reversal of this file's first version:
       #   startpage — CAPTCHA on the very first query this instance ever issued, and on every one
       #     since: "get_sc_code: got redirected to .../sp/captcha (suspended_time=3600)". An hour
@@ -121,8 +131,8 @@ outgoing:
 ui:
   static_use_hash: true
 
-# BOTH directives are required and they do different jobs, exactly as documented in
-# compose/searxng/settings.yml:64-78:
+# BOTH directives are required and they do different jobs, exactly as documented above the
+# `engines:` block of compose/searxng/settings.yml:
 #   use_default_settings.engines.keep_only (above) RESTRICTS which engines exist at all.
 #   this `engines:` list FLIPS THE disabled FLAG on the ones that ship disabled upstream
 #   (bing and mojeek do — measured on this host; keep_only alone left them switched off).
@@ -134,15 +144,24 @@ ui:
 #
 # THAT WAS WRONG, measured 2026-08-07. With `google` in both lists the container started cleanly,
 # exit 0, nothing in `docker logs`, and /config returned FIVE engines with google simply absent.
-# So a bad or redundant entry here is silent too, and worse: it appears to be what removed google,
-# which unlike bing and mojeek is NOT disabled upstream and therefore needs no flip at all. An
-# entry here for an engine that does not need one seems to shadow the real definition with a
-# module-less stub.
+# So a bad or redundant entry here is silent too.
 #
-# The rule that survives: flip ONLY what ships disabled, and verify the roster against /config
+# ROOT-CAUSED 2026-09-29 — the "module-less stub" theory this paragraph used to end with was wrong
+# (docs/TRACKING_ENHANCEMENT.md "Still open" #1 had already refuted it). The 2026.7.25 image
+# shipped google `inactive: true` (its searx/settings.yml:1220). `inactive` never loads the engine,
+# so `disabled: false` cannot reach it and it vanishes from /config, entry or no entry. A throwaway
+# container with `inactive: false` loaded google at once. The 2026.9.29 image flips it the other
+# way: google ships `disabled: true` (needs the flip below) and mojeek ships `inactive: true`
+# (needs `inactive: false`, or the bump silently drops the floor engine).
+#
+# The rule that survives: flip ONLY what ships switched off, read BOTH flags for every roster name
+# in the image's own searx/settings.yml at each digest bump, and verify the roster against /config
 # after every change, because nothing here fails loudly.
 engines:
   - name: mojeek
     disabled: false
+    inactive: false
   - name: bing
+    disabled: false
+  - name: google
     disabled: false
