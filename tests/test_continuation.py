@@ -174,6 +174,12 @@ check("'remove the hat' is an edit follow-up", pp._wants_edit_followup("remove t
 check("'create image of a cat…' is NOT an edit follow-up",
       not pp._wants_edit_followup("create image of a cat jumping off a building"))
 check("'another one' is NOT an edit follow-up", not pp._wants_edit_followup("another one"))
+for ask in ("make his t-shirt red", "turn her hair blonde", "make their jackets black",
+            "make the sky purple", "make the picture brighter"):
+    check(f"{ask!r} is an edit follow-up (a change to something in the picture)",
+          pp._wants_edit_followup(ask))
+for ask in ("make the best picture of a sunset", "a photo of a man in a park"):
+    check(f"{ask!r} is NOT an edit follow-up", not pp._wants_edit_followup(ask))
 text, img, current = pp._parse([
     {"role": "user", "content": [
         {"type": "text", "text": "older turn"},

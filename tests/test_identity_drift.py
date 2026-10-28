@@ -93,12 +93,21 @@ def main():
     with open(src, "rb") as f:
         ref_b64 = base64.b64encode(f.read()).decode()
 
+    # The subject above was rendered by this pipe, so it is truthfully one of its own pictures.
+    # Saying so is what lets EDIT_ENGINE=sdxl run at all (an upload never reaches img2img), and
+    # OWN_PICTURES=edit with CHECK off keeps each arm a single pass of the engine under test
+    # rather than a re-render or a corrected retry (2026-10-28).
+    def own(p):
+        p.valves.OWN_PICTURES, p.valves.CHECK = "edit", False
+        p._origin = lambda cid, b64: {"prompt": SUBJECT_PROMPT, "seed": a.seed}
+
     # --- each engine, same instruction, same seed --------------------------------------
     rows = []
     for engine in [e.strip() for e in a.engines.split(",") if e.strip()]:
         p = mod.Pipe()
         p.valves.EDIT_ENGINE = engine
         p.valves.REWRITE = False   # isolate the ENGINE; the rewrite is measured separately below
+        own(p)
         t0 = time.time()
         md, meta = p._generate(EDIT_INSTRUCTION, ref_b64, a.seed)
         out = os.path.join(a.keep, f"edit_{engine}.png")
@@ -112,6 +121,7 @@ def main():
     if "sdxl" in a.engines:
         p = mod.Pipe()
         p.valves.EDIT_ENGINE, p.valves.REWRITE = "sdxl", True
+        own(p)
         t0 = time.time()
         md, meta = p._generate(EDIT_INSTRUCTION, ref_b64, a.seed)
         out = os.path.join(a.keep, "edit_sdxl_rewritten.png")

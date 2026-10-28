@@ -1,11 +1,11 @@
 """
 title: Uncensored
 author: local
-version: 0.6.0
+version: 0.7.0
 required_open_webui_version: 0.5.0
-description: Photorealistic uncensored images (Lustify V10, Krea 2) via local ComfyUI. Reference-image edits run through Qwen-Image-Edit so the subject stays the same person; follow-ups ("make this picture animated", "remove the hat") keep editing the previous picture instead of generating a stranger, and background-task calls never render. Non-blocking (async); auto-frees GPU VRAM.
+description: Photorealistic uncensored images (Lustify V10, Krea 2) via local ComfyUI. Edits of an uploaded photo run through FireRed-Image-Edit 1.1 so the subject stays the same person, with the request rewritten from the picture, the result checked against your words, and one corrected retry. A picture Photoreal made itself is re-rendered from its own prompt and seed instead. Follow-ups ("make this picture animated", "remove the hat") keep editing the previous picture, and background-task calls never render. Non-blocking (async); auto-frees GPU VRAM.
 """
-import asyncio, base64, os, random, re, sys, time
+import asyncio, base64, hashlib, json, os, random, re, sys, time
 import requests
 from pydantic import BaseModel, Field
 
@@ -49,8 +49,87 @@ NEG = ("cartoon, anime, drawing, painting, illustration, 3d, render, cgi, sketch
        "deformed, disfigured, bad anatomy, bad hands, extra fingers, mutated hands, "
        "watermark, signature, text, blurry, lowres, low quality, worst quality")
 DENOISE = 0.65  # SDXL img2img strength. Only used on the fallback path — see the note below.
-ENHANCE = True  # expand a terse idea into a dense SDXL prompt via the local uncensored LLM (txt2img)
+ENHANCE = True  # expand a terse idea into a full Lustify prompt via the local uncensored LLM (txt2img)
 METRICS_PATH = os.environ.get("MEDIA_METRICS", "/app/backend/data/media_metrics.jsonl")
+
+# Where a picture came from. Every picture this pipe renders from a prompt (text-to-image or a
+# re-render) is recorded per chat as {digest, prompt, seed}. Two things read it:
+#   * a follow-up edit of one of those pictures re-renders it from its own prompt and seed with
+#     the change folded in, because Lustify follows its own prompt and FireRed (censored) often
+#     ignores exactly the edits people ask of this pipe;
+#   * the uncensored SDXL img2img engine is allowed ONLY for a recorded picture. An uploaded photo
+#     can be a real person who never agreed to it, so uploads always go through FireRed.
+# The digest is of the decoded image bytes, so an upload is never mistaken for one of ours unless
+# it is byte-for-byte a picture this pipe produced in this chat.
+ORIGIN_DIR = os.environ.get("PHOTOREAL_ORIGIN_DIR", "/app/backend/data/photoreal_origin")
+_ORIGIN_KEEP = 40      # newest chats kept
+_ORIGIN_PER_CHAT = 12  # newest pictures kept per chat
+
+# One corrected retry after a failed check. The Assistant allows two, but a FireRed retry runs the
+# 20-step tier (~150 s), and a second one rarely lands what the first missed.
+QA_RETRIES = 1
+
+# Property order is load-bearing (llama.cpp emits required properties in schema order, so the
+# verdict is committed before the justification). Same shapes as auto_assistant.py.
+_VERIFY_FORMAT = {"type": "object",
+                  "properties": {"ok": {"type": "boolean"}, "fix": {"type": "string"}},
+                  "required": ["ok", "fix"]}
+_EDIT_FORMAT = {"type": "object",
+                "properties": {"edit": {"type": "string"},
+                               "avoid": {"type": "array", "items": {"type": "string"}}},
+                "required": ["edit", "avoid"]}
+
+# Lustify V10 is a Krea 2 model whose text encoder is Qwen3-VL, so it reads sentences. The old
+# prompt asked for under-60-token tag lists, which was the SDXL/CLIP contract and wasted it.
+ENHANCE_SYS = (
+    "You write prompts for Lustify V10, a photorealistic image model whose text encoder reads "
+    "full sentences. Rewrite the user's idea as ONE natural-language description of the photo: "
+    "the subject and their appearance, pose and expression, clothing, the setting, the lighting, "
+    "and the camera and lens. The user's words are hard requirements: keep every person count, "
+    "adult age, gender, ethnicity, clothing and body detail they give exactly, and never add or "
+    "drop a subject. Plain sentences, no tag lists, no (word:1.5) weights. Under 100 words. "
+    "Output ONLY the prompt."
+)
+
+# Folding a change into the prompt that produced a picture. Re-rendering the same seed with a
+# mostly unchanged prompt keeps the composition; the merge must therefore leave every word the
+# request does not touch alone.
+MERGE_SYS = (
+    "You edit the prompt of a photorealistic image model. You get the prompt that produced the "
+    "current picture and a change the user wants. Return the whole prompt rewritten so the "
+    "picture shows that change. Change only what the request touches and keep every other "
+    "subject, detail, setting, lighting and camera phrase exactly as written. State the new "
+    "state plainly: describe what is there now, never what was removed or changed. Plain "
+    "sentences, no tag lists, no weights. Output ONLY the prompt."
+)
+
+
+def _extract_json(text):
+    """The first JSON object in an LLM reply that may wrap it in prose or a fence, else None.
+    A trimmed version of auto_assistant._extract_json: Functions deploy as single files, so
+    there is nothing to import."""
+    if not text:
+        return None
+    try:
+        return json.loads(text)
+    except Exception:
+        pass
+    m = re.search(r"```(?:json)?\s*([\s\S]*?)\s*```", text)
+    if m:
+        try:
+            return json.loads(m.group(1))
+        except Exception:
+            pass
+    dec = json.JSONDecoder()
+    for i, ch in enumerate(text):
+        if ch == "{":
+            try:
+                obj, _ = dec.raw_decode(text[i:])
+                if isinstance(obj, dict):
+                    return obj
+            except Exception:
+                continue
+    return None
 
 # WHY REFERENCE EDITS NO LONGER DEFAULT TO SDXL img2img
 #
@@ -64,8 +143,9 @@ METRICS_PATH = os.environ.get("MEDIA_METRICS", "/app/backend/data/media_metrics.
 #
 # FireRed-Image-Edit 1.1 puts the reference in the CONDITIONING instead of the noise budget,
 # so it holds ~100% of the source's grain (measured, auto_assistant.py:180-190). It is also
-# a censored model, which is why the SDXL path is kept rather than deleted: set
-# EDIT_ENGINE="sdxl" for anything Qwen refuses, and accept that identity will drift.
+# a censored model, which is why the SDXL path is kept rather than deleted: EDIT_ENGINE="sdxl"
+# uses it, accepting that identity will drift, but only for pictures this pipe made (ORIGIN_DIR).
+# An uploaded photo always goes through FireRed.
 _ENGINES = ("qwen", "sdxl")
 
 
@@ -74,18 +154,30 @@ class Pipe:
         EDIT_ENGINE: str = Field(
             default="qwen",
             description="Engine for reference-image edits. 'qwen' = FireRed-Image-Edit 1.1, keeps "
-                        "the subject the same person (~36 s). 'sdxl' = the old Lustify img2img "
-                        "path — uncensored, but the face WILL drift (~13 s).")
+                        "the subject the same person (~40 s). 'sdxl' = the old Lustify img2img "
+                        "path, uncensored, but the face WILL drift (~13 s). 'sdxl' applies only to "
+                        "pictures this pipe made; an uploaded photo always uses FireRed.")
         EDIT_QUALITY: str = Field(
             default="balanced",
-            description="Qwen tier: best (20 steps/cfg 4, ~152 s, negative prompt works) | "
-                        "balanced (8 steps, ~36 s) | fast (4 steps, ~20 s). The negative prompt "
-                        "is INERT on balanced and fast — they run cfg 1.0.")
+            description="FireRed tier for the first attempt: best (20 steps/cfg 4, ~150 s, the "
+                        "negative prompt works) | balanced (8-step Lightning, ~40 s) | fast (the "
+                        "same as balanced: FireRed ships no 4-step LoRA). A retry after a failed "
+                        "check always runs best.")
         REWRITE: bool = Field(
             default=True,
-            description="Rewrite the edit request before rendering. On the SDXL path this is what "
-                        "stops raw instructions being fed to a model that only understands "
-                        "descriptions; it costs one vision call (~15-30 s).")
+            description="Rewrite the edit request from the picture before rendering: a concrete "
+                        "instruction naming what changes and what stays for FireRed, a full "
+                        "description for the SDXL path. One vision call (~15-30 s).")
+        CHECK: bool = Field(
+            default=True,
+            description="Look at the original and the result together and check the edit against "
+                        "the request as you typed it. A miss gets one corrected retry; a miss that "
+                        "survives it is reported under the picture.")
+        OWN_PICTURES: str = Field(
+            default="rerender",
+            description="How to change a picture this pipe made: 'rerender' = the same seed with "
+                        "the change folded into its prompt (Lustify, follows the prompt) | 'edit' "
+                        "= FireRed like an upload.")
 
     def __init__(self):
         self.valves = self.Valves()
@@ -166,6 +258,13 @@ class Pipe:
     _DEICTIC = re.compile(
         r"\b(this|that|it)\s+(image|picture|photo|pic|drawing|one)\b"
         r"|\b(make|turn|keep)\s+(it|this|that|him|her|them)\b", re.I)
+    # A change to something IN the picture: "make his t-shirt red", "turn her hair blonde",
+    # "make the sky purple". Missed until 2026-10-28, when a live probe sent "make his t-shirt
+    # red" as a follow-up and got a brand-new picture of those five words. "make the best picture
+    # of a sunset" names a new picture, so a picture noun after "the <word>" does not count.
+    _POSSESSIVE = re.compile(
+        r"\b(make|turn|give|keep|put|paint|colou?r|dye)\s+(his|her|their|its)\b"
+        r"|\bmake\s+the\s+(?!\w+\s+(image|picture|photo|pic|portrait)\b)\w+\s+\w+", re.I)
 
     def _wants_edit_followup(self, text):
         """A text-only follow-up that modifies the previous picture rather than asking
@@ -176,7 +275,7 @@ class Pipe:
             return False
         if ms and ms.style_conversion(t):
             return True
-        if self._DEICTIC.search(t):
+        if self._DEICTIC.search(t) or self._POSSESSIVE.search(t):
             return True
         if self._FRESH.search(t):
             return False
@@ -210,33 +309,222 @@ class Pipe:
             time.sleep(1)
         time.sleep(2)  # grace for the CUDA allocator to release
 
-    def _engine(self):
-        """(engine, reason_it_was_downgraded). Never returns 'qwen' without a builder for it."""
+    def _engine(self, own=True):
+        """(engine, reason_it_was_downgraded). Never returns 'qwen' without a builder for it.
+
+        `own` says the reference is a picture this pipe rendered (see ORIGIN_DIR). For anything
+        else, an upload above all, the uncensored SDXL path is never used: a chosen 'sdxl' becomes
+        FireRed, and a missing FireRed is 'none' (the caller refuses) rather than a quiet fall
+        back to img2img on someone's photo."""
         want = str(getattr(self.valves, "EDIT_ENGINE", "qwen")).strip().lower()
         if want not in _ENGINES:
             want = "qwen"
+        if not own:
+            if build_qwen_edit_wf is None:
+                return "none", (_SHARED_ERR or "shared module unavailable")
+            if want == "sdxl":
+                return "qwen", "uploads always use FireRed"
+            return "qwen", ""
         if want == "qwen" and build_qwen_edit_wf is None:
             return "sdxl", (_SHARED_ERR or "shared module unavailable")
         return want, ""
 
+    def _own_mode(self):
+        v = str(getattr(self.valves, "OWN_PICTURES", "rerender")).strip().lower()
+        return v if v in ("rerender", "edit") else "rerender"
+
     def _enhance(self, prompt):
-        """Expand a terse idea into a dense, comma-separated SDXL prompt via the local uncensored
-        LLM. Text-to-image only. Falls back to the raw text on any error."""
+        """Expand a terse idea into a full natural-language Lustify prompt via the local
+        uncensored LLM. Text-to-image only. Falls back to the raw text on any error."""
         if not ENHANCE or not prompt:
             return prompt
-        sys_p = ("You write prompts for the Lustify SDXL photorealistic image model. Rewrite the user's "
-                 "idea as ONE dense, comma-separated prompt of concrete visual tags: subject and "
-                 "appearance, pose, setting, lighting, camera and lens, photographic style. Keep every "
-                 "explicit specification the user gives (person count, adult age, gender, ethnicity, "
-                 "clothing/anatomy) exactly. Under 60 tokens. Output ONLY the prompt — no preamble, no quotes.")
         try:
             r = requests.post(f"{self.ollama}/api/generate",
-                json={"model": self.text_model, "system": sys_p, "prompt": prompt, "stream": False,
-                      "think": False, "keep_alive": 0, "options": {"temperature": 0.7, "num_predict": 120}},
+                json={"model": self.text_model, "system": ENHANCE_SYS, "prompt": prompt, "stream": False,
+                      "think": False, "keep_alive": 0, "options": {"temperature": 0.7, "num_predict": 220}},
                 timeout=120)
             return (r.json().get("response") or "").strip().strip('"') or prompt
         except Exception:
             return prompt
+
+    # ---- talking to the vision model ----
+    def _llm(self, payload, fmt=None, timeout=180):
+        """POST /api/generate, schema-constrained when `fmt` is given. A server that rejects the
+        schema gets the same request once without it, as in auto_assistant._generate."""
+        body = dict(payload)
+        if fmt:
+            body["format"] = fmt
+        r = requests.post(f"{self.ollama}/api/generate", json=body, timeout=timeout)
+        if r.status_code != 200 and "format" in body:
+            detail = (r.text or "")[:300].lower()
+            if "format" in detail or "grammar" in detail or "schema" in detail:
+                body.pop("format", None)
+                r = requests.post(f"{self.ollama}/api/generate", json=body, timeout=timeout)
+        return (r.json().get("response") or "").strip()
+
+    def _rewrite_edit(self, request, ref_b64):
+        """(instruction, avoid) for FireRed, written by a model that SEES the picture.
+
+        The raw request used to go to FireRed as typed. Several asks in one sentence lose some of
+        them, relative wording ('a bit darker') under-moves an identity-preserving editor, and
+        'it' or 'her' names nothing. This is the Assistant's rewrite (media_session's
+        EDIT_REWRITE_VISION_SYS): one concrete instruction naming each subject as it appears,
+        absolute target states, and what must stay. Falls back to the request as typed."""
+        if not request or not ms or not getattr(ms, "EDIT_REWRITE_VISION_SYS", ""):
+            return request, ""
+        try:
+            out = self._llm(
+                {"model": self.text_model, "system": ms.EDIT_REWRITE_VISION_SYS,
+                 "prompt": f"Request: {request}\n\nRewrite this request.", "images": [ref_b64],
+                 "stream": False, "think": False, "keep_alive": 0,
+                 "options": {"temperature": 0.4, "num_predict": 400}},
+                fmt=_EDIT_FORMAT, timeout=300)
+        except Exception:
+            return request, ""
+        d = _extract_json(out)
+        if isinstance(d, dict) and str(d.get("edit") or "").strip():
+            av = d.get("avoid")
+            avoid = ", ".join(str(x).strip() for x in av if str(x).strip()) if isinstance(av, list) else ""
+            return str(d["edit"]).strip(), avoid
+        edit = re.search(r"^\s*\**\s*EDIT\**\s*:\s*(.+)$", out or "", re.I | re.M)
+        avoid = re.search(r"^\s*\**\s*AVOID\**\s*:\s*(.+)$", out or "", re.I | re.M)
+        if edit:
+            return edit.group(1).strip(), (avoid.group(1).strip() if avoid else "")
+        return request, ""
+
+    @staticmethod
+    def _parse_verdict(out):
+        """(ok, fix, parsed) from a checker reply: JSON first, then the OK:/FIX: lines. An
+        unreadable reply passes (parsed=False), so the check can never be why a picture is lost."""
+        d = _extract_json(out)
+        if isinstance(d, dict) and isinstance(d.get("ok"), bool):
+            fix = str(d.get("fix") or "").strip()
+            return d["ok"], ("" if fix.lower().startswith("none") else fix), True
+        m = re.search(r"^\s*\**\s*OK\**\s*[:：]\s*\**\s*(yes|no)\b", out or "", re.I | re.M)
+        if m is None:
+            return True, "", False
+        f = re.search(r"^\s*\**\s*FIX\**\s*[:：]\s*\**\s*(.+)$", out or "", re.I | re.M)
+        fix = f.group(1).strip().strip("*").strip() if f else ""
+        return m.group(1).lower() == "yes", ("" if fix.lower().startswith("none") else fix), True
+
+    def _verify_edit(self, original, instruction, ref_b64, result_b64):
+        """(ok, fix, parsed). The checker sees the original FIRST and the result SECOND and
+        judges against the request as the user typed it, not the rewrite, which may itself be
+        what went wrong (media_session.VERIFY_EDIT_SYS, the Assistant's checker). Fails open."""
+        if not ms or not getattr(ms, "VERIFY_EDIT_SYS", "") or not original:
+            return True, "", False
+        try:
+            out = self._llm(
+                {"model": self.text_model, "system": ms.VERIFY_EDIT_SYS,
+                 "prompt": ms.edit_qa_user_prompt(original, instruction),
+                 "images": [ref_b64, result_b64], "stream": False, "think": False,
+                 "keep_alive": 0, "options": {"temperature": 0.1, "num_predict": 220}},
+                fmt=_VERIFY_FORMAT, timeout=300)
+        except Exception:
+            return True, "", False
+        return self._parse_verdict(out)
+
+    def _merge_prompt(self, prompt, change):
+        """The prompt that produced a picture, rewritten to show `change`. Falls back to the
+        prompt with the change appended, which still moves Lustify the right way."""
+        fallback = f"{prompt} {change}".strip()
+        if not prompt:
+            return change
+        try:
+            out = self._llm(
+                {"model": self.text_model, "system": MERGE_SYS,
+                 "prompt": f"Prompt of the current picture:\n{prompt}\n\nChange: {change}",
+                 "stream": False, "think": False, "keep_alive": 0,
+                 "options": {"temperature": 0.3, "num_predict": 300}}, timeout=180)
+        except Exception:
+            return fallback
+        return out.strip().strip('"') or fallback
+
+    # ---- VRAM for the checker ----
+    def _comfy_idle(self):
+        """True when ComfyUI has nothing running or queued, so a /free cannot evict another
+        pipe's render. Fails open."""
+        try:
+            q = requests.get(f"{self.comfy}/queue", timeout=10).json()
+            return not q.get("queue_running") and not q.get("queue_pending")
+        except Exception:
+            return True
+
+    def _vram_free_gib(self):
+        try:
+            d = requests.get(f"{self.comfy}/system_stats", timeout=10).json()
+            return float((d.get("devices") or [{}])[0].get("vram_free", 0)) / (1024 ** 3)
+        except Exception:
+            return None
+
+    def _comfy_free(self, need_gib=20.0):
+        """Unload ComfyUI's models so the ~18 GB vision model can load for the check, then wait
+        until the memory is really free. Leaves another pipe's running render alone."""
+        if not self._comfy_idle():
+            return
+        try:
+            requests.post(f"{self.comfy}/free", json={"unload_models": True, "free_memory": True},
+                          timeout=30)
+        except Exception:
+            pass
+        for _ in range(20):
+            v = self._vram_free_gib()
+            if v is None or v >= need_gib:
+                return
+            time.sleep(1)
+
+    # ---- where a picture came from ----
+    @staticmethod
+    def _digest(b64):
+        try:
+            raw = base64.b64decode(b64)
+        except Exception:
+            raw = str(b64).encode()
+        return hashlib.sha256(raw).hexdigest()[:32]
+
+    @staticmethod
+    def _origin_path(cid):
+        return os.path.join(ORIGIN_DIR, hashlib.sha1(str(cid).encode()).hexdigest()[:24] + ".json")
+
+    def _origin(self, cid, b64):
+        """The record of a picture this pipe rendered in this chat, or None. Never raises."""
+        if not cid or not b64:
+            return None
+        try:
+            with open(self._origin_path(cid)) as f:
+                recs = json.load(f).get("pictures") or []
+        except Exception:
+            return None
+        dg = self._digest(b64)
+        for r in reversed(recs):
+            if r.get("digest") == dg:
+                return r
+        return None
+
+    def _remember_origin(self, cid, b64, prompt, seed):
+        """Record a picture rendered from `prompt` and `seed`. Never raises."""
+        if not cid or not b64 or not prompt or seed is None:
+            return
+        try:
+            os.makedirs(ORIGIN_DIR, exist_ok=True)
+            path = self._origin_path(cid)
+            try:
+                with open(path) as f:
+                    recs = json.load(f).get("pictures") or []
+            except Exception:
+                recs = []
+            recs.append({"digest": self._digest(b64), "prompt": prompt, "seed": int(seed),
+                         "ts": time.time()})
+            tmp = path + ".tmp"
+            with open(tmp, "w") as f:
+                json.dump({"pictures": recs[-_ORIGIN_PER_CHAT:]}, f)
+            os.replace(tmp, path)
+            files = [(os.path.getmtime(os.path.join(ORIGIN_DIR, n)), n)
+                     for n in os.listdir(ORIGIN_DIR) if n.endswith(".json")]
+            for _, name in sorted(files)[:-_ORIGIN_KEEP]:
+                os.remove(os.path.join(ORIGIN_DIR, name))
+        except Exception:
+            pass
 
     def _enhance_edit(self, instruction, ref_b64):
         """(prompt, avoid) for the SDXL edit path — a VISION rewrite.
@@ -373,77 +661,209 @@ class Pipe:
             break
         return None, f"⚠️ Image generation failed: {err}"
 
-    def _generate(self, prompt: str, ref_b64, seed=None):
-        """Returns (markdown_or_error, meta). meta carries what the status line reports.
+    def _generate(self, prompt: str, ref_b64, seed=None, cid=None):
+        """Returns (markdown_or_error, meta). meta carries what the status line reports, plus
+        `origin` ({prompt, seed}) whenever the picture can be drawn again from a prompt.
 
+        Three paths:
+          * no reference: text-to-image on Lustify;
+          * a picture this pipe made, with OWN_PICTURES=rerender: the same seed with the change
+            folded into its own prompt (_rerender);
+          * anything else, an upload above all: FireRed with the request rewritten from the
+            picture (_edit_firered). The SDXL img2img engine only for this pipe's own pictures.
+        Edits are checked against the request as typed, with one corrected retry.
+
+        All LLM work happens BEFORE _free_vram, or we evict the model we are about to call.
         The seed is returned rather than stashed on self: OpenWebUI reuses ONE Pipe instance
         across concurrent chats, so instance state races between users.
         """
+        seed_given = seed is not None
         seed = random.randint(0, 2 ** 31 - 1) if seed is None else seed
-        engine, downgrade = self._engine() if ref_b64 else ("sdxl", "")
-        meta = {"seed": seed, "engine": engine if ref_b64 else "sdxl-t2i", "downgrade": downgrade}
+        meta = {"seed": seed, "engine": "sdxl-t2i", "downgrade": "", "qa_rounds": 0}
         t0 = time.time()
 
-        # All LLM work happens BEFORE _free_vram, or we evict the model we are about to call.
-        avoid = ""
-        qwen_negative = ""
         if ref_b64:
+            origin = self._origin(cid, ref_b64)
+            own = origin is not None
+            meta["own"] = own
+            style = ms.style_conversion(prompt) if (ms and prompt) else None
+            if own and prompt and not style and origin.get("prompt") and self._own_mode() == "rerender":
+                return self._rerender(prompt, ref_b64, origin, seed if seed_given else None, meta, t0)
+            engine, downgrade = self._engine(own)
+            meta.update(engine=engine, downgrade=downgrade)
+            if engine == "none":
+                return (f"⚠️ Editing an uploaded photo needs FireRed-Image-Edit, which is not "
+                        f"available ({downgrade}). The uncensored img2img path is only for pictures "
+                        f"Photoreal made itself."), meta
             if engine == "qwen":
-                tier = resolve_tier(getattr(self.valves, "EDIT_QUALITY", "balanced"))
-                meta["tier"] = str(getattr(self.valves, "EDIT_QUALITY", "balanced")).strip().lower()
-                # Qwen takes an imperative instruction natively, so the raw request is already the
-                # right shape. No rewrite — the wrong rewrite (SDXL tag soup) would actively hurt.
-                instruction = prompt or "improve the overall quality, keep everything else the same"
-                # EXCEPT whole-image restyles ("make this picture animated"): those get the
-                # purpose-built instruction, and always the full non-Lightning tier — the
-                # negative (the style being left behind) only bites at cfg > 1. Note the pipe's
-                # SDXL NEG (which bans cartoon/anime for t2i) is NOT used here, so a requested
-                # style is never fought by the pipe's own negative prompt.
-                style = ms.style_conversion(prompt) if (ms and prompt) else None
-                if style:
-                    instruction, qwen_negative = style
-                    tier = resolve_tier("best")
-                    meta["tier"] = "best"
-            else:
-                instruction = prompt or "photorealistic, highly detailed, sharp focus, natural lighting"
-                if getattr(self.valves, "REWRITE", True) and prompt:
-                    instruction, avoid = self._enhance_edit(instruction, ref_b64)
-        else:
-            instruction = self._enhance(prompt) if prompt else \
-                "photorealistic, highly detailed, sharp focus, natural lighting"
+                return self._edit_firered(prompt, ref_b64, style, seed, meta, t0)
+            return self._edit_sdxl(prompt, ref_b64, seed, meta, t0)
 
+        instruction = self._enhance(prompt) if prompt else \
+            "photorealistic, highly detailed, sharp focus, natural lighting"
         self._free_vram()
-
-        if ref_b64:
-            try:
-                ref_name = self._upload(ref_b64)
-            except Exception as e:
-                return f"⚠️ Could not upload reference image: {e}", meta
-            if engine == "qwen":
-                wf = build_qwen_edit_wf(instruction, ref_name, seed, tier["cfg"], tier["steps"],
-                                        negative=qwen_negative, lightning=tier["lightning"])
-                out_node = "s"
-            else:
-                neg = f"{NEG}, {avoid}" if avoid else NEG
-                wf = self._build_t2i_wf(instruction, neg, seed, ref_name=ref_name)
-                out_node = "9"
-        else:
-            wf = self._build_t2i_wf(instruction, NEG, seed)
-            out_node = "9"
-
-        data, err = self._submit_poll(wf, out_node)
+        data, err = self._submit_poll(self._build_t2i_wf(instruction, NEG, seed), "9")
         meta["render_s"] = round(time.time() - t0, 1)
-        metric(METRICS_PATH, job="photo_edit" if ref_b64 else "photo_t2i", ok=not err,
-               engine=meta["engine"], seed=seed, tier=meta.get("tier"),
-               denoise=DENOISE if (ref_b64 and engine == "sdxl") else 1.0,
-               rewrote=bool(avoid), render_s=meta["render_s"],
-               request=(prompt or "")[:160], err=(err or "")[:160] or None)
+        self._metric("photo_t2i", meta, prompt, err)
         if err:
             return err, meta
+        meta["origin"] = {"prompt": instruction, "seed": seed}
+        return self._md(data, seed, instruction), meta
+
+    def _edit_firered(self, prompt, ref_b64, style, seed, meta, t0):
+        """FireRed-Image-Edit 1.1 on the reference, then the check and one corrected retry."""
+        tier_name = str(getattr(self.valves, "EDIT_QUALITY", "balanced")).strip().lower()
+        tier = resolve_tier(tier_name)
+        negative = ""
+        self._comfy_free()  # the rewrite and the check load the ~18 GB vision model
+        if style:
+            # Whole-image restyle ("make this picture animated"): the purpose-built instruction,
+            # always on the full tier, because the negative (the style being left behind) only
+            # bites at cfg > 1. The pipe's own NEG (which bans cartoon/anime for t2i) is not used,
+            # so a requested style is never fought by the pipe's negative prompt.
+            instruction, negative = style
+            tier, tier_name = resolve_tier("best"), "best"
+        elif prompt and getattr(self.valves, "REWRITE", True):
+            instruction, negative = self._rewrite_edit(prompt, ref_b64)
+        else:
+            instruction = prompt or "improve the overall quality, keep everything else the same"
+        meta.update(tier=tier_name, rewrote=bool(prompt) and instruction != prompt)
+        self._free_vram()
+        try:
+            ref_name = self._upload(ref_b64)
+        except Exception as e:
+            return f"⚠️ Could not upload reference image: {e}", meta
+        wf = build_qwen_edit_wf(instruction, ref_name, seed, tier["cfg"], tier["steps"],
+                                negative=negative, lightning=tier["lightning"])
+        data, err = self._submit_poll(wf, "s")
+        if err:
+            meta["render_s"] = round(time.time() - t0, 1)
+            self._metric("photo_edit", meta, prompt, err)
+            return err, meta
+
+        def retry(cur, fix):
+            # The correction goes on the instruction, and the retry runs the full tier, where the
+            # editor follows more closely and the negative acts. A fresh seed: the same one tends
+            # to repeat the miss.
+            nxt = f"{cur} IMPORTANT correction: {fix}"
+            best = resolve_tier("best")
+            s = random.randint(0, 2 ** 31 - 1)
+            self._free_vram()
+            d, e = self._submit_poll(build_qwen_edit_wf(nxt, ref_name, s, best["cfg"], best["steps"],
+                                                        negative=negative,
+                                                        lightning=best["lightning"]), "s")
+            if d is not None:
+                meta.update(seed=s, tier="best")
+            return nxt, d, e
+
+        data, note = self._checked(prompt, instruction, ref_b64, data, meta, retry)
+        meta["render_s"] = round(time.time() - t0, 1)
+        self._metric("photo_edit", meta, prompt, None)
+        return self._md(data, meta["seed"], instruction) + note, meta
+
+    def _rerender(self, change, ref_b64, origin, seed, meta, t0):
+        """A picture this pipe made, drawn again with `change` folded into its own prompt.
+
+        The same seed and a mostly unchanged prompt keep the composition, and Lustify follows its
+        prompt, which FireRed often does not do for the edits this pipe gets most (21 of the
+        first 29). Checked against the original like an edit; the retry folds the checker's
+        correction into the prompt as well and keeps the seed."""
+        seed = int(origin.get("seed") or 0) if seed is None else seed
+        meta.update(engine="rerender", seed=seed, tier=None)
+        self._comfy_free()
+        prompt = self._merge_prompt(origin["prompt"], change)
+        meta["rewrote"] = True
+        self._free_vram()
+        data, err = self._submit_poll(self._build_t2i_wf(prompt, NEG, seed), "9")
+        if err:
+            meta["render_s"] = round(time.time() - t0, 1)
+            self._metric("photo_edit", meta, change, err)
+            return err, meta
+
+        def retry(cur, fix):
+            nxt = self._merge_prompt(cur, fix)
+            self._free_vram()
+            d, e = self._submit_poll(self._build_t2i_wf(nxt, NEG, seed), "9")
+            return nxt, d, e
+
+        data, note, prompt = self._checked(change, prompt, ref_b64, data, meta, retry, keep=True)
+        meta["render_s"] = round(time.time() - t0, 1)
+        meta["origin"] = {"prompt": prompt, "seed": seed}
+        self._metric("photo_edit", meta, change, None)
+        return self._md(data, seed, prompt) + note, meta
+
+    def _checked(self, request, cur, ref_b64, data, meta, retry, keep=False):
+        """Check `data` against `request`; on a miss call retry(cur, fix) -> (cur, data, err)
+        up to QA_RETRIES times. Returns (data, note) or, with keep=True, (data, note, cur).
+        The note is shown under the picture whenever a miss survives, so a failed edit is never
+        presented as a finished one."""
+        note = ""
+        if request and getattr(self.valves, "CHECK", True):
+            for rnd in range(QA_RETRIES + 1):
+                self._comfy_free()
+                ok, fix, _ = self._verify_edit(request, cur, ref_b64,
+                                               base64.b64encode(data).decode())
+                if ok:
+                    note = ""
+                    break
+                meta["qa_fix"] = meta.get("qa_fix") or fix
+                if not fix or rnd == QA_RETRIES:
+                    note = self._qa_note(fix)
+                    break
+                nxt, data2, err2 = retry(cur, fix)
+                if data2 is None:
+                    note = self._qa_note(fix, err2)
+                    break
+                cur, data = nxt, data2
+                meta["qa_rounds"] = meta.get("qa_rounds", 0) + 1
+            self._comfy_free()  # idle means the GPU is empty for the next chat turn
+        return (data, note, cur) if keep else (data, note)
+
+    @staticmethod
+    def _qa_note(fix, err=None):
+        if not fix:
+            return ("\n\n*The check says this edit missed something but gave no correction, so "
+                    "the picture is shown as rendered.*")
+        if err:
+            return f"\n\n*⚠️ The check says: {fix} The corrected retry failed ({err}).*"
+        return f"\n\n*⚠️ After a corrected retry the check still says: {fix}*"
+
+    def _edit_sdxl(self, prompt, ref_b64, seed, meta, t0):
+        """The old Lustify img2img edit, for this pipe's own pictures only (see _engine). No check:
+        it cannot take a correction, it re-describes the whole picture."""
+        instruction = prompt or "photorealistic, highly detailed, sharp focus, natural lighting"
+        avoid = ""
+        if getattr(self.valves, "REWRITE", True) and prompt:
+            instruction, avoid = self._enhance_edit(instruction, ref_b64)
+        meta["rewrote"] = bool(avoid)
+        self._free_vram()
+        try:
+            ref_name = self._upload(ref_b64)
+        except Exception as e:
+            return f"⚠️ Could not upload reference image: {e}", meta
+        neg = f"{NEG}, {avoid}" if avoid else NEG
+        data, err = self._submit_poll(self._build_t2i_wf(instruction, neg, seed, ref_name=ref_name), "9")
+        meta["render_s"] = round(time.time() - t0, 1)
+        self._metric("photo_edit", meta, prompt, err)
+        if err:
+            return err, meta
+        return self._md(data, seed, instruction), meta
+
+    @staticmethod
+    def _md(data, seed, label):
         # Seed in the alt-text so it survives a page reload and a copy-paste, matching the
-        # data-seed= precedent on the video pipe.
-        return (f"![seed {seed} · {instruction[:50]}]"
-                f"(data:image/png;base64,{base64.b64encode(data).decode()})"), meta
+        # data-seed= precedent on the video pipe. Brackets and newlines would break the link.
+        alt = re.sub(r"\s+", " ", re.sub(r"[\[\]]", " ", label or "")).strip()[:50]
+        return f"![seed {seed} · {alt}](data:image/png;base64,{base64.b64encode(data).decode()})"
+
+    @staticmethod
+    def _metric(job, meta, request, err):
+        metric(METRICS_PATH, job=job, ok=not err, engine=meta.get("engine"), seed=meta.get("seed"),
+               tier=meta.get("tier"), own=meta.get("own"), rewrote=meta.get("rewrote"),
+               qa_rounds=meta.get("qa_rounds", 0), qa_fix=(meta.get("qa_fix") or "")[:200] or None,
+               denoise=DENOISE if meta.get("engine") == "sdxl" else 1.0,
+               render_s=meta.get("render_s"), request=(request or "")[:160],
+               err=(err or "")[:160] or None)
 
     # ---------- native OpenWebUI status line (progress + timing) ----------
     async def _status(self, emitter, description, done=False):
@@ -483,11 +903,16 @@ class Pipe:
         seed = f"seed {meta['seed']}"
         if not editing:
             return f"Lustify V10 Krea 2 · 1024×1024 · 8 steps · {seed}"
+        n = meta.get("qa_rounds") or 0
+        retried = f" · {n} corrected retr{'y' if n == 1 else 'ies'}" if n else ""
+        if meta["engine"] == "rerender":
+            return f"Lustify V10 re-render of its own prompt · {seed}{retried}"
         if meta["engine"] == "qwen":
-            return f"Qwen-Image-Edit · {meta.get('tier', 'balanced')} · {seed}"
+            d = f"FireRed Edit 1.1 · {meta.get('tier', 'balanced')} · {seed}{retried}"
+            return d + (f" · {meta['downgrade']}" if meta.get("downgrade") else "")
         warn = " · identity may drift"
         if meta.get("downgrade"):
-            warn = " · Qwen unavailable, identity may drift"
+            warn = " · FireRed unavailable, identity may drift"
         return f"Lustify V10 Krea 2 img2img · d{DENOISE} · 8 steps · {seed}{warn}"
 
     async def pipe(self, body: dict, __event_emitter__=None, __metadata__=None, __task__=None):
@@ -509,18 +934,21 @@ class Pipe:
         # this chat: history first (any OWUI message shape, generated images included),
         # then the persistent per-chat store (survives deploys and model switches). This
         # is the fix for "make this picture animated" generating an unrelated stranger —
-        # the request now EDITS the previous image via Qwen instead of running a fresh t2i
-        # with the follow-up words as the whole prompt.
+        # the request now EDITS the previous image instead of running a fresh t2i with the
+        # follow-up words as the whole prompt.
         if ref is None and text and wants_edit and ms:
             ref = ms.find_recent_image(msgs) or ms.recall_image(cid)
         text, seed = parse_seed(text)
         editing = ref is not None
         label = "Editing image" if editing else "Generating image"
         (result, meta), el = await self._tracked(
-            emitter, label, asyncio.to_thread(self._generate, text, ref, seed))
+            emitter, label, asyncio.to_thread(self._generate, text, ref, seed, cid if ms else None))
         if ms and isinstance(result, str):
             m = re.search(r"data:image/[^;]+;base64,([A-Za-z0-9+/=]+)", result)
             if m:
                 ms.remember_image(cid, m.group(1))
+                o = meta.get("origin")
+                if o:  # rendered from a prompt: a later edit can re-render it (see ORIGIN_DIR)
+                    self._remember_origin(cid, m.group(1), o["prompt"], o["seed"])
         return await self._finish(emitter, result, "Edited" if editing else "Generated", el,
                                   self._detail(meta, editing))
