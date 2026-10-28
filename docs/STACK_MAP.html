@@ -1,0 +1,737 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<!-- Interactive map of the stack. Open this file in a browser; GitHub shows it as source.
+     Same page as the README "Stack map" section, with the route explorer. -->
+<title>Ohmz AI Stack Map</title>
+<meta name="claude:viewport-fit-sides" content="cover">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=Space+Grotesk:wght@400;500;600;700&display=swap">
+<style>
+/* Layout: one column of bands. The route explorer leads (map + steps side by side on desktop,
+   stacked on phones), then the router ladder, the GPU ledger, the agent pipeline and the edges.
+   Palette is the Ohmz AI brand (branding/ohmz.css): warm-dark shell, one amber accent. Dark-first. */
+:root {
+  --canvas: #1a1917;
+  --panel: #211f1d;
+  --raise: #262421;
+  --line: #3a3733;
+  --line-soft: #302d2a;
+  --text: #f0edea;
+  --secondary: #cbc5be;
+  --muted: #8f8982;
+  --amber: #e0913f;
+  --amber-text: #edaa5f;
+  --on-amber: #241f18;
+  --code: #131211;
+  --hatch: rgba(224, 145, 63, 0.28);
+  --font-display: "Space Grotesk", "Avenir Next", "Segoe UI", system-ui, sans-serif;
+  --font-body: "Space Grotesk", "Avenir Next", "Segoe UI", system-ui, sans-serif;
+  --font-mono: "IBM Plex Mono", ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+  color-scheme: dark;
+}
+@media (prefers-color-scheme: light) {
+  :root:not([data-theme="dark"]) {
+    --canvas: #faf9f7; --panel: #f3f0ec; --raise: #ffffff; --line: #ddd7d0; --line-soft: #e8e3dd;
+    --text: #1a1917; --secondary: #4d4944; --muted: #6b655f; --amber: #b86d22; --amber-text: #8f5214;
+    --on-amber: #ffffff; --code: #efebe6; --hatch: rgba(184, 109, 34, 0.25);
+    color-scheme: light;
+  }
+}
+:root[data-theme="light"] {
+  --canvas: #faf9f7; --panel: #f3f0ec; --raise: #ffffff; --line: #ddd7d0; --line-soft: #e8e3dd;
+  --text: #1a1917; --secondary: #4d4944; --muted: #6b655f; --amber: #b86d22; --amber-text: #8f5214;
+  --on-amber: #ffffff; --code: #efebe6; --hatch: rgba(184, 109, 34, 0.25);
+  color-scheme: light;
+}
+
+* { box-sizing: border-box; }
+body {
+  background: var(--canvas);
+  color: var(--text);
+  font-family: var(--font-body);
+  font-size: 15px;
+  line-height: 1.55;
+  padding-left: max(16px, env(safe-area-inset-left, 0px));
+  padding-right: max(16px, env(safe-area-inset-right, 0px));
+  padding-block: 0 56px;
+}
+.wrap { max-width: 1180px; margin: 0 auto; }
+h1, h2, h3 { font-family: var(--font-display); text-wrap: balance; margin: 0; }
+p { margin: 0; }
+code, .mono { font-family: var(--font-mono); font-size: 0.86em; }
+code { background: var(--code); padding: 1px 5px; border-radius: 3px; color: var(--secondary); }
+a { color: var(--amber-text); }
+:focus-visible { outline: 2px solid var(--amber); outline-offset: 2px; }
+
+/* Header */
+header { padding-block: 40px 28px; display: grid; gap: 14px; }
+.eyebrow { font-family: var(--font-mono); font-size: 12px; letter-spacing: 0.08em; text-transform: uppercase; color: var(--muted); display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
+.omega { display: inline-grid; place-items: center; width: 26px; height: 26px; border-radius: 6px; background: var(--amber); color: var(--on-amber); font-family: var(--font-display); font-weight: 700; font-size: 16px; letter-spacing: 0; }
+h1 { font-size: clamp(30px, 5vw, 46px); font-weight: 600; letter-spacing: -0.02em; line-height: 1.08; }
+.lede { max-width: 68ch; color: var(--secondary); font-size: 16px; }
+.facts { display: flex; flex-wrap: wrap; gap: 6px 18px; font-family: var(--font-mono); font-size: 12.5px; color: var(--muted); }
+.facts b { color: var(--text); font-weight: 500; }
+
+section { padding-block: 34px; border-top: 1px solid var(--line-soft); display: grid; gap: 18px; }
+.sec-head { display: grid; gap: 6px; max-width: 74ch; }
+h2 { font-size: 22px; font-weight: 600; letter-spacing: -0.01em; }
+.sec-head p { color: var(--secondary); }
+
+/* Use-case picker */
+.picker { display: grid; gap: 10px; }
+.pgroup { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
+.pgroup .glabel { font-family: var(--font-mono); font-size: 11px; letter-spacing: 0.08em; text-transform: uppercase; color: var(--muted); width: 92px; flex: none; }
+.uc { font: inherit; font-size: 13.5px; color: var(--secondary); background: var(--panel); border: 1px solid var(--line); border-radius: 4px; padding: 5px 11px; cursor: pointer; }
+.uc:hover { border-color: var(--muted); color: var(--text); }
+.uc[aria-pressed="true"] { background: var(--amber); border-color: var(--amber); color: var(--on-amber); font-weight: 600; }
+
+/* Explorer: map + steps */
+.explorer { display: grid; grid-template-columns: minmax(0, 1fr) 340px; gap: 22px; align-items: start; }
+.map { position: relative; display: grid; gap: 30px; padding: 18px 16px 22px; background: var(--panel); border: 1px solid var(--line); border-radius: 8px; overflow: hidden; }
+.wires { position: absolute; inset: 0; width: 100%; height: 100%; pointer-events: none; z-index: 0; overflow: visible; }
+.layer { position: relative; z-index: 1; display: grid; grid-template-columns: 96px minmax(0, 1fr); gap: 10px; align-items: start; }
+.lname { font-family: var(--font-mono); font-size: 10.5px; letter-spacing: 0.08em; text-transform: uppercase; color: var(--muted); padding-top: 8px; }
+.nodes { display: flex; flex-wrap: wrap; gap: 8px 10px; min-width: 0; }
+.node { background: var(--raise); border: 1px solid var(--line); border-radius: 6px; padding: 6px 10px 7px; min-width: 0; max-width: 100%; transition: opacity .18s ease, border-color .18s ease; }
+.node .nm { font-size: 13px; font-weight: 600; line-height: 1.25; overflow-wrap: anywhere; }
+.node .sub { font-family: var(--font-mono); font-size: 10.5px; color: var(--muted); line-height: 1.3; overflow-wrap: anywhere; }
+.map.focus .node { opacity: 0.32; }
+.map.focus .node.on { opacity: 1; border-color: var(--amber); box-shadow: inset 0 0 0 1px var(--amber); }
+.map.focus .node.on .sub { color: var(--amber-text); }
+.wire { fill: none; stroke: var(--amber); stroke-width: 1.6; opacity: 0.85; }
+.wire-dot { fill: var(--amber); stroke: none; }
+
+.steps { background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 18px 18px 20px; display: grid; gap: 14px; min-width: 0; }
+.steps h3 { font-size: 19px; font-weight: 600; }
+.steps .how { color: var(--secondary); font-size: 14px; }
+.steps ol { margin: 0; padding: 0; list-style: none; counter-reset: s; display: grid; gap: 10px; }
+.steps li { counter-increment: s; display: grid; grid-template-columns: 22px minmax(0, 1fr); gap: 8px; font-size: 14px; }
+.steps li::before { content: counter(s); font-family: var(--font-mono); font-size: 11.5px; color: var(--amber-text); padding-top: 2px; }
+.kv { display: grid; gap: 4px; padding-top: 12px; border-top: 1px solid var(--line-soft); font-size: 13.5px; }
+.kv .k { font-family: var(--font-mono); font-size: 10.5px; letter-spacing: 0.08em; text-transform: uppercase; color: var(--muted); }
+.chips { display: flex; flex-wrap: wrap; gap: 5px; }
+.chip { font-family: var(--font-mono); font-size: 11.5px; padding: 2px 7px; border-radius: 3px; background: var(--code); color: var(--secondary); border: 1px solid var(--line-soft); }
+
+/* Ladder */
+.ladder { display: grid; border: 1px solid var(--line); border-radius: 8px; overflow: hidden; }
+.rung { display: grid; grid-template-columns: 44px minmax(0, 1.25fr) minmax(0, 1fr) minmax(0, 1.35fr); gap: 14px; padding: 11px 16px; border-top: 1px solid var(--line-soft); align-items: baseline; font-size: 14px; }
+.rung:first-child { border-top: 0; }
+.rung.head { background: var(--raise); font-family: var(--font-mono); font-size: 10.5px; letter-spacing: 0.08em; text-transform: uppercase; color: var(--muted); }
+.rung .n { font-family: var(--font-mono); font-size: 12px; color: var(--amber-text); }
+.rung .to { font-family: var(--font-mono); font-size: 12.5px; color: var(--text); overflow-wrap: anywhere; }
+.rung .why { color: var(--secondary); font-size: 13.5px; }
+.rung.group-start { border-top: 1px solid var(--line); }
+
+/* VRAM ledger */
+.ledger { display: grid; gap: 4px; }
+.lrow { display: grid; grid-template-columns: minmax(0, 250px) minmax(0, 1fr) 112px; gap: 14px; align-items: center; padding-block: 7px; border-bottom: 1px solid var(--line-soft); }
+.lrow .who { min-width: 0; }
+.lrow .who .t { font-family: var(--font-mono); font-size: 12.5px; overflow-wrap: anywhere; }
+.lrow .who .r { font-size: 12.5px; color: var(--muted); }
+.track { position: relative; height: 14px; background: var(--code); border-radius: 2px; overflow: hidden; }
+.bar { position: absolute; top: 0; bottom: 0; left: 0; background: var(--amber); border-radius: 2px; }
+.bar.est { background: repeating-linear-gradient(135deg, var(--amber) 0 4px, var(--hatch) 4px 8px); }
+.bar.range { background: repeating-linear-gradient(135deg, var(--hatch) 0 4px, transparent 4px 8px); border: 1px solid var(--amber); }
+.track .cap { position: absolute; top: -3px; bottom: -3px; width: 0; border-left: 1px dashed var(--muted); }
+.lrow .mib { font-family: var(--font-mono); font-size: 12.5px; text-align: right; font-variant-numeric: tabular-nums; color: var(--secondary); }
+.axis { display: grid; grid-template-columns: minmax(0, 250px) minmax(0, 1fr) 112px; gap: 14px; }
+.axis .ticks { position: relative; height: 18px; font-family: var(--font-mono); font-size: 10.5px; color: var(--muted); }
+.axis .ticks span { position: absolute; transform: translateX(-50%); font-variant-numeric: tabular-nums; }
+.axis .ticks span:first-child { transform: none; }
+.axis .ticks span:last-child { transform: translateX(-100%); }
+.legend { display: flex; flex-wrap: wrap; gap: 6px 18px; font-size: 12.5px; color: var(--muted); }
+.legend i { display: inline-block; width: 22px; height: 10px; vertical-align: -1px; margin-right: 6px; border-radius: 2px; }
+
+/* Rules */
+.rules { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px; }
+.rule { background: var(--panel); border: 1px solid var(--line-soft); border-radius: 6px; padding: 14px 15px 15px; display: grid; gap: 6px; align-content: start; min-width: 0; }
+.rule h3 { font-size: 15px; font-weight: 600; }
+.rule p { font-size: 13.5px; color: var(--secondary); }
+.rule .fig { font-family: var(--font-mono); font-size: 12px; color: var(--amber-text); }
+.rule.changed { border-color: var(--amber); }
+.tag { font-family: var(--font-mono); font-size: 10.5px; letter-spacing: 0.06em; text-transform: uppercase; color: var(--on-amber); background: var(--amber); padding: 1px 6px; border-radius: 3px; justify-self: start; }
+
+/* Agent pipeline */
+.pipeline { display: grid; grid-template-columns: repeat(7, minmax(0, 1fr)); gap: 0; border: 1px solid var(--line); border-radius: 8px; overflow: hidden; counter-reset: p; }
+.stage { padding: 14px 13px 15px; border-left: 1px solid var(--line-soft); display: grid; gap: 6px; align-content: start; counter-increment: p; min-width: 0; }
+.stage:first-child { border-left: 0; }
+.stage::before { content: counter(p); font-family: var(--font-mono); font-size: 11.5px; color: var(--amber-text); }
+.stage h3 { font-size: 14px; font-weight: 600; line-height: 1.3; }
+.stage p { font-size: 13px; color: var(--secondary); }
+.health { font-size: 13.5px; color: var(--secondary); max-width: 90ch; }
+
+/* Edges */
+.cols { display: grid; grid-template-columns: minmax(0, 1.25fr) minmax(0, 1fr); gap: 22px; align-items: start; }
+.tbl-wrap { overflow-x: auto; border: 1px solid var(--line); border-radius: 8px; }
+table { border-collapse: collapse; width: 100%; font-size: 13.5px; }
+th, td { text-align: left; padding: 8px 12px; border-top: 1px solid var(--line-soft); vertical-align: top; }
+thead th { border-top: 0; background: var(--raise); font-family: var(--font-mono); font-size: 10.5px; letter-spacing: 0.08em; text-transform: uppercase; color: var(--muted); font-weight: 500; }
+td.port { font-family: var(--font-mono); font-size: 12px; color: var(--amber-text); white-space: nowrap; }
+td.svc { font-weight: 600; white-space: nowrap; }
+td.what { color: var(--secondary); }
+.doors { display: grid; gap: 12px; }
+.door { border: 1px solid var(--line-soft); border-radius: 6px; padding: 14px 15px; display: grid; gap: 6px; background: var(--panel); }
+.door h3 { font-size: 15px; font-weight: 600; }
+.door p { font-size: 13.5px; color: var(--secondary); }
+
+footer { padding-top: 26px; border-top: 1px solid var(--line-soft); display: grid; gap: 8px; font-size: 13px; color: var(--muted); max-width: 92ch; }
+
+@media (max-width: 980px) {
+  .explorer { grid-template-columns: minmax(0, 1fr); }
+  .rules { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .pipeline { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .stage { border-left: 0; border-top: 1px solid var(--line-soft); }
+  .stage:nth-child(-n+2) { border-top: 0; }
+  .stage:nth-child(even) { border-left: 1px solid var(--line-soft); }
+  .cols { grid-template-columns: minmax(0, 1fr); }
+}
+@media (max-width: 720px) {
+  .rung { grid-template-columns: 30px minmax(0, 1fr); gap: 4px 10px; }
+  .rung .to, .rung .why { grid-column: 2; }
+  .rung.head { display: none; }
+  .lrow, .axis { grid-template-columns: minmax(0, 1fr) 84px; gap: 6px 10px; }
+  .lrow .who { grid-column: 1 / -1; }
+  .axis .spacer { display: none; }
+  .axis .ticks { grid-column: 1; }
+}
+@media (max-width: 560px) {
+  .layer { grid-template-columns: minmax(0, 1fr); gap: 6px; }
+  .lname { padding-top: 0; }
+  .map { gap: 26px; padding: 14px 12px 18px; }
+  .rules { grid-template-columns: minmax(0, 1fr); }
+  .pipeline { grid-template-columns: minmax(0, 1fr); }
+  .stage, .stage:nth-child(even) { border-left: 0; }
+  .stage:nth-child(2) { border-top: 1px solid var(--line-soft); }
+  .pgroup .glabel { width: 100%; }
+}
+@media (prefers-reduced-motion: reduce) { .node { transition: none; } }
+</style>
+<style>body { margin: 0; } [hidden] { display: none !important; }</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <div class="eyebrow"><span class="omega">Ω</span> Ohmz AI · homelab · checked 28 Oct 2026</div>
+    <h1>How Ohmz AI answers you</h1>
+    <p class="lede">One chat box at ai.ohmz.cloud sits in front of a router, local language, image and video models, and a background agent, all sharing one graphics card. Pick something you do in Ohmz AI below to see which parts it goes through.</p>
+    <div class="facts">
+      <span><b>RTX 3090</b> · 24 GB, shared by everything</span>
+      <span><b>3</b> choices in the model picker</span>
+      <span><b>7</b> Ollama model tags</span>
+      <span><b>5</b> image and video models in ComfyUI</span>
+      <span>Open WebUI <b>0.11.3</b>, local fork</span>
+    </div>
+  </header>
+
+  <section aria-labelledby="explore-h">
+    <div class="sec-head">
+      <h2 id="explore-h">Follow a request</h2>
+      <p>Each row is one layer of the stack, from the address you open down to the service that does the work. The lit path is what the chosen request touches.</p>
+    </div>
+    <div class="picker" id="picker" role="group" aria-label="Choose a use case"></div>
+    <div class="explorer">
+      <div class="map focus" id="map">
+        <svg class="wires" id="wires" aria-hidden="true"></svg>
+      </div>
+      <aside class="steps" id="steps" aria-live="polite"></aside>
+    </div>
+  </section>
+
+  <section aria-labelledby="ladder-h">
+    <div class="sec-head">
+      <h2 id="ladder-h">How the Assistant decides</h2>
+      <p>Every message on the Assistant runs this list from the top, and the first match wins. The router reads only your own words, never a pasted document or search results, so a PDF that mentions “video” can't start a render. Videos, picture edits and new background jobs ask you to confirm first.</p>
+    </div>
+    <div class="ladder" id="ladder"></div>
+  </section>
+
+  <section aria-labelledby="vram-h">
+    <div class="sec-head">
+      <h2 id="vram-h">What fits on the card</h2>
+      <p>Measured GPU memory for each model, drawn to scale against the 3090's 24 GB. Only two language models fit at once, and never two of the big ones, so most switches mean unloading one and loading another.</p>
+    </div>
+    <div class="ledger" id="ledger"></div>
+    <div class="legend">
+      <span><i style="background: var(--amber)"></i>measured with nvidia-smi</span>
+      <span><i style="background: repeating-linear-gradient(135deg, var(--amber) 0 4px, var(--hatch) 4px 8px)"></i>carried over, not measured here</span>
+      <span><i style="border: 1px solid var(--amber); background: repeating-linear-gradient(135deg, var(--hatch) 0 4px, transparent 4px 8px)"></i>range</span>
+      <span><i style="border-left: 1px dashed var(--muted); width: 1px; height: 12px"></i>usable ceiling, 24,115 MiB</span>
+    </div>
+  </section>
+
+  <section aria-labelledby="gpu-h">
+    <div class="sec-head">
+      <h2 id="gpu-h">Sharing one GPU</h2>
+      <p>The rules that keep chat, renders and the background agent from pushing each other off the card.</p>
+    </div>
+    <div class="rules">
+      <div class="rule">
+        <h3>One queue for everything</h3>
+        <p>Chat, code, pictures and video all take the same lock. A message sent mid-render waits its turn and shows how long it has waited.</p>
+        <span class="fig">“Waiting for the GPU… 1m 20s”</span>
+      </div>
+      <div class="rule">
+        <h3>Swaps cost seconds</h3>
+        <p>Chat and the coder can't share the card, so switching costs a swap each way. The agent's 64K tag is a second runner of the chat weights and pushes chat out.</p>
+        <span class="fig">chat ↔ code 6–12 s · chat reload 22.7 s</span>
+      </div>
+      <div class="rule">
+        <h3>Heat gate</h3>
+        <p>After getting the lock and before loading a model, it checks the card's temperature. Too hot and it waits, holding its place in the queue. An unreadable sensor never blocks.</p>
+        <span class="fig">pause at 85 °C · resume at 75 °C</span>
+      </div>
+      <div class="rule">
+        <h3>Models leave quickly</h3>
+        <p>Ollama unloads a model 60 seconds after it was last used, so ComfyUI gets room. The pipe also frees ComfyUI's memory before small prompt helpers run.</p>
+        <span class="fig">OLLAMA_KEEP_ALIVE=60s</span>
+      </div>
+      <div class="rule">
+        <h3>The agent waits for a free card</h3>
+        <p>gpuguard holds back scheduled jobs while ComfyUI has work or a big chat model is loaded. A due job is put off to the next minute, never dropped.</p>
+        <span class="fig">checks ComfyUI /queue and Ollama /api/ps</span>
+      </div>
+      <div class="rule changed">
+        <span class="tag">Changed today</span>
+        <h3>ComfyUI stays up when idle</h3>
+        <p>homelab-maint checks every 5 minutes. If ComfyUI's queue is empty but it still holds memory, it restarts the container, which unloads the models. Until today it stopped the container after 15 idle minutes, and picture tools failed until someone started it again.</p>
+        <span class="fig">restart above 3,000 MiB VRAM or 4,000 MiB RAM, two checks in a row</span>
+      </div>
+    </div>
+  </section>
+
+  <section aria-labelledby="agent-h">
+    <div class="sec-head">
+      <h2 id="agent-h">Background jobs, start to finish</h2>
+      <p>“Watch this price for two weeks and text me under $50” becomes a real scheduled job. The model writes text, and plain code does the checking and the sending, so a model that goes quiet can't silently drop an alert.</p>
+    </div>
+    <div class="pipeline">
+      <div class="stage"><h3>You ask</h3><p>Press Task, or say “track… every…”. A job with a schedule is what turns a message into a watch.</p></div>
+      <div class="stage"><h3>Confirm and contact</h3><p>You confirm. If it should text you and has no number on file, it asks before scheduling anything.</p></div>
+      <div class="stage"><h3>Agent makes the job</h3><p>hermes gateway on :8642 creates a cron job. The pipe checks the scheduler really has it and fixes its shape.</p></div>
+      <div class="stage"><h3>Job runs when the card is free</h3><p>On hermes-genesis:agent at 64K context, using searxng-hermes on :8889. Prices are compared in Python.</p></div>
+      <div class="stage"><h3>It writes a result</h3><p>Every run ends with a <code>LOG:</code> line, plus an <code>ALERT:</code> line when your condition is met.</p></div>
+      <div class="stage"><h3>Delivery sends it</h3><p><code>hermes_delivery.py</code> checks every minute: email and a text, 3 retries 5 minutes apart, each attempt recorded.</p></div>
+      <div class="stage"><h3>Cancel from the alert</h3><p>The cancel.ohmz.cloud link pauses or cancels with no login, and cleans up everything the job left.</p></div>
+    </div>
+    <p class="health">The stack also watches itself: a watchdog every 5 minutes (gateway, API, delivery timer, backups, FlightClaw, public gate, scheduler heartbeat), a search check every 30 minutes on both SearXNG instances, and an alert whenever a service fails. Most checks need two failed runs before they alert. DOWN sends a text and an email, DEGRADED sends only an email.</p>
+  </section>
+
+  <section aria-labelledby="edges-h">
+    <div class="sec-head">
+      <h2 id="edges-h">Services and other ways in</h2>
+      <p>Open WebUI runs on the host network and reaches everything on localhost. Ports are the ones in the repo's compose files and run scripts.</p>
+    </div>
+    <div class="cols">
+      <div class="tbl-wrap">
+        <table>
+          <thead><tr><th>Service</th><th>Port</th><th>What it does</th></tr></thead>
+          <tbody>
+            <tr><td class="svc">Open WebUI</td><td class="port">4567</td><td class="what">The app. Local fork that adds the four mode buttons and a background-tasks shortcut. Offline mode, telemetry off.</td></tr>
+            <tr><td class="svc">Ollama</td><td class="port">11434</td><td class="what">Every language model, embeddings included. The pipes call it directly.</td></tr>
+            <tr><td class="svc">ComfyUI</td><td class="port">8188</td><td class="what">Pictures, edits and video. Container <code>comfyui</code>, started with GPU access.</td></tr>
+            <tr><td class="svc">hermes gateway</td><td class="port">8642</td><td class="what">hermes-agent v0.21.4: background jobs and one-off research, two profiles.</td></tr>
+            <tr><td class="svc">SearXNG</td><td class="port">8888</td><td class="what">Web search for chat.</td></tr>
+            <tr><td class="svc">SearXNG (hermes)</td><td class="port">8889</td><td class="what">Search for the agent and monitors only, with a different set of engines.</td></tr>
+            <tr><td class="svc">Infinity reranker</td><td class="port">7997</td><td class="what">bge-reranker-v2-m3 on the CPU. Ranks search and document results.</td></tr>
+            <tr><td class="svc">Tika</td><td class="port">9998</td><td class="what">Pulls text out of uploaded documents.</td></tr>
+            <tr><td class="svc">Kokoro</td><td class="port">8081</td><td class="what">Text to speech. Speech to text is Whisper, inside Open WebUI.</td></tr>
+            <tr><td class="svc">Open Notebook</td><td class="port">5055</td><td class="what">Notebook mode's knowledge base, with SurrealDB and Speaches beside it.</td></tr>
+            <tr><td class="svc">FlightClaw</td><td class="port">8765</td><td class="what">Flight fares from Google Flights' own data feed, as an MCP server.</td></tr>
+            <tr><td class="svc">Cancel service</td><td class="port">tunnel</td><td class="what">cancel.ohmz.cloud: signed links in alerts that pause or cancel a job.</td></tr>
+          </tbody>
+        </table>
+      </div>
+      <div class="doors">
+        <div class="door">
+          <h3>Guest chat · aipublic.ohmz.cloud</h3>
+          <p>“Continue without an account” on the sign-in page opens a second, throwaway Open WebUI. It has no pipes and one model, hermes-genesis:apex-compact, reached through a bridge that only leads to Ollama. Its network has no route to ComfyUI or the agent. 20 messages per IP in any 24 hours.</p>
+        </div>
+        <div class="door">
+          <h3>Claude Code · deepseek harness</h3>
+          <p>A local relay picks the backend from the model name: qwen38-coder:q4-128k on this card (21,857 MiB, 128K context), or the DeepSeek cloud API. <code>/model</code> switches between them mid-session.</p>
+        </div>
+        <div class="door">
+          <h3>OpenCode</h3>
+          <p>Talks to qwen38-coder:q4 on Ollama, the same coder the Assistant uses, and indexes code with bge-m3.</p>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <footer>
+    <p>Built from <code>~/StudioProjects/ai-stack</code> on the homelab: the routing order in <code>pipes/auto_assistant.py</code> (<code>pipe()</code>), model figures in <code>docs/MODELS.md</code>, and the README, HERMES_AGENT, PUBLIC_INSTANCE and FLIGHTCLAW docs. Memory figures are the repo's own nvidia-smi measurements.</p>
+    <p>The README's pipe table is behind the code in two places: it still names Qwen-Image-Edit 2509 for edits and Lustify SDXL for Photoreal. Both moved on 4 Oct 2026, to FireRed-Image-Edit 1.1 and Lustify V10 (Krea 2). This map follows the code.</p>
+  </footer>
+</div>
+
+<script>
+(function () {
+  "use strict";
+
+  var LAYERS = [
+    { id: "door", name: "Door", nodes: [
+      ["d-private", "ai.ohmz.cloud", "Cloudflare tunnel"],
+      ["d-public", "aipublic.ohmz.cloud", "guest, no login"],
+      ["d-term", "Terminal", "Claude Code · OpenCode"] ] },
+    { id: "ui", name: "Interface", nodes: [
+      ["i-owui", "Open WebUI fork", ":4567"],
+      ["i-modes", "Mode buttons", "Internet · Code · Task · Notebook"],
+      ["i-memory", "Adaptive memory", "filter on Assistant"],
+      ["i-picker", "Model picker", "Assistant · Photoreal · Animate"],
+      ["i-public", "Public Open WebUI", "chat only"] ] },
+    { id: "route", name: "Decides", nodes: [
+      ["r-assistant", "Assistant router", "auto_assistant pipe"],
+      ["r-websearch", "Web search", "Open WebUI built-in"],
+      ["r-det", "No-model paths", "jobs · flights · notebooks"],
+      ["r-photoreal", "Photoreal pipe", "photoreal"],
+      ["r-animate", "Animate pipe", "animate_scail"] ] },
+    { id: "llm", name: "Language models", nodes: [
+      ["m-genesis", "hermes-genesis:apex-compact", "chat · vision · prompt writer"],
+      ["m-coder", "qwen38-coder", "q4 · q4-128k"],
+      ["m-small", "gemma3:1b", "titles · tags · code classifier"],
+      ["m-embed", "bge-m3 + reranker", "embeddings · ranking"],
+      ["m-agent", "hermes-genesis:agent", "64K, background agent"] ] },
+    { id: "media", name: "Image & video", nodes: [
+      ["m-redcraft", "RedCraft", "Krea 2 · text to image"],
+      ["m-firered", "FireRed-Image-Edit 1.1", "instruction edits"],
+      ["m-wan", "Wan 2.2", "A14B · 5B · image to video"],
+      ["m-lustify", "Lustify V10", "Krea 2 · Photoreal"],
+      ["m-scail", "SCAIL-2", "Wan 2.1 14B · motion"] ] },
+    { id: "svc", name: "Runs on", nodes: [
+      ["s-ollama", "Ollama", ":11434"],
+      ["s-comfy", "ComfyUI", ":8188"],
+      ["s-hermes", "hermes gateway", ":8642"],
+      ["s-searx", "SearXNG", ":8888 chat · :8889 agent"],
+      ["s-notebook", "Open Notebook", ":5055"],
+      ["s-flight", "FlightClaw", ":8765"],
+      ["s-deliver", "Email + text", "hermes_delivery.py"] ] }
+  ];
+
+  var IN = [["d-private", "i-owui"]];
+  var UC = [
+    { id: "chat", g: "Talk", label: "Ask anything", how: "Type a message on the Assistant.",
+      e: IN.concat([["i-owui", "i-memory"], ["i-memory", "r-assistant"], ["r-assistant", "m-genesis"], ["m-genesis", "s-ollama"], ["r-assistant", "m-small"], ["m-small", "s-ollama"]]),
+      steps: ["A Cloudflare tunnel brings ai.ohmz.cloud to Open WebUI on port 4567.",
+        "Adaptive memory adds what it remembers about you to the message.",
+        "The router finds no picture, video, job or code request, so the turn falls through to chat.",
+        "It waits its place in the GPU queue, then hermes-genesis:apex-compact answers at about 135 tokens a second.",
+        "The same model writes the follow-up suggestions. gemma3:1b writes the chat title and tags."],
+      models: ["hermes-genesis:apex-compact", "gemma3:1b"],
+      time: "Immediate when the model is loaded. About 23 s when something else had pushed it out." },
+    { id: "vision", g: "Talk", label: "Ask about a picture", how: "Attach a photo, or ask about the last picture it made.",
+      e: IN.concat([["i-owui", "r-assistant"], ["r-assistant", "m-genesis"], ["m-genesis", "s-ollama"]]),
+      steps: ["A question about a picture is kept as a question. It isn't turned into an edit.",
+        "The picture is attached to your message, even one the Assistant generated earlier in the chat.",
+        "The coder can't see, so a turn with a picture always goes to the chat model.",
+        "hermes-genesis:apex-compact reads it with its own vision projector. Same model as chat, so no swap."],
+      models: ["hermes-genesis:apex-compact"], time: "Same as chat." },
+    { id: "code", g: "Talk", label: "Write code", how: "Press Code, or just ask a coding question.",
+      e: IN.concat([["i-owui", "i-modes"], ["i-modes", "r-assistant"], ["r-assistant", "m-small"], ["m-small", "s-ollama"], ["r-assistant", "m-coder"], ["m-coder", "s-ollama"]]),
+      steps: ["The Code button sends the turn to the coder. Without it, clear code wording or a yes/no from gemma3:1b decides.",
+        "Pictures still win: “make a picture of a cat” renders even with Code on.",
+        "The chat model is unloaded and qwen38-coder:q4 (Qwen3.8 27B) loads at a fixed 32K context. You see “Loading the coding model…”.",
+        "Going back to chat later costs the same swap the other way."],
+      models: ["qwen38-coder:q4", "gemma3:1b"], time: "6 to 12 s to swap, then it streams." },
+    { id: "web", g: "Talk", label: "Search the web", how: "Press Internet, then ask.",
+      e: IN.concat([["i-owui", "i-modes"], ["i-modes", "r-websearch"], ["r-websearch", "s-searx"], ["r-websearch", "m-embed"], ["m-embed", "s-ollama"], ["r-websearch", "r-assistant"], ["r-assistant", "m-genesis"], ["m-genesis", "s-ollama"]]),
+      steps: ["Open WebUI runs the search on SearXNG at port 8888: DuckDuckGo, Bing, Mojeek, Yandex, Mwmbl and Wikipedia.",
+        "Pages are fetched with the safe web loader and split into chunks.",
+        "bge-m3 embeds the chunks and the reranker keeps the best ones.",
+        "The router still decides on your words alone, so a result that mentions “video” can't start a render.",
+        "hermes-genesis:apex-compact answers with the sources attached."],
+      models: ["hermes-genesis:apex-compact", "bge-m3", "bge-reranker-v2-m3"], time: "A few seconds of searching, then chat speed." },
+
+    { id: "image", g: "Make", label: "Make a picture", how: "“Draw…”, “create an image of…”, or /img.",
+      e: IN.concat([["i-owui", "r-assistant"], ["r-assistant", "m-genesis"], ["m-genesis", "s-ollama"], ["r-assistant", "m-redcraft"], ["m-redcraft", "s-comfy"]]),
+      steps: ["The router sees a picture request with no picture attached.",
+        "hermes-genesis:apex-compact turns a short prompt into a richer one.",
+        "ComfyUI renders it with RedCraft, a Krea 2 model: 1024×1024, 8 steps, cfg 1.0.",
+        "hermes-genesis looks at the result and checks it against your words. A mismatch gets one corrected retry.",
+        "The picture is saved for this chat, so “make it darker” edits it next."],
+      models: ["RedCraft", "hermes-genesis:apex-compact"], time: "About 16 s." },
+    { id: "edit", g: "Make", label: "Edit a picture", how: "Attach one, or describe a change to the last picture.",
+      e: IN.concat([["i-owui", "r-assistant"], ["r-assistant", "m-genesis"], ["m-genesis", "s-ollama"], ["r-assistant", "m-firered"], ["m-firered", "s-comfy"]]),
+      steps: ["The router finds a picture to work on: the one you attached, or the chat's last picture, which is kept on disk and survives restarts.",
+        "It asks you to confirm, because edits are the slowest job on the box.",
+        "hermes-genesis looks at the picture and rewrites your instruction in concrete terms.",
+        "FireRed-Image-Edit 1.1 makes the edit in ComfyUI. The default is 8 steps; style changes and retries use the 20-step tier.",
+        "The check compares the original and the result against your exact words, with one corrected retry."],
+      models: ["FireRed-Image-Edit 1.1", "hermes-genesis:apex-compact"], time: "About 40 s at the default tier, about 150 s at the best tier." },
+    { id: "video", g: "Make", label: "Make a video", how: "“Make a video of…”, or /vid.",
+      e: IN.concat([["i-owui", "r-assistant"], ["r-assistant", "m-genesis"], ["m-genesis", "s-ollama"], ["r-assistant", "m-wan"], ["m-wan", "s-comfy"]]),
+      steps: ["You confirm first, because a render takes minutes.",
+        "hermes-genesis turns a short idea into a detailed video prompt.",
+        "Wan 2.2 A14B renders it in ComfyUI at 16 fps, then frame interpolation doubles it to 32 fps.",
+        "Ask for several shots and it chains up to six 5-second shots. “Fast” uses the smaller Wan 2.2 5B instead.",
+        "A middle frame is checked against your request. “Make it longer” re-renders with the same seed, so the scene stays."],
+      models: ["Wan 2.2 A14B", "Wan 2.2 5B", "hermes-genesis:apex-compact"], time: "Minutes." },
+    { id: "animate", g: "Make", label: "Animate a picture", how: "A picture in the chat, then “animate this” or “make it move”.",
+      e: IN.concat([["i-owui", "r-assistant"], ["r-assistant", "m-wan"], ["m-wan", "s-comfy"]]),
+      steps: ["The router sees a picture and a motion request that points at it.",
+        "“Make it a cartoon” is a style edit instead, and goes to the edit path.",
+        "You confirm the render.",
+        "Wan 2.2 image-to-video moves that picture the way your words describe."],
+      models: ["Wan 2.2 I2V"], time: "Minutes." },
+    { id: "photoreal", g: "Make", label: "Photoreal", how: "Pick Photoreal in the model picker.",
+      e: IN.concat([["i-owui", "i-picker"], ["i-picker", "r-photoreal"], ["r-photoreal", "m-genesis"], ["m-genesis", "s-ollama"], ["r-photoreal", "m-lustify"], ["m-lustify", "s-comfy"], ["r-photoreal", "m-firered"], ["m-firered", "s-comfy"]]),
+      steps: ["A separate pipe. The Assistant can't reach this model.",
+        "hermes-genesis writes the prompt. It was chosen partly because it didn't refuse any of the five prompt-writing tests.",
+        "Lustify V10 (Krea 2) renders it at 8 steps, cfg 1.0.",
+        "Edits, text-only follow-ups included, go through FireRed-Image-Edit so the person stays the same.",
+        "No vision check on this pipe. It offers seed control and per-job stats instead."],
+      models: ["Lustify V10", "FireRed-Image-Edit 1.1", "hermes-genesis:apex-compact"], time: "Seconds for a new picture." },
+    { id: "motion", g: "Make", label: "Dance, wave or walk", how: "Pick Animate, attach a full-body picture, name a motion.",
+      e: IN.concat([["i-owui", "i-picker"], ["i-picker", "r-animate"], ["r-animate", "m-scail"], ["m-scail", "s-comfy"]]),
+      steps: ["Your words only choose the motion: dance, wave or walk. They aren't a prompt.",
+        "SCAIL-2 moves your character with that motion and keeps how it looks.",
+        "It frees GPU memory when it's done."],
+      models: ["SCAIL-2"], time: "About 3 minutes for a 2-second clip." },
+
+    { id: "notebook", g: "Know", label: "Ask a notebook", how: "Press Notebook and name the notebook in your question.",
+      e: IN.concat([["i-owui", "i-modes"], ["i-modes", "r-assistant"], ["r-assistant", "r-det"], ["r-det", "s-notebook"]]),
+      steps: ["The notebook is picked by matching its name against your words. No model guesses.",
+        "If the name is unclear, it offers the closest matches and waits for you to pick.",
+        "Open Notebook on port 5055 answers from that notebook's sources, with citations.",
+        "The chat remembers the notebook, so later questions don't need to name it.",
+        "If the notebook has no sources or Open Notebook is down, it says so instead of falling back to plain chat."],
+      models: ["Open Notebook's own models"], time: "Seconds, or up to about 2 minutes if its models were unloaded." },
+    { id: "research", g: "Know", label: "Research once", how: "/research or /agent, then the question.",
+      e: IN.concat([["i-owui", "r-assistant"], ["r-assistant", "m-agent"], ["m-agent", "s-hermes"], ["m-agent", "s-searx"]]),
+      steps: ["The slash command hands the question to the hermes agent with a research brief.",
+        "The chat model is unloaded first so the agent's model has room.",
+        "The agent searches through SearXNG on port 8889, reads pages, and can use files, memory and a to-do list. It can't run shell commands.",
+        "Its answer streams back into the chat."],
+      models: ["hermes-genesis:agent"], time: "Up to 5 minutes, then about 23 s for chat to reload." },
+    { id: "flight", g: "Know", label: "Find a flight", how: "“Cheapest flight Toronto to Vancouver in October.”",
+      e: IN.concat([["i-owui", "r-assistant"], ["r-assistant", "r-det"], ["r-det", "s-flight"]]),
+      steps: ["Code reads the dates and airports. A season or a holiday isn't a date, so it asks.",
+        "A form in the chat collects anything missing.",
+        "FlightClaw on port 8765 asks Google Flights' own data feed for fares.",
+        "You get real fares with booking links. A model never types a price."],
+      models: ["none"], time: "Up to about 75 s per search." },
+
+    { id: "job", g: "Automate", label: "Watch something", how: "Press Task, or “track the price of… every day”.",
+      e: IN.concat([["i-owui", "i-modes"], ["i-modes", "r-assistant"], ["r-assistant", "m-agent"], ["m-agent", "s-hermes"], ["m-agent", "s-searx"], ["s-hermes", "s-deliver"]]),
+      steps: ["You confirm the job. If it should text you and there's no number yet, it asks for one first.",
+        "The agent on hermes gateway (port 8642) creates a cron job. The pipe checks the scheduler really has it.",
+        "Each run waits until the GPU is free, then runs on hermes-genesis:agent with a 64K context.",
+        "The job ends with a LOG line, plus an ALERT line when your condition is met.",
+        "hermes_delivery.py checks every minute and sends the email and text, with cancel and pause links."],
+      models: ["hermes-genesis:agent"], time: "One agent turn to create it. Runs follow the schedule." },
+    { id: "manage", g: "Automate", label: "List or cancel jobs", how: "“List my tasks”, “pause the second one”, “cancel the RTX one”.",
+      e: IN.concat([["i-owui", "r-assistant"], ["r-assistant", "r-det"], ["r-det", "s-hermes"]]),
+      steps: ["Answered straight from the scheduler's API. No model runs and nothing gets unloaded.",
+        "You only see your own jobs.",
+        "Cancelling deletes the job's output, so it needs a clear yes on a second turn. “ok” on its own doesn't count."],
+      models: ["none"], time: "One local request." },
+
+    { id: "terminal", g: "Other doors", label: "Code from a terminal", how: "Claude Code through the deepseek harness, or OpenCode.",
+      e: [["d-term", "m-coder"], ["m-coder", "s-ollama"]],
+      steps: ["OpenCode talks to qwen38-coder:q4 on Ollama and indexes code with bge-m3.",
+        "Claude Code goes through the deepseek harness, a local relay that picks the backend from the model name.",
+        "Locally that's qwen38-coder:q4-128k: the same weights with a 128K context. The other choice is the DeepSeek cloud API.",
+        "None of this passes through Open WebUI, but it uses the same card."],
+      models: ["qwen38-coder:q4", "qwen38-coder:q4-128k"], time: "Model load, then it streams." },
+    { id: "guest", g: "Other doors", label: "Guest chat", how: "“Continue without an account” on the sign-in page.",
+      e: [["d-public", "i-public"], ["i-public", "m-genesis"], ["m-genesis", "s-ollama"]],
+      steps: ["aipublic.ohmz.cloud is a second, throwaway Open WebUI with no pipes.",
+        "Each visitor gets a temporary identity from the nginx gate.",
+        "One model, hermes-genesis:apex-compact, through a bridge that only leads to Ollama.",
+        "Its network has no route to ComfyUI or the agent, so it can't make pictures or jobs.",
+        "20 messages per IP in any 24 hours."],
+      models: ["hermes-genesis:apex-compact"], time: "Chat speed." }
+  ];
+
+  var LADDER = [
+    ["Open WebUI's own housekeeping: titles, tags, follow-up prompts", "gemma3:1b, as plain text", "Keeps those prompts from ever starting a render or the router."],
+    ["Task button is on", "hermes agent", "Takes the whole turn, so “draw a cat” goes to the agent."],
+    ["Notebook button is on", "Open Notebook", "Never falls back to plain chat while the button says Notebook."],
+    ["A picture in the chat, plus “animate this”", "Wan 2.2 image-to-video", "Your words direct the motion.", true],
+    ["“Make a video of…”", "Wan 2.2 A14B (5B when fast)", "Several shots chain up to six 5-second clips."],
+    ["“Draw / create a picture of…”", "RedCraft", "A new picture, even mid-conversation."],
+    ["A change to the last video", "Wan 2.2, same seed", "“Make it longer” re-renders the same scene."],
+    ["A change to a picture in the chat", "FireRed-Image-Edit 1.1", "Uses the attached picture or the chat's last one."],
+    ["A reply to an open flight form", "Flight form", "Handled first so “cancel” there can't touch a real job.", true],
+    ["List, pause or cancel my jobs", "Scheduler API, no model", "Only your own jobs. Deleting needs a second-turn yes."],
+    ["/research, a phone number reply, a flight question, a job change, or a new watch with a schedule", "hermes agent or FlightClaw", "New jobs are confirmed and checked against the scheduler."],
+    ["Code button, code wording, or gemma3:1b says it's code", "qwen38-coder:q4", "Skipped when a picture is in play.", true],
+    ["Anything else", "hermes-genesis:apex-compact", "With the picture attached if one is in play."]
+  ];
+
+  var CARD = 24576, CEIL = 24115;
+  var LEDGER = [
+    ["hermes-genesis:apex-compact", "chat, vision, prompt writer", 18285, "18,285 MiB"],
+    ["hermes-genesis:agent", "background agent, 64K context", 17408, "~17 GB", "est"],
+    ["qwen38-coder:q4", "coder at 32K", 16881, "16,881 MiB"],
+    ["qwen38-coder:q4-128k", "Claude Code, 128K (card total)", 21857, "21,857 MiB"],
+    ["gemma3:1b", "titles, tags, code classifier", 1313, "1,313 MiB"],
+    ["bge-m3", "embeddings, loads when needed", 941, "~941 MiB"],
+    ["ComfyUI, idle", "nothing loaded", 444, "444 MiB"],
+    ["ComfyUI, rendering", "RedCraft, FireRed, Wan, SCAIL", [12288, CARD], "12–25 GB", "range"]
+  ];
+
+  function el(tag, cls, text) { var n = document.createElement(tag); if (cls) n.className = cls; if (text != null) n.textContent = text; return n; }
+
+  // Map
+  var map = document.getElementById("map");
+  var svg = document.getElementById("wires");
+  LAYERS.forEach(function (L) {
+    var row = el("div", "layer");
+    row.appendChild(el("div", "lname", L.name));
+    var box = el("div", "nodes");
+    L.nodes.forEach(function (n) {
+      var d = el("div", "node"); d.id = n[0];
+      d.appendChild(el("div", "nm", n[1]));
+      d.appendChild(el("div", "sub", n[2]));
+      box.appendChild(d);
+    });
+    row.appendChild(box);
+    map.appendChild(row);
+  });
+
+  // Picker
+  var picker = document.getElementById("picker");
+  var groups = {};
+  UC.forEach(function (u) {
+    if (!groups[u.g]) {
+      var g = el("div", "pgroup");
+      g.appendChild(el("span", "glabel", u.g));
+      picker.appendChild(g);
+      groups[u.g] = g;
+    }
+    var b = el("button", "uc", u.label);
+    b.type = "button"; b.id = "uc-" + u.id; b.dataset.id = u.id;
+    b.setAttribute("aria-pressed", "false");
+    b.addEventListener("click", function () { select(u.id); });
+    groups[u.g].appendChild(b);
+  });
+
+  var current = null;
+  function select(id) {
+    var u = UC.filter(function (x) { return x.id === id; })[0] || UC[0];
+    current = u;
+    Array.prototype.forEach.call(picker.querySelectorAll(".uc"), function (b) {
+      b.setAttribute("aria-pressed", b.dataset.id === u.id ? "true" : "false");
+    });
+    var on = {};
+    u.e.forEach(function (p) { on[p[0]] = 1; on[p[1]] = 1; });
+    Array.prototype.forEach.call(map.querySelectorAll(".node"), function (n) {
+      n.classList.toggle("on", !!on[n.id]);
+    });
+    var s = document.getElementById("steps");
+    s.innerHTML = "";
+    s.appendChild(el("h3", null, u.label));
+    s.appendChild(el("p", "how", u.how));
+    var ol = el("ol");
+    u.steps.forEach(function (t) { ol.appendChild(el("li", null, t)); });
+    s.appendChild(ol);
+    var k1 = el("div", "kv");
+    k1.appendChild(el("span", "k", "Models"));
+    var chips = el("div", "chips");
+    u.models.forEach(function (m) { chips.appendChild(el("span", "chip", m)); });
+    k1.appendChild(chips);
+    s.appendChild(k1);
+    var k2 = el("div", "kv");
+    k2.appendChild(el("span", "k", "How long"));
+    k2.appendChild(el("span", null, u.time));
+    s.appendChild(k2);
+    draw();
+  }
+
+  var NS = "http://www.w3.org/2000/svg";
+  function draw() {
+    if (!current) return;
+    while (svg.firstChild) svg.removeChild(svg.firstChild);
+    var box = map.getBoundingClientRect();
+    svg.setAttribute("viewBox", "0 0 " + box.width + " " + box.height);
+    current.e.forEach(function (p) {
+      var a = document.getElementById(p[0]), b = document.getElementById(p[1]);
+      if (!a || !b) return;
+      var ra = a.getBoundingClientRect(), rb = b.getBoundingClientRect();
+      var ax = ra.left + ra.width / 2 - box.left, bx = rb.left + rb.width / 2 - box.left;
+      var d, x1, y1, x2, y2;
+      if (rb.top >= ra.bottom - 4) {
+        x1 = ax; y1 = ra.bottom - box.top; x2 = bx; y2 = rb.top - box.top;
+        var dy = Math.max(14, (y2 - y1) * 0.5);
+        d = "M" + x1 + " " + y1 + " C" + x1 + " " + (y1 + dy) + " " + x2 + " " + (y2 - dy) + " " + x2 + " " + y2;
+      } else if (ra.top >= rb.bottom - 4) {
+        x1 = ax; y1 = ra.top - box.top; x2 = bx; y2 = rb.bottom - box.top;
+        var du = Math.max(14, (y1 - y2) * 0.5);
+        d = "M" + x1 + " " + y1 + " C" + x1 + " " + (y1 - du) + " " + x2 + " " + (y2 + du) + " " + x2 + " " + y2;
+      } else {
+        x1 = ax; y1 = ra.bottom - box.top; x2 = bx; y2 = rb.bottom - box.top;
+        var low = Math.max(y1, y2) + 16;
+        d = "M" + x1 + " " + y1 + " C" + x1 + " " + low + " " + x2 + " " + low + " " + x2 + " " + y2;
+      }
+      var path = document.createElementNS(NS, "path");
+      path.setAttribute("d", d); path.setAttribute("class", "wire"); path.setAttribute("fill", "none");
+      svg.appendChild(path);
+      [[x1, y1], [x2, y2]].forEach(function (pt) {
+        var c = document.createElementNS(NS, "circle");
+        c.setAttribute("cx", pt[0]); c.setAttribute("cy", pt[1]); c.setAttribute("r", "2.6");
+        c.setAttribute("class", "wire-dot"); c.setAttribute("fill", "currentColor");
+        svg.appendChild(c);
+      });
+    });
+  }
+
+  if (window.ResizeObserver) new ResizeObserver(function () { draw(); }).observe(map);
+  window.addEventListener("resize", draw);
+  if (document.fonts && document.fonts.ready) document.fonts.ready.then(draw);
+
+  // Ladder
+  var lad = document.getElementById("ladder");
+  var head = el("div", "rung head");
+  ["#", "When", "Goes to", "Note"].forEach(function (t) { head.appendChild(el("span", null, t)); });
+  lad.appendChild(head);
+  LADDER.forEach(function (r, i) {
+    var row = el("div", "rung" + (r[3] ? " group-start" : ""));
+    row.appendChild(el("span", "n", String(i + 1).padStart(2, "0")));
+    row.appendChild(el("span", null, r[0]));
+    row.appendChild(el("span", "to", r[1]));
+    row.appendChild(el("span", "why", r[2]));
+    lad.appendChild(row);
+  });
+
+  // Ledger
+  var led = document.getElementById("ledger");
+  var axis = el("div", "axis");
+  axis.appendChild(el("div", "spacer"));
+  var ticks = el("div", "ticks");
+  [0, 6, 12, 18, 24].forEach(function (g) {
+    var s = el("span", null, g + " GB"); s.style.left = (g * 1024 / CARD * 100) + "%"; ticks.appendChild(s);
+  });
+  axis.appendChild(ticks);
+  axis.appendChild(el("div"));
+  led.appendChild(axis);
+  LEDGER.forEach(function (r) {
+    var row = el("div", "lrow");
+    var who = el("div", "who");
+    who.appendChild(el("div", "t", r[0]));
+    who.appendChild(el("div", "r", r[1]));
+    row.appendChild(who);
+    var tr = el("div", "track");
+    var bar = el("div", "bar" + (r[4] ? " " + r[4] : ""));
+    if (Array.isArray(r[2])) {
+      bar.style.left = (r[2][0] / CARD * 100) + "%";
+      bar.style.width = ((r[2][1] - r[2][0]) / CARD * 100) + "%";
+    } else {
+      bar.style.width = (r[2] / CARD * 100) + "%";
+    }
+    tr.appendChild(bar);
+    var cap = el("div", "cap"); cap.style.left = (CEIL / CARD * 100) + "%"; tr.appendChild(cap);
+    row.appendChild(tr);
+    row.appendChild(el("div", "mib", r[3]));
+    led.appendChild(row);
+  });
+
+  var start = (location.hash || "").replace("#", "");
+  select(UC.some(function (u) { return u.id === start; }) ? start : "image");
+})();
+</script>
+</body>
+</html>

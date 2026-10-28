@@ -36,6 +36,107 @@ tests/       unit tests, live QA harnesses and the eval suite
 docs/        runbooks, setup, model notes, QA plan
 ```
 
+## Stack map
+
+How a request gets from the address you open to the model that answers it. There is an
+interactive version in [docs/STACK_MAP.html](docs/STACK_MAP.html): pick a use case and its path
+lights up, with the routing order, measured VRAM and the background-job pipeline under it. GitHub
+shows that file as source, so open it from a checkout in a browser.
+
+```mermaid
+flowchart TD
+  subgraph doors["Ways in"]
+    priv["ai.ohmz.cloud<br/>Cloudflare tunnel"]
+    pub["aipublic.ohmz.cloud<br/>guest, chat only, no pipes"]
+    term["Terminal<br/>Claude Code · OpenCode"]
+  end
+
+  subgraph owui["Open WebUI fork :4567"]
+    modes["Mode buttons<br/>Internet · Code · Task · Notebook"]
+    mem["adaptive_memory"]
+    web["Built-in web search"]
+  end
+
+  router{"Assistant<br/>auto_assistant router"}
+  photo["Photoreal pipe"]
+  anim["Animate pipe"]
+  det["No-model paths<br/>list or cancel jobs · flight form · notebook match"]
+
+  subgraph ollama["Ollama :11434"]
+    genesis["hermes-genesis:apex-compact<br/>chat · vision · prompt writer"]
+    coder["qwen38-coder<br/>q4 32K · q4-128k"]
+    small["gemma3:1b<br/>titles · code classifier"]
+    embed["bge-m3"]
+    agentm["hermes-genesis:agent<br/>64K, background"]
+  end
+
+  subgraph comfy["ComfyUI :8188"]
+    red["RedCraft<br/>new picture"]
+    fire["FireRed-Image-Edit 1.1<br/>edits"]
+    wan["Wan 2.2<br/>video · animate"]
+    lust["Lustify V10<br/>Photoreal"]
+    scail["SCAIL-2<br/>dance · wave · walk"]
+  end
+
+  subgraph svc["Services"]
+    searx["SearXNG<br/>:8888 chat · :8889 agent"]
+    hermes["hermes gateway :8642"]
+    nb["Open Notebook :5055"]
+    fc["FlightClaw :8765"]
+    deliver["hermes_delivery.py<br/>email + text"]
+  end
+
+  priv --> owui
+  owui -->|Assistant| router
+  owui -->|Photoreal| photo
+  owui -->|Animate| anim
+  web --> searx
+  web --> embed
+  router -->|chat, vision, code, titles| ollama
+  router -->|picture, edit, video| comfy
+  router -->|Task, watches, /research| hermes
+  router --> det
+  det --> hermes
+  det --> nb
+  det --> fc
+  hermes -->|runs on| agentm
+  hermes --> deliver
+  photo --> lust
+  photo --> fire
+  photo -->|prompt| genesis
+  anim --> scail
+  pub --> genesis
+  term --> coder
+```
+
+| You do | What happens | Models |
+|---|---|---|
+| Ask anything | Router falls through to chat, inside the GPU queue | `hermes-genesis:apex-compact`; titles and tags on `gemma3:1b` |
+| Ask about a picture | The picture is attached to the turn and never goes to the coder | `hermes-genesis:apex-compact` (its own vision projector) |
+| Write code (Code button, or code wording) | Full model swap, 6-12 s | `qwen38-coder:q4` at 32K; `gemma3:1b` classifies when no button is pressed |
+| Search the web (Internet) | SearXNG `:8888`, then embeddings and the reranker, then chat | `bge-m3`, `bge-reranker-v2-m3` (CPU), the chat model |
+| Make a picture | Prompt expanded, rendered, vision-checked against the request, one corrected retry. ~16 s | RedCraft (Krea 2), 1024×1024, 8 steps |
+| Edit a picture | Confirmed, instruction rewritten from the picture, edited, both images checked against your words | FireRed-Image-Edit 1.1 (8-step default, 20-step `best`) |
+| Make or animate a video | Confirmed, prompt expanded, rendered, a middle frame checked | Wan 2.2 A14B; 5B when fast; I2V to animate a picture |
+| Photoreal (picker) | Its own pipe, no vision check; edits keep the same person | Lustify V10 (Krea 2); edits on FireRed; prompt by `hermes-genesis:apex-compact` |
+| Animate (picker) | Your words pick dance, wave or walk. ~3 min for a 2 s clip | SCAIL-2 (Wan 2.1 14B) |
+| Ask a notebook (Notebook) | Notebook chosen by name match, never a model's guess | Open Notebook `:5055` |
+| Watch something (Task, or "track … every …") | Confirmed, cron job made on hermes `:8642` and checked against the scheduler, delivered by `hermes_delivery.py` | `hermes-genesis:agent` (64K) |
+| List, pause or cancel jobs | Answered from the scheduler's REST API | none |
+| Find a flight | Dates and airports parsed in code, fares from FlightClaw `:8765` | none |
+| `/research` | One agent turn with the research brief | `hermes-genesis:agent` |
+
+The Assistant tries these in order and the first match wins: OpenWebUI's own title and tag
+prompts (answered on `gemma3:1b`), the Task button, the Notebook button, animate a picture, a new
+video, a new picture, a change to the last video, a change to a picture in the chat, a reply to an
+open flight form, job listing and cancelling, the agent paths (`/research`, a phone-number reply, a
+flight question, a job change, a new watch), code, and finally chat. It routes on the user's own
+words only, never on injected RAG or web-search context.
+
+Read from `pipe()` in `pipes/auto_assistant.py` and from [docs/MODELS.md](docs/MODELS.md) on
+2026-10-28. The Pipes table below still names Qwen-Image-Edit 2509 and Lustify SDXL; both were
+replaced on 2026-10-04, and this section follows the code.
+
 ## Pipes
 
 The Function column is the OpenWebUI function id — what `scripts/deploy_pipe.py` takes and what
@@ -553,6 +654,7 @@ Methodology and the current baseline: [docs/QA_TEST_PLAN.md](docs/QA_TEST_PLAN.m
 | | |
 |---|---|
 | [STACK_SETUP.md](docs/STACK_SETUP.md) | How the stack is put together |
+| [STACK_MAP.html](docs/STACK_MAP.html) | Interactive map: follow one request through the stack, open it in a browser |
 | [PUBLIC_INSTANCE.md](docs/PUBLIC_INSTANCE.md) | The no-login public instance: gate mechanism, isolation, bootstrap order |
 | [HERMES_AGENT.md](docs/HERMES_AGENT.md) | Standing jobs: what runs, why, how to undo it |
 | [MODELS.md](docs/MODELS.md) | Model roles, measured VRAM, the consolidation |
