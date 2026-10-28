@@ -105,6 +105,7 @@ NODE_MAJOR="$(node -p 'process.versions.node.split(".")[0]')"
 [[ -r "${HERE}/hooks/git-guardrails.py" ]]            || die "missing ${HERE}/hooks/git-guardrails.py"
 [[ -r "${HERE}/commands/pr-ready.md" ]]               || die "missing ${HERE}/commands/pr-ready.md"
 [[ -r "${HERE}/rules/security-audit-policy.md" ]]     || die "missing ${HERE}/rules/security-audit-policy.md"
+[[ -r "${HERE}/rules/subagent-model-policy.md" ]]     || die "missing ${HERE}/rules/subagent-model-policy.md"
 
 # -- plugins ------------------------------------------------------------------
 
@@ -149,6 +150,7 @@ chmod +x "${HERE}/hooks/git-guardrails.py"
 ln -sfn "${HERE}/commands/pr-ready.md" "${COMMANDS_DIR}/pr-ready.md"
 ln -sfn "$SECURITY_AUDIT_DIR" "${SKILLS_DIR}/security-audit"
 ln -sfn "${HERE}/rules/security-audit-policy.md" "${RULES_DIR}/security-audit-policy.md"
+ln -sfn "${HERE}/rules/subagent-model-policy.md" "${RULES_DIR}/subagent-model-policy.md"
 
 # -- merge the hook into settings.json ----------------------------------------
 

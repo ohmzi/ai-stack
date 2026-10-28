@@ -178,6 +178,24 @@ else
   export ANTHROPIC_DEFAULT_HAIKU_MODEL="$FAST_MODEL"
 fi
 
+# Two kinds of traffic are named explicitly rather than left to the slots above.
+#
+# The auto-mode classifier is a safety control, and the slot it reads is not the one
+# the table above assumes: in this release its calls arrive asking for the *sonnet*
+# model (router log 2026-10-06: qwen38-coder:q4-128k, max_tokens=2112). A cloud
+# session's every shell command was therefore being checked by the 3090, and when
+# Ollama stopped (Stopping ollama.service, 21:31:52) the classifier could not answer
+# and auto mode refused all Bash as a group. Pinning it to $CLOUD_MODEL keeps the
+# check alive whatever the local backend is doing; the cost is that a --local session
+# now sends its classifier prompts to the cloud too, so change this to "$FAST_MODEL"
+# if local-only traffic matters more than the check surviving an idle GPU.
+#
+# Subagents are pinned to the haiku slot for the same reason: it follows the launch
+# provider, so a cloud session keeps them on the cloud model instead of inheriting
+# whatever the main model happens to be.
+export CLAUDE_CODE_AUTO_MODE_MODEL="$CLOUD_MODEL"
+export CLAUDE_CODE_SUBAGENT_MODEL="haiku"
+
 # --model is passed explicitly, not left to ANTHROPIC_MODEL above. Both paths end in
 # the same binary reading the same ~/.claude/settings.json, and `model` there outranks
 # the environment. A `/model` change in a stock `claude` session writes that key, and it
