@@ -118,7 +118,7 @@ flowchart TD
 | Make a picture | Prompt expanded, rendered, vision-checked against the request, one corrected retry. ~16 s | RedCraft (Krea 2), 1024×1024, 8 steps |
 | Edit a picture | Confirmed, instruction rewritten from the picture, edited, both images checked against your words | FireRed-Image-Edit 1.1 (8-step default, 20-step `best`) |
 | Make or animate a video | Confirmed, prompt expanded, rendered, a middle frame checked | Wan 2.2 A14B; 5B when fast; I2V to animate a picture |
-| Photoreal (picker) | Its own pipe, no vision check; edits keep the same person | Lustify V10 (Krea 2); edits on FireRed; prompt by `hermes-genesis:apex-compact` |
+| Photoreal (picker) | Its own pipe, the only one that loads Lustify. A picture it made is re-rendered from its own prompt and seed with the change folded in; an uploaded photo is edited on FireRed. Both are checked against your words with one corrected retry | Lustify V10 (Krea 2); FireRed-Image-Edit 1.1 for uploads; prompt and check by `hermes-genesis:apex-compact` |
 | Animate (picker) | Your words pick dance, wave or walk. ~3 min for a 2 s clip | SCAIL-2 (Wan 2.1 14B) |
 | Ask a notebook (Notebook) | Notebook chosen by name match, never a model's guess | Open Notebook `:5055` |
 | Watch something (Task, or "track … every …") | Confirmed, cron job made on hermes `:8642` and checked against the scheduler, delivered by `hermes_delivery.py` | `hermes-genesis:agent` (64K) |
@@ -134,8 +134,8 @@ flight question, a job change, a new watch), code, and finally chat. It routes o
 words only, never on injected RAG or web-search context.
 
 Read from `pipe()` in `pipes/auto_assistant.py` and from [docs/MODELS.md](docs/MODELS.md) on
-2026-10-28. The Pipes table below still names Qwen-Image-Edit 2509 and Lustify SDXL; both were
-replaced on 2026-10-04, and this section follows the code.
+2026-10-28. The Pipes table below still names Qwen-Image-Edit 2509 for the Assistant and Image
+pipes; FireRed-Image-Edit 1.1 replaced it on 2026-10-04, and this section follows the code.
 
 ## Pipes
 
@@ -147,7 +147,7 @@ things and have drifted apart before.
 |---|---|---|
 | `auto_assistant` | Assistant | One entry that routes by intent: chat (with vision when an image is in play), automatic coder routing, a RedCraft image (create, or edit via Qwen-Image-Edit), a Wan 2.2 video (text-to-video, image-to-video, or a multi-shot sequence), standing background jobs through the local hermes agent, a deterministic job-management path answered from `/api/jobs` rather than delegated, and a flight path that answers from parsed slots instead of letting a fare reach the chat model. Vision-QA on stills and video frames, a confirmation step before a video render, and VRAM choreography around every job. |
 | `image_krea` | *(hidden)* | RedCraft (Krea 2 base) text-to-image + Qwen-Image-Edit 2509 instruction editing, optional trained LoRA, local prompt-enhance and vision-grounded edit-rewrite, two-round vision-QA correction. Hidden from the picker on 2026-08-02 — the Assistant covers the same two jobs. Restore by setting `image_krea.krea2` active in the `model` table. |
-| `photoreal` | Photoreal | Photorealistic text-to-image on its own SDXL checkpoint. Edits — including text-only follow-ups on the previous picture — run through Qwen-Image-Edit via the shared `identity_edit` module so the subject stays the same person, with an SDXL img2img fallback when Qwen is unavailable. |
+| `photoreal` | Photoreal | Photorealistic, uncensored text-to-image on Lustify V10 (Krea 2), which no other pipe loads. A follow-up on a picture it made is re-rendered from that picture's own prompt and seed with the change folded in (`OWN_PICTURES`). An uploaded photo is edited on FireRed-Image-Edit 1.1 via the shared `identity_edit` module so the subject stays the same person, and never goes through the uncensored img2img path. Every edit is rewritten from the picture, checked against the request as typed, and retried once on a miss (2026-10-28). |
 | `animate_scail` | Animate | SCAIL-2 (Wan 2.1 14B GGUF) motion transfer: attach a full-body character image and name one of three built-in motions — dance, wave or walk. Your text picks the motion; it is not a prompt. ~2 s clip, ~3 min. |
 | `flux_image` | *(disabled)* | FLUX.1-dev text-to-image. Kept deployed and byte-current for rollback; not selectable in the UI. |
 
@@ -172,8 +172,8 @@ Highlights:
 - **Vision-QA** verification against the request on the Assistant and Image
   pipes, with a corrected retry. Edits are judged on *both* images — original and
   result — against the user's original wording, so a rewrite that drifted off the
-  subject fails instead of passing. (Photoreal does not verify — it trades that
-  for seed control and per-job metrics.)
+  subject fails instead of passing. Photoreal checks its edits the same way since
+  2026-10-28; its new pictures are still not checked.
 - **One queue for all GPU work (2026-10-04)** — plain chat now takes the same generation lock as
   the media pipelines, so a turn arriving mid-render **waits its turn** ("Waiting for the GPU…
   1m 20s") instead of contending. Contending was not free: an 18 GB chat tenant and a 12–25 GB
