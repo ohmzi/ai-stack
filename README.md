@@ -5,6 +5,13 @@ that does more than chat: it routes between local chat/image/video models,
 watches things on a schedule and texts you when they happen, and is measured by
 a repeatable eval suite instead of vibes.
 
+<p align="center">
+  <img src="docs/assets/mobile.webp" alt="Ohmz AI on a phone: the sign-in screen with guest access, a coding answer with a highlighted Python block, and the explanation table that follows" width="100%">
+</p>
+<p align="center">
+  <em>The Ohmz AI skin on a phone, from the public guest instance (see <a href="#public-instance">Public instance</a>).</em>
+</p>
+
 **The pipes and filters need no fork** — they install from *Workspace → Functions* as database rows
 and run on the stock Python backend, which is what keeps them portable. The **frontend** is a
 different story: this host runs a local fork, `ai-stack/open-webui:task-mode`, that adds four
