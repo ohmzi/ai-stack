@@ -11,6 +11,12 @@ a repeatable eval suite instead of vibes.
 <p align="center">
   <em>The Ohmz AI skin on a phone, from the public guest instance (see <a href="#public-instance">Public instance</a>).</em>
 </p>
+<p align="center">
+  <img src="docs/assets/desktop-chat.webp" alt="An Ohmz AI conversation on desktop: a question about processes and threads, its answer, and a follow-up asking which to use for a Python web scraper, answered with a short ThreadPoolExecutor example" width="100%">
+</p>
+<p align="center">
+  <em>The same on desktop: a question, a follow-up, and an answer with code.</em>
+</p>
 
 **The pipes and filters need no fork** — they install from *Workspace → Functions* as database rows
 and run on the stock Python backend, which is what keeps them portable. The **frontend** is a
