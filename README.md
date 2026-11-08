@@ -6,7 +6,7 @@ watches things on a schedule and texts you when they happen, and is measured by
 a repeatable eval suite instead of vibes.
 
 <p align="center">
-  <img src="docs/assets/mobile.webp" alt="Ohmz AI on a phone: the sign-in screen with guest access, a coding answer with a highlighted Python block, and the explanation table that follows" width="100%">
+  <img src="docs/assets/mobile.webp" alt="Ohmz AI on a phone: the sign-in screen with guest access, a coding answer with a highlighted Python block, and a conversation with a follow-up question and its answer" width="100%">
 </p>
 <p align="center">
   <em>The Ohmz AI skin on a phone, from the public guest instance (see <a href="#public-instance">Public instance</a>).</em>
